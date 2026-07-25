@@ -1,0 +1,112 @@
+import type { Project } from '@/types'
+
+const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
+const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
+
+function hasElectron(): boolean {
+  return typeof window !== 'undefined' && !!window.kibo
+}
+
+export function serializeProject(project: Project): string {
+  return JSON.stringify(project, null, 2)
+}
+
+export function deserializeProject(json: string): Project {
+  return JSON.parse(json) as Project
+}
+
+export async function saveProjectAs(project: Project): Promise<string | null> {
+  const json = serializeProject(project)
+  const suggested = `${project.name.replace(/[^a-z0-9 _-]/gi, '_')}.json`
+  if (hasElectron()) {
+    const result = await window.kibo!.saveProjectAs(json, suggested)
+    return result.canceled ? null : (result.filePath ?? null)
+  }
+  downloadTextFile(json, suggested)
+  return suggested
+}
+
+export async function saveProjectToPath(filePath: string, project: Project): Promise<void> {
+  const json = serializeProject(project)
+  if (hasElectron()) {
+    await window.kibo!.saveProjectToPath(filePath, json)
+    return
+  }
+  localStorage.setItem(LOCAL_STORAGE_PATH_KEY, filePath)
+  downloadTextFile(json, filePath)
+}
+
+export async function openProjectDialog(): Promise<{ project: Project; filePath: string } | null> {
+  if (hasElectron()) {
+    const result = await window.kibo!.openProject()
+    if (result.canceled || !result.json) return null
+    return { project: deserializeProject(result.json), filePath: result.filePath ?? '' }
+  }
+  return openProjectFilePicker()
+}
+
+function openProjectFilePicker(): Promise<{ project: Project; filePath: string } | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'application/json'
+    input.onchange = () => {
+      const file = input.files?.[0]
+      if (!file) return resolve(null)
+      const reader = new FileReader()
+      reader.onload = () => resolve({ project: deserializeProject(String(reader.result)), filePath: file.name })
+      reader.readAsText(file)
+    }
+    input.click()
+  })
+}
+
+export async function autosaveWrite(project: Project): Promise<void> {
+  const json = serializeProject(project)
+  if (hasElectron()) {
+    await window.kibo!.autosaveWrite(json)
+    return
+  }
+  try {
+    localStorage.setItem(LOCAL_STORAGE_KEY, json)
+  } catch {
+    // Ignore quota errors — autosave is best-effort.
+  }
+}
+
+export async function autosaveRead(): Promise<Project | null> {
+  if (hasElectron()) {
+    const result = await window.kibo!.autosaveRead()
+    return result.exists && result.json ? deserializeProject(result.json) : null
+  }
+  const json = localStorage.getItem(LOCAL_STORAGE_KEY)
+  return json ? deserializeProject(json) : null
+}
+
+export async function exportFile(defaultName: string, contents: string, extensions: string[]): Promise<boolean> {
+  if (hasElectron()) {
+    const result = await window.kibo!.exportSaveFile(defaultName, contents, [{ name: 'Export', extensions }])
+    return !result.canceled
+  }
+  downloadTextFile(contents, defaultName)
+  return true
+}
+
+export async function importJsonDialog(): Promise<string | null> {
+  if (hasElectron()) {
+    const result = await window.kibo!.importOpenJson()
+    return result.canceled ? null : (result.json ?? null)
+  }
+  const picked = await openProjectFilePicker()
+  return picked ? serializeProject(picked.project) : null
+}
+
+function downloadTextFile(contents: string, filename: string): void {
+  const blob = new Blob([contents], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
