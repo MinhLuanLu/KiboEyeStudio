@@ -1,10 +1,11 @@
 import type { Project } from '@/types'
 
 // Matches sizeof(EyeFrame) from cppExport.ts's struct layout, with typical compiler
-// padding: 3x uint8 + 1x int8 + 1x uint8 + 1x uint8 + 2x int8 + 2x uint8 + 2x int8 +
-// 1x uint8 (13 bytes) + uint16 durationMs (needs 2-byte alignment -> +1 pad) + uint8 easing
-// + 4x int8 bezier = 13 + 1 pad + 2 + 1 + 4 = 21, rounded up to 22 for struct alignment.
-const EYE_FRAME_BYTES = 22
+// padding: 3x uint8 + 1x int8 + 1x uint8 + 1x uint8 (irisSize) + 1x uint8 (pupilSize) +
+// 2x int8 + 2x uint8 + 2x int8 + 1x uint8 (14 bytes) + uint16 durationMs (needs 2-byte
+// alignment -> +1 pad) + uint8 easing + 4x int8 bezier = 14 + 1 pad + 2 + 1 + 4 = 22,
+// rounded up to 24 for struct alignment.
+const EYE_FRAME_BYTES = 24
 
 export interface SizeEstimate {
   keyframeCount: number

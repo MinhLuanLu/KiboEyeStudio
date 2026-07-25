@@ -7,8 +7,10 @@ import { AnimationLibraryPanel } from '@/components/Library/AnimationLibraryPane
 import { ExpressionLibraryPanel } from '@/components/Library/ExpressionLibraryPanel'
 import { ControlsPanel } from '@/components/Controls/ControlsPanel'
 import { PersonalityPanel } from '@/components/Personality/PersonalityPanel'
+import { ColorPanel } from '@/components/Colors/ColorPanel'
 import { DevModePanel } from '@/components/DevMode/DevModePanel'
 import { ExportDialog } from '@/components/Export/ExportDialog'
+import { ReferenceImportDialog } from '@/components/Import/ReferenceImportDialog'
 
 function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'horizontal' }) {
   return (
@@ -22,7 +24,7 @@ function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'ho
 
 export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions }) {
   const [leftTab, setLeftTab] = useState<'animations' | 'expressions'>('animations')
-  const [rightTab, setRightTab] = useState<'controls' | 'personality'>('controls')
+  const [rightTab, setRightTab] = useState<'controls' | 'colors' | 'personality'>('controls')
 
   return (
     <div className="flex flex-col h-screen w-screen">
@@ -82,6 +84,12 @@ export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions })
                   Controls
                 </button>
                 <button
+                  className={`studio-tab flex-1 ${rightTab === 'colors' ? 'studio-tab-active' : ''}`}
+                  onClick={() => setRightTab('colors')}
+                >
+                  Colors
+                </button>
+                <button
                   className={`studio-tab flex-1 ${rightTab === 'personality' ? 'studio-tab-active' : ''}`}
                   onClick={() => setRightTab('personality')}
                 >
@@ -89,13 +97,16 @@ export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions })
                 </button>
               </div>
               <div className="flex-1 min-h-0">
-                {rightTab === 'controls' ? <ControlsPanel /> : <PersonalityPanel />}
+                {rightTab === 'controls' && <ControlsPanel />}
+                {rightTab === 'colors' && <ColorPanel />}
+                {rightTab === 'personality' && <PersonalityPanel />}
               </div>
             </div>
           </Panel>
         </PanelGroup>
       </div>
       <ExportDialog />
+      <ReferenceImportDialog />
     </div>
   )
 }

@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid'
 import type {
   Animation,
   EasingType,
+  EyeColors,
   EyeParams,
   GlobalTiming,
   Keyframe,
@@ -12,7 +13,7 @@ import type {
   PlaybackState,
   Project
 } from '@/types'
-import { DEFAULT_EYE_PARAMS, DEFAULT_PERSONALITY, DEFAULT_TIMING } from '@/types'
+import { DEFAULT_EYE_COLORS, DEFAULT_EYE_PARAMS, DEFAULT_PERSONALITY, DEFAULT_TIMING } from '@/types'
 import { builtinAnimations } from '@/data/builtinAnimations'
 import { builtinExpressions } from '@/data/builtinExpressions'
 import { animationDuration } from '@/engine/interpolate'
@@ -28,6 +29,7 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     createdAt: now,
     updatedAt: now,
     eyeBase: { ...DEFAULT_EYE_PARAMS },
+    colors: { ...DEFAULT_EYE_COLORS },
     personality: { ...DEFAULT_PERSONALITY },
     timing: { ...DEFAULT_TIMING },
     animations: builtinAnimations.map((a) => ({ ...a, id: nanoid(10), keyframes: a.keyframes.map((k) => ({ ...k, id: nanoid(10) })) })),
@@ -57,6 +59,7 @@ interface StoreState {
   devStats: DevStats
   showBezel: boolean
   exportDialogOpen: boolean
+  referenceImportOpen: boolean
 
   past: Project[]
   future: Project[]
@@ -77,6 +80,10 @@ interface StoreState {
   // design
   setEyeParam: <K extends keyof EyeParams>(key: K, value: EyeParams[K]) => void
   setEyeParams: (partial: Partial<EyeParams>) => void
+
+  // colors
+  setColor: <K extends keyof EyeColors>(key: K, value: EyeColors[K]) => void
+  applyGeneratedEye: (params: Partial<EyeParams>, colors: EyeColors, expressionName: string) => void
 
   // personality / timing
   setPersonality: <K extends keyof Personality>(key: K, value: Personality[K]) => void
@@ -124,6 +131,7 @@ interface StoreState {
   setDevStats: (stats: DevStats) => void
   toggleBezel: () => void
   setExportDialogOpen: (open: boolean) => void
+  setReferenceImportOpen: (open: boolean) => void
 }
 
 function activeAnimationOf(project: Project, id: string): Animation | undefined {
@@ -147,6 +155,7 @@ export const useStore = create<StoreState>()(
     devStats: { fps: 0, frame: 0, timeMs: 0 },
     showBezel: true,
     exportDialogOpen: false,
+    referenceImportOpen: false,
 
     past: [],
     future: [],
@@ -225,6 +234,21 @@ export const useStore = create<StoreState>()(
     setEyeParams: (partial) =>
       set((s) => {
         Object.assign(s.project.eyeBase, partial)
+        s.dirty = true
+      }),
+
+    setColor: (key, value) =>
+      set((s) => {
+        s.project.colors[key] = value
+        s.dirty = true
+      }),
+
+    applyGeneratedEye: (params, colors, expressionName) =>
+      set((s) => {
+        Object.assign(s.project.eyeBase, params)
+        s.project.colors = { ...colors }
+        s.project.expressions.push({ id: nanoid(10), name: expressionName, params: { ...s.project.eyeBase, ...params } })
+        s.mode = 'design'
         s.dirty = true
       }),
 
@@ -468,7 +492,8 @@ export const useStore = create<StoreState>()(
     toggleDevMode: () => set((s) => void (s.devModeOpen = !s.devModeOpen)),
     setDevStats: (stats) => set((s) => void (s.devStats = stats)),
     toggleBezel: () => set((s) => void (s.showBezel = !s.showBezel)),
-    setExportDialogOpen: (open) => set((s) => void (s.exportDialogOpen = open))
+    setExportDialogOpen: (open) => set((s) => void (s.exportDialogOpen = open)),
+    setReferenceImportOpen: (open) => set((s) => void (s.referenceImportOpen = open))
   }))
 )
 

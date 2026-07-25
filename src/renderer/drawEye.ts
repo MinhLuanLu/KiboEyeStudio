@@ -1,20 +1,10 @@
-import type { EyeParams } from '@/types'
+import type { EyeColors, EyeParams } from '@/types'
+import { DEFAULT_EYE_COLORS } from '@/types'
+import { shadeColor } from '@/lib/color'
 
-export interface EyeTheme {
-  eyeColorInner: string
-  eyeColorOuter: string
-  pupilColor: string
-  highlightColor: string
-  lidColor: string
-}
+export type EyeTheme = EyeColors
 
-export const DEFAULT_EYE_THEME: EyeTheme = {
-  eyeColorInner: '#f4faff',
-  eyeColorOuter: '#bfe0ff',
-  pupilColor: '#0a1220',
-  highlightColor: '#ffffff',
-  lidColor: '#000000'
-}
+export const DEFAULT_EYE_THEME: EyeTheme = DEFAULT_EYE_COLORS
 
 function roundedRectPath(ctx: CanvasRenderingContext2D, w: number, h: number, radius: number): void {
   const r = Math.min(radius, w / 2, h / 2)
@@ -44,49 +34,107 @@ export function drawEye(
   theme: EyeTheme = DEFAULT_EYE_THEME,
   mirrorX = false
 ): void {
-  const { width, height, radius, rotation, pupilSize, pupilX, pupilY, upperEyelid, lowerEyelid, highlightX, highlightY, highlightSize } = params
+  const {
+    width,
+    height,
+    radius,
+    rotation,
+    irisSize,
+    pupilSize,
+    pupilX,
+    pupilY,
+    upperEyelid,
+    lowerEyelid,
+    highlightX,
+    highlightY,
+    highlightSize
+  } = params
   const sign = mirrorX ? -1 : 1
 
   ctx.save()
   ctx.rotate((rotation * sign * Math.PI) / 180)
 
+  // Outer glow — painted *before* the eye-shape clip so the blur can bleed outside the
+  // rounded-rect silhouette (drawn on the round-display canvas behind everything else).
+  if (theme.glowIntensity > 0) {
+    ctx.save()
+    ctx.shadowColor = theme.glow
+    ctx.shadowBlur = 4 + (theme.glowIntensity / 100) * 22
+    ctx.globalAlpha = 0.25 + (theme.glowIntensity / 100) * 0.55
+    ctx.fillStyle = theme.glow
+    roundedRectPath(ctx, width, height, radius)
+    ctx.fill()
+    // A couple of extra passes make the halo read as a soft glow rather than a single blur ring.
+    ctx.fill()
+    ctx.restore()
+  }
+
   roundedRectPath(ctx, width, height, radius)
   ctx.clip()
 
-  // Eye base — soft vertical gradient for a premium glassy look
+  // Sclera — soft vertical gradient derived from the single "sclera" color for a glassy look.
   const grad = ctx.createLinearGradient(0, -height / 2, 0, height / 2)
-  grad.addColorStop(0, theme.eyeColorInner)
-  grad.addColorStop(1, theme.eyeColorOuter)
+  grad.addColorStop(0, shadeColor(theme.sclera, 6))
+  grad.addColorStop(1, shadeColor(theme.sclera, -10))
   ctx.fillStyle = grad
   ctx.fillRect(-width / 2, -height / 2, width, height)
 
-  // Pupil
+  // Ambient shadow arc under the (implied) upper lid crease, for depth.
+  if (theme.shadowIntensity > 0) {
+    const shadowH = height * 0.32
+    const shadowGrad = ctx.createLinearGradient(0, -height / 2, 0, -height / 2 + shadowH)
+    shadowGrad.addColorStop(0, theme.shadow)
+    shadowGrad.addColorStop(1, 'rgba(0,0,0,0)')
+    ctx.save()
+    ctx.globalAlpha = 0.15 + (theme.shadowIntensity / 100) * 0.45
+    ctx.fillStyle = shadowGrad
+    ctx.fillRect(-width / 2, -height / 2, width, shadowH)
+    ctx.restore()
+  }
+
   const halfSpan = Math.min(width, height) / 2
+  const irisR = Math.max(0, (irisSize / 100) * halfSpan)
   const pupilR = Math.max(0, (pupilSize / 100) * halfSpan)
   const pcx = sign * (pupilX / 100) * (width / 2)
   const pcy = (pupilY / 100) * (height / 2)
-  if (pupilR > 0.1) {
-    ctx.beginPath()
-    ctx.fillStyle = theme.pupilColor
-    ctx.arc(pcx, pcy, pupilR, 0, Math.PI * 2)
-    ctx.fill()
 
-    // Highlight glint, positioned relative to the pupil
-    const hR = Math.max(0, (highlightSize / 100) * pupilR)
-    if (hR > 0.1) {
-      const hx = pcx + sign * (highlightX / 100) * pupilR
-      const hy = pcy + (highlightY / 100) * pupilR
-      ctx.beginPath()
-      ctx.fillStyle = theme.highlightColor
-      ctx.globalAlpha = 0.92
-      ctx.arc(hx, hy, hR, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.globalAlpha = 1
-    }
+  // Iris
+  if (irisR > 0.1) {
+    const irisGrad = ctx.createRadialGradient(pcx, pcy, irisR * 0.15, pcx, pcy, irisR)
+    irisGrad.addColorStop(0, shadeColor(theme.iris, 12))
+    irisGrad.addColorStop(0.75, theme.iris)
+    irisGrad.addColorStop(1, shadeColor(theme.iris, -22))
+    ctx.beginPath()
+    ctx.fillStyle = irisGrad
+    ctx.arc(pcx, pcy, irisR, 0, Math.PI * 2)
+    ctx.fill()
   }
 
-  // Eyelids — slide in from top/bottom, softly curved, clipped to the eye shape
-  ctx.fillStyle = theme.lidColor
+  // Pupil
+  if (pupilR > 0.1) {
+    ctx.beginPath()
+    ctx.fillStyle = theme.pupil
+    ctx.arc(pcx, pcy, pupilR, 0, Math.PI * 2)
+    ctx.fill()
+  }
+
+  // Highlight glint, positioned relative to the pupil
+  const highlightBase = pupilR > 0.1 ? pupilR : irisR
+  const hR = Math.max(0, (highlightSize / 100) * highlightBase)
+  if (hR > 0.1 && highlightBase > 0.1) {
+    const hx = pcx + sign * (highlightX / 100) * highlightBase
+    const hy = pcy + (highlightY / 100) * highlightBase
+    ctx.beginPath()
+    ctx.fillStyle = theme.highlight
+    ctx.globalAlpha = 0.92
+    ctx.arc(hx, hy, hR, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.globalAlpha = 1
+  }
+
+  // Eyelids — slide in from top/bottom, softly curved, clipped to the eye shape. Always
+  // matches the display's black background so it reads as the lid occluding the eye.
+  ctx.fillStyle = '#000000'
   if (upperEyelid > 0) {
     const coverage = (upperEyelid / 100) * height
     const y = -height / 2 + coverage

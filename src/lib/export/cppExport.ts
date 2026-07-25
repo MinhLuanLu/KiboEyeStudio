@@ -1,4 +1,5 @@
-import type { Animation, EasingType, Expression, EyeParams, Project } from '@/types'
+import type { Animation, EasingType, Expression, EyeColors, EyeParams, Project } from '@/types'
+import { hexToRgb565 } from '@/lib/color'
 
 const EASING_ENUM: Record<EasingType, string> = {
   linear: 'EYE_EASE_LINEAR',
@@ -29,6 +30,7 @@ function eyeFrameLiteral(params: EyeParams, durationMs: number, easing: EasingTy
     Math.round(params.radius),
     clampByte(params.rotation),
     Math.round(params.distance),
+    Math.round(params.irisSize),
     Math.round(params.pupilSize),
     clampByte(params.pupilX),
     clampByte(params.pupilY),
@@ -65,6 +67,21 @@ function exportExpression(expr: Expression): string {
   return `const EyeFrame Expr_${ident} PROGMEM = \n${eyeFrameLiteral(expr.params, 0, 'linear')};`
 }
 
+function toRgb565Hex(hex: string): string {
+  return `0x${hexToRgb565(hex).toString(16).toUpperCase().padStart(4, '0')}`
+}
+
+function exportColors(colors: EyeColors): string {
+  return [
+    `#define EYE_COLOR_SCLERA    ${toRgb565Hex(colors.sclera)} // RGB565`,
+    `#define EYE_COLOR_IRIS      ${toRgb565Hex(colors.iris)}`,
+    `#define EYE_COLOR_PUPIL     ${toRgb565Hex(colors.pupil)}`,
+    `#define EYE_COLOR_HIGHLIGHT ${toRgb565Hex(colors.highlight)}`,
+    `#define EYE_COLOR_SHADOW    ${toRgb565Hex(colors.shadow)}  // shadow arc, intensity ${Math.round(colors.shadowIntensity)}% (not encodable in RGB565 — blend in software)`,
+    `#define EYE_COLOR_GLOW      ${toRgb565Hex(colors.glow)}  // outer glow, intensity ${Math.round(colors.glowIntensity)}%`
+  ].join('\n')
+}
+
 export function generateCppHeader(project: Project): string {
   const guard = `KIBO_EYE_ANIMATIONS_${toIdentifier(project.name).toUpperCase() || 'PROJECT'}_H`
   const header = `/*
@@ -73,10 +90,14 @@ export function generateCppHeader(project: Project): string {
  * Generated: ${new Date().toISOString()}
  *
  * Field order in EyeFrame matches the studio's EyeParams model:
- *   width, height, radius, rotation, distance, pupilSize, pupilX, pupilY,
+ *   width, height, radius, rotation, distance, irisSize, pupilSize, pupilX, pupilY,
  *   upperEyelid, lowerEyelid, highlightX, highlightY, highlightSize,
  *   durationMs, easing, bezierX1, bezierY1, bezierX2, bezierY2
  * (bezier fields only matter when easing == EYE_EASE_BEZIER, scaled 0-100)
+ *
+ * Eye colors are exported below as RGB565 #defines (sclera/iris/pupil/highlight/shadow/
+ * glow) matching the studio's Color panel — draw the iris disc, then the pupil disc, then
+ * blend the highlight/shadow/glow layers with those constants in your own draw routine.
  *
  * Usage sketch (pseudo-code — write your own player loop against your display driver):
  *   float t = elapsedMs / (float)frame.durationMs;               // 0..1 within the segment
@@ -104,6 +125,7 @@ struct EyeFrame {
   uint8_t width, height, radius;
   int8_t rotation;
   uint8_t distance;
+  uint8_t irisSize;
   uint8_t pupilSize;
   int8_t pupilX, pupilY;
   uint8_t upperEyelid, lowerEyelid;
@@ -113,6 +135,10 @@ struct EyeFrame {
   uint8_t easing;
   int8_t bezierX1, bezierY1, bezierX2, bezierY2;
 };
+
+// ---- Colors -----------------------------------------------------------
+
+${exportColors(project.colors)}
 
 // ---- Animations -----------------------------------------------------------
 

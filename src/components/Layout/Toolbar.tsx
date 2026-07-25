@@ -21,6 +21,7 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
   const showBezel = useStore((s) => s.showBezel)
   const toggleBezel = useStore((s) => s.toggleBezel)
   const setExportDialogOpen = useStore((s) => s.setExportDialogOpen)
+  const setReferenceImportOpen = useStore((s) => s.setReferenceImportOpen)
 
   return (
     <div className="flex items-center gap-3 px-3 py-2 border-b border-studio-border bg-studio-panel">
@@ -48,6 +49,9 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
         </button>
         <button className="studio-btn" onClick={() => setExportDialogOpen(true)}>
           Export...
+        </button>
+        <button className="studio-btn" onClick={() => setReferenceImportOpen(true)}>
+          Import Reference...
         </button>
       </div>
 

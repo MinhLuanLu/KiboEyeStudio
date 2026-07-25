@@ -53,7 +53,8 @@ export function ControlsPanel() {
         <Slider label="Eye Rotation" value={target.rotation} min={EYE_PARAM_RANGES.rotation[0]} max={EYE_PARAM_RANGES.rotation[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('rotation', v)} />
       </Section>
 
-      <Section title="Pupil">
+      <Section title="Iris & Pupil">
+        <Slider label="Iris Size" value={target.irisSize} min={EYE_PARAM_RANGES.irisSize[0]} max={EYE_PARAM_RANGES.irisSize[1]} onCommitStart={checkpoint} onChange={(v) => setParam('irisSize', v)} />
         <Slider label="Pupil Size" value={target.pupilSize} min={EYE_PARAM_RANGES.pupilSize[0]} max={EYE_PARAM_RANGES.pupilSize[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilSize', v)} />
         <Slider label="Pupil X" value={target.pupilX} min={EYE_PARAM_RANGES.pupilX[0]} max={EYE_PARAM_RANGES.pupilX[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilX', v)} />
         <Slider label="Pupil Y" value={target.pupilY} min={EYE_PARAM_RANGES.pupilY[0]} max={EYE_PARAM_RANGES.pupilY[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilY', v)} />

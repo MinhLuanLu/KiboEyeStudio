@@ -71,7 +71,7 @@ export function PreviewCanvas() {
         timeMs = 0
       }
 
-      renderFace(ctx!, params, { size: CANVAS_SIZE, showBezel: state.showBezel })
+      renderFace(ctx!, params, { size: CANVAS_SIZE, showBezel: state.showBezel, theme: state.project.colors })
 
       const fpsAccum = fpsAccumRef.current
       fpsAccum.frames += 1

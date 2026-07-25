@@ -7,6 +7,7 @@ const EYE_PARAM_KEYS = [
   'radius',
   'distance',
   'rotation',
+  'irisSize',
   'pupilSize',
   'pupilX',
   'pupilY',

@@ -5,11 +5,12 @@ import type { EyeParams } from '@/types'
 
 function ExpressionThumb({ params }: { params: EyeParams }) {
   const ref = useRef<HTMLCanvasElement>(null)
+  const colors = useStore((s) => s.project.colors)
   useEffect(() => {
     const ctx = ref.current?.getContext('2d')
     if (!ctx) return
-    renderFace(ctx, params, { size: 48, showBezel: false })
-  }, [params])
+    renderFace(ctx, params, { size: 48, showBezel: false, theme: colors })
+  }, [params, colors])
   return <canvas ref={ref} width={48} height={48} className="rounded-full shrink-0" />
 }
 

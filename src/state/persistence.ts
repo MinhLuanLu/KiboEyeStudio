@@ -1,4 +1,6 @@
-import type { Project } from '@/types'
+import { nanoid } from 'nanoid'
+import type { Animation, Expression, EyeParams, Project } from '@/types'
+import { DEFAULT_EYE_COLORS, DEFAULT_EYE_PARAMS, DEFAULT_PERSONALITY, DEFAULT_TIMING } from '@/types'
 
 const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
 const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
@@ -11,8 +13,36 @@ export function serializeProject(project: Project): string {
   return JSON.stringify(project, null, 2)
 }
 
+function normalizeEyeParams(params: Partial<EyeParams> | undefined): EyeParams {
+  return { ...DEFAULT_EYE_PARAMS, ...(params ?? {}) }
+}
+
+/** Backfills fields added after a project/autosave was written (e.g. `irisSize`, the whole
+ * `colors` theme) with defaults, so older saves on disk or in localStorage don't break the
+ * renderer or leave sliders holding `undefined`. */
+function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Project {
+  const animations: Animation[] = (raw.animations ?? []).map((a) => ({
+    ...a,
+    keyframes: a.keyframes.map((k) => ({ ...k, params: normalizeEyeParams(k.params) }))
+  }))
+  const expressions: Expression[] = (raw.expressions ?? []).map((e) => ({ ...e, params: normalizeEyeParams(e.params) }))
+
+  return {
+    id: raw.id ?? nanoid(10),
+    name: raw.name ?? 'Untitled Project',
+    createdAt: raw.createdAt ?? Date.now(),
+    updatedAt: raw.updatedAt ?? Date.now(),
+    eyeBase: normalizeEyeParams(raw.eyeBase),
+    colors: { ...DEFAULT_EYE_COLORS, ...(raw.colors ?? {}) },
+    personality: { ...DEFAULT_PERSONALITY, ...(raw.personality ?? {}) },
+    timing: { ...DEFAULT_TIMING, ...(raw.timing ?? {}) },
+    animations,
+    expressions
+  }
+}
+
 export function deserializeProject(json: string): Project {
-  return JSON.parse(json) as Project
+  return normalizeProject(JSON.parse(json))
 }
 
 export async function saveProjectAs(project: Project): Promise<string | null> {

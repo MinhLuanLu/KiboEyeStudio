@@ -4,6 +4,7 @@ export interface EyeParams {
   radius: number
   distance: number
   rotation: number
+  irisSize: number
   pupilSize: number
   pupilX: number
   pupilY: number
@@ -12,6 +13,17 @@ export interface EyeParams {
   highlightX: number
   highlightY: number
   highlightSize: number
+}
+
+export interface EyeColors {
+  sclera: string
+  iris: string
+  pupil: string
+  highlight: string
+  shadow: string
+  glow: string
+  shadowIntensity: number
+  glowIntensity: number
 }
 
 export type EasingType =
@@ -68,6 +80,7 @@ export interface Project {
   createdAt: number
   updatedAt: number
   eyeBase: EyeParams
+  colors: EyeColors
   personality: Personality
   timing: GlobalTiming
   animations: Animation[]
@@ -83,7 +96,8 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   radius: 26,
   distance: 96,
   rotation: 0,
-  pupilSize: 42,
+  irisSize: 58,
+  pupilSize: 32,
   pupilX: 0,
   pupilY: 0,
   upperEyelid: 0,
@@ -91,6 +105,17 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   highlightX: -18,
   highlightY: -18,
   highlightSize: 22
+}
+
+export const DEFAULT_EYE_COLORS: EyeColors = {
+  sclera: '#f4faff',
+  iris: '#4fa8ff',
+  pupil: '#0a1220',
+  highlight: '#ffffff',
+  shadow: '#000010',
+  glow: '#5b8cff',
+  shadowIntensity: 30,
+  glowIntensity: 25
 }
 
 export const DEFAULT_PERSONALITY: Personality = {
@@ -117,6 +142,7 @@ export const EYE_PARAM_RANGES: Record<keyof EyeParams, [number, number]> = {
   radius: [0, 65],
   distance: [0, 160],
   rotation: [-45, 45],
+  irisSize: [10, 100],
   pupilSize: [5, 100],
   pupilX: [-40, 40],
   pupilY: [-40, 40],
