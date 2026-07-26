@@ -1,10 +1,13 @@
 import { useStore } from '@/state/store'
-import { DEFAULT_EYE_COLORS } from '@/types'
+import { DEFAULT_EYE_COLORS, effectiveEyeColors } from '@/types'
 import { ColorField } from '@/components/ui/ColorField'
 import { Slider } from '@/components/ui/Slider'
+import { EyeTargetSelector } from '@/components/ui/EyeTargetSelector'
 
 export function ColorPanel() {
-  const colors = useStore((s) => s.project.colors)
+  const project = useStore((s) => s.project)
+  const eyeTarget = useStore((s) => s.eyeTarget)
+  const colors = effectiveEyeColors(project, eyeTarget)
   const setColor = useStore((s) => s.setColor)
   const checkpoint = useStore((s) => s.checkpoint)
 
@@ -20,6 +23,8 @@ export function ColorPanel() {
       <p className="text-xs text-studio-muted leading-relaxed">
         Customize every layer of the eye. Changes preview live on the round display.
       </p>
+
+      <EyeTargetSelector />
 
       <div className="flex flex-col gap-2.5">
         <ColorField label="Sclera" value={colors.sclera} onCommitStart={checkpoint} onChange={(v) => setColor('sclera', v)} />

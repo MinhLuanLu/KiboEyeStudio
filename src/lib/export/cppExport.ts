@@ -1,4 +1,12 @@
-import type { Animation, DisplaySettings, EasingType, Expression, EyeColors, EyeParams, Project } from '@/types'
+import type { Animation, EasingType, Expression, EyeColors, EyeParams, Project } from '@/types'
+import {
+  clampFps,
+  expressionLeftParams,
+  expressionRightParams,
+  expressionShapeDiverges,
+  leftEyeColors,
+  rightEyeColors
+} from '@/types'
 import { hexToRgb565, mixColors } from '@/lib/color'
 
 // Ring thickness in device pixels — matches the BORDER_WIDTH constant in
@@ -26,6 +34,10 @@ function clampByte(v: number): number {
   return Math.max(-127, Math.min(127, Math.round(v)))
 }
 
+function clampDegrees(v: number): number {
+  return Math.round(((v % 360) + 360) % 360)
+}
+
 function eyeFrameLiteral(params: EyeParams, durationMs: number, easing: EasingType, bezier?: [number, number, number, number]): string {
   const [bx1, by1, bx2, by2] = bezier ?? [42, 0, 58, 100]
   const fields = [
@@ -40,6 +52,7 @@ function eyeFrameLiteral(params: EyeParams, durationMs: number, easing: EasingTy
     Math.round(params.pupilHeight),
     clampByte(params.pupilX),
     clampByte(params.pupilY),
+    clampDegrees(params.pupilRotation),
     Math.round(params.upperEyelid),
     Math.round(params.lowerEyelid),
     clampByte(params.highlightX),
@@ -68,30 +81,78 @@ function exportAnimation(anim: Animation): string {
   ].join('\n')
 }
 
+// Expressions carry independent left/right shape only when they actually differ (Eye
+// Target: Left/Right editing at Save time) — otherwise a single shared constant is emitted,
+// exactly as before this feature existed, so existing (non-diverged) expressions export
+// identically to how they always have.
 function exportExpression(expr: Expression): string {
   const ident = toIdentifier(expr.name)
-  return `const EyeFrame Expr_${ident} PROGMEM = \n${eyeFrameLiteral(expr.params, 0, 'linear')};`
+  if (!expressionShapeDiverges(expr)) {
+    return `const EyeFrame Expr_${ident} PROGMEM = \n${eyeFrameLiteral(expr.params, 0, 'linear')};`
+  }
+  return [
+    `// "${expr.name}" has different left/right eye shapes`,
+    `const EyeFrame Expr_${ident}_L PROGMEM = \n${eyeFrameLiteral(expressionLeftParams(expr), 0, 'linear')};`,
+    `const EyeFrame Expr_${ident}_R PROGMEM = \n${eyeFrameLiteral(expressionRightParams(expr), 0, 'linear')};`
+  ].join('\n')
 }
 
 function toRgb565Hex(hex: string): string {
   return `0x${hexToRgb565(hex).toString(16).toUpperCase().padStart(4, '0')}`
 }
 
-function exportColors(colors: EyeColors, display: DisplaySettings): string {
-  // RGB565 has no alpha channel, so Border Opacity is pre-blended here into a single flat
-  // color against the display background (matching the ring trick eyesDrawEye uses below):
-  // 0% -> exactly the background color (invisible ring), 100% -> the pure border color.
-  const borderBlend = mixColors(display.backgroundColor, colors.border, colors.borderOpacity / 100)
-  return [
+// RGB565 has no alpha channel, so Border Opacity is pre-blended here into a single flat
+// color against the display background (matching the ring trick eyesDrawEye uses below):
+// 0% -> exactly the background color (invisible ring), 100% -> the pure border color.
+function colorSetLiteral(colors: EyeColors, backgroundColor: string): string {
+  const borderBlend = mixColors(backgroundColor, colors.border, colors.borderOpacity / 100)
+  const fields = [
+    toRgb565Hex(colors.sclera),
+    toRgb565Hex(colors.iris),
+    toRgb565Hex(colors.pupil),
+    toRgb565Hex(colors.highlight),
+    toRgb565Hex(colors.shadow),
+    toRgb565Hex(colors.glow),
+    toRgb565Hex(borderBlend)
+  ]
+  return `{ ${fields.join(', ')} }`
+}
+
+// Eye Target (Left/Right editing) lets the two eyes' colors diverge — EYE_COLORS_LEFT and
+// EYE_COLORS_RIGHT are always both emitted so eyesDrawEyePair() always has two color sets to
+// draw with, but when the eyes are identical, EYE_COLORS_RIGHT is just a reference to
+// EYE_COLORS_LEFT rather than a duplicate struct, per "shared config to avoid duplicate code."
+function exportColors(project: Project): string {
+  const { display } = project
+  const left = leftEyeColors(project)
+  const right = rightEyeColors(project)
+  const same = JSON.stringify(left) === JSON.stringify(right)
+  const lines = [
     `#define EYE_COLOR_BACKGROUND ${toRgb565Hex(display.backgroundColor)} // RGB565 — Display panel's background color`,
-    `#define EYE_COLOR_SCLERA     ${toRgb565Hex(colors.sclera)}`,
-    `#define EYE_COLOR_IRIS       ${toRgb565Hex(colors.iris)}`,
-    `#define EYE_COLOR_PUPIL      ${toRgb565Hex(colors.pupil)}`,
-    `#define EYE_COLOR_HIGHLIGHT  ${toRgb565Hex(colors.highlight)}`,
-    `#define EYE_COLOR_SHADOW     ${toRgb565Hex(colors.shadow)}  // shadow arc, intensity ${Math.round(colors.shadowIntensity)}% (not encodable in RGB565 — blend in software)`,
-    `#define EYE_COLOR_GLOW       ${toRgb565Hex(colors.glow)}  // outer glow, intensity ${Math.round(colors.glowIntensity)}%`,
-    `#define EYE_COLOR_BORDER     ${toRgb565Hex(borderBlend)}  // border color pre-blended with background at ${Math.round(colors.borderOpacity)}% opacity`,
-    `#define EYE_BORDER_WIDTH     ${BORDER_WIDTH_PX}  // ring thickness in pixels`
+    `#define EYE_BORDER_WIDTH     ${BORDER_WIDTH_PX}  // ring thickness in pixels`,
+    ``,
+    `// sclera, iris, pupil, highlight, shadow, glow, border (border already has Border`,
+    `// Opacity pre-blended in — RGB565 has no alpha channel)`,
+    `const EyeColorSet EYE_COLORS_LEFT = ${colorSetLiteral(left, display.backgroundColor)};`
+  ]
+  if (same) {
+    lines.push(`const EyeColorSet& EYE_COLORS_RIGHT = EYE_COLORS_LEFT;  // identical to the left eye — shared, no duplicate data`)
+  } else {
+    lines.push(`const EyeColorSet EYE_COLORS_RIGHT = ${colorSetLiteral(right, display.backgroundColor)};`)
+  }
+  return lines.join('\n')
+}
+
+// eyesPlayAnimation() itself is time-based (reads millis(), not a per-call frame counter),
+// so it already plays back at the correct speed no matter how often loop() runs — Display
+// FPS only controls how often a frame gets drawn/presented. EYE_FRAME_DELAY_MS is the
+// delay() the usage example below uses to hit that rate.
+function exportTiming(display: Project['display']): string {
+  const fps = clampFps(display.fps)
+  const frameDelayMs = Math.max(1, Math.round(1000 / fps))
+  return [
+    `#define EYE_TARGET_FPS       ${fps}  // Display FPS, set in the studio's Display panel`,
+    `#define EYE_FRAME_DELAY_MS   ${frameDelayMs}  // delay() per loop() to render at EYE_TARGET_FPS`
   ].join('\n')
 }
 
@@ -154,10 +215,23 @@ inline float eyesEase(float t, uint8_t type, int8_t bx1, int8_t by1, int8_t bx2,
 struct LiveEye {
   float width, height, radius, distance;
   float irisWidth, irisHeight, pupilWidth, pupilHeight;
-  float pupilX, pupilY;
+  float pupilX, pupilY, pupilRotation;
   float upperEyelid, lowerEyelid;
   float highlightX, highlightY, highlightSize;
 };
+
+// Shortest-path interpolation between two angles in degrees, wrapping through 0/360 rather
+// than always going the "long way" (e.g. 350deg -> 10deg at t=0.5 gives 0deg, not 180deg).
+// Kept in sync with lerpAngleDeg() in src/engine/interpolate.ts so the studio's preview and
+// this exported firmware animate pupil rotation identically.
+inline float eyesLerpAngleDeg(float a, float b, float t) {
+  float diff = fmodf(b - a + 180.0f, 360.0f);
+  if (diff < 0) diff += 360.0f;
+  diff -= 180.0f;
+  float result = fmodf(a + diff * t, 360.0f);
+  if (result < 0) result += 360.0f;
+  return result;
+}
 
 inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   LiveEye r;
@@ -171,6 +245,7 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   r.pupilHeight = a.pupilHeight + (b.pupilHeight - a.pupilHeight) * t;
   r.pupilX = a.pupilX + (b.pupilX - a.pupilX) * t;
   r.pupilY = a.pupilY + (b.pupilY - a.pupilY) * t;
+  r.pupilRotation = eyesLerpAngleDeg(a.pupilRotation, b.pupilRotation, t);
   r.upperEyelid = a.upperEyelid + (b.upperEyelid - a.upperEyelid) * t;
   r.lowerEyelid = a.lowerEyelid + (b.lowerEyelid - a.lowerEyelid) * t;
   r.highlightX = a.highlightX + (b.highlightX - a.highlightX) * t;
@@ -180,7 +255,8 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
 }
 
 // Adafruit_GFX has no fillEllipse — fill one via horizontal scanlines using the ellipse
-// equation, same technique fillCircle() itself uses internally for a circle.
+// equation, same technique fillCircle() itself uses internally for a circle. Kept as a
+// simple, unclipped primitive; eyesFillEllipseInEye() below is what iris/pupil actually use.
 template <typename T>
 inline void eyesFillEllipse(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, uint16_t color) {
   if (rx <= 0 || ry <= 0) return;
@@ -190,6 +266,19 @@ inline void eyesFillEllipse(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t 
     int16_t dx = (int16_t)(rx * span);
     gfx.drawFastHLine(cx - dx, cy + dy, dx * 2 + 1, color);
   }
+}
+
+// The eye's own half-width at vertical offset \`dy\` from its center — the boundary
+// eyesFillRoundedRect() traces (a rounded-rect with elliptical corners), factored out so
+// eyesFillEllipseInEye() below can clip iris/pupil fills to the same silhouette. Returns -1
+// for rows entirely above/below the eye (no intersection).
+inline float eyesEyeHalfWidthAt(float dy, float hx, float hy, float rx, float ry) {
+  float ySide = fabsf(dy);
+  if (ySide > hy) return -1.0f;
+  if (ry < 0.01f || ySide <= hy - ry) return hx;
+  float t = (ySide - (hy - ry)) / ry;
+  if (t > 1.0f) t = 1.0f;
+  return (hx - rx) + rx * sqrtf(max(0.0f, 1.0f - t * t));
 }
 
 // Fills a rounded-rect whose corners are quarter-*ellipses* (independent x/y radii), via
@@ -208,18 +297,60 @@ inline void eyesFillRoundedRect(T& gfx, int16_t cx, int16_t cy, int16_t w, int16
   float ry = radius < hy ? (float)radius : hy;
   int16_t halfH = (int16_t)ceilf(hy);
   for (int16_t dy = -halfH; dy <= halfH; dy++) {
-    float ySide = fabsf((float)dy);
-    if (ySide > hy) continue;
-    float xExtent;
-    if (ry < 0.01f || ySide <= hy - ry) {
-      xExtent = hx;
-    } else {
-      float t = (ySide - (hy - ry)) / ry;
-      if (t > 1.0f) t = 1.0f;
-      xExtent = (hx - rx) + rx * sqrtf(max(0.0f, 1.0f - t * t));
-    }
+    float xExtent = eyesEyeHalfWidthAt((float)dy, hx, hy, rx, ry);
+    if (xExtent < 0) continue;
     int16_t ix = (int16_t)xExtent;
     gfx.drawFastHLine(cx - ix, cy + dy, ix * 2 + 1, color);
+  }
+}
+
+// Fills an ellipse (optionally rotated by \`rotationDeg\`) clipped to the enclosing eye's own
+// rounded-rect silhouette (eyeCx/eyeCy/eyeW/eyeH/eyeRadius) — this is what lets Pupil X/Y
+// push all the way out to +-100 (or the pupil spin via Pupil Rotation) without ever painting
+// outside the eye on real hardware. The studio's preview gets this for free from the
+// ctx.clip() already in effect when it draws the eye; Adafruit_GFX has no equivalent shaped
+// clip, so this recomputes the same eye boundary (eyesEyeHalfWidthAt) per scanline row and
+// intersects it with the ellipse's own row span, solved via the general conic quadratic —
+// at rotationDeg=0 this reduces to the same formula eyesFillEllipse() uses.
+template <typename T>
+inline void eyesFillEllipseInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eyeW, int16_t eyeH, int16_t eyeRadius,
+                                  int16_t ecx, int16_t ecy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color) {
+  if (rx <= 0 || ry <= 0) return;
+  float eyeHx = eyeW / 2.0f, eyeHy = eyeH / 2.0f;
+  float eyeRx = eyeRadius < eyeHx ? (float)eyeRadius : eyeHx;
+  float eyeRy = eyeRadius < eyeHy ? (float)eyeRadius : eyeHy;
+
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float c = cosf(rad), s = sinf(rad);
+  float invRx2 = 1.0f / ((float)rx * (float)rx);
+  float invRy2 = 1.0f / ((float)ry * (float)ry);
+  float A = c * c * invRx2 + s * s * invRy2;
+
+  int16_t maxExtent = (int16_t)ceilf((float)max(rx, ry)) + 1;
+  for (int16_t dy = -maxExtent; dy <= maxExtent; dy++) {
+    float dy0 = (float)dy;
+    float B = 2.0f * dy0 * c * s * (invRx2 - invRy2);
+    float C = dy0 * dy0 * (s * s * invRx2 + c * c * invRy2) - 1.0f;
+    float disc = B * B - 4.0f * A * C;
+    if (disc < 0) continue;
+    float sq = sqrtf(disc);
+    float dxA = (-B - sq) / (2.0f * A);
+    float dxB = (-B + sq) / (2.0f * A);
+    float xLo = ecx + (dxA < dxB ? dxA : dxB);
+    float xHi = ecx + (dxA < dxB ? dxB : dxA);
+
+    int16_t worldY = ecy + dy;
+    float eyeHalfW = eyesEyeHalfWidthAt((float)(worldY - eyeCy), eyeHx, eyeHy, eyeRx, eyeRy);
+    if (eyeHalfW < 0) continue; // this row falls entirely outside the eye's own silhouette
+
+    float clipLo = max(xLo, (float)eyeCx - eyeHalfW);
+    float clipHi = min(xHi, (float)eyeCx + eyeHalfW);
+    if (clipHi < clipLo) continue;
+
+    int16_t ixLo = (int16_t)(clipLo + 0.5f);
+    int16_t ixHi = (int16_t)(clipHi + 0.5f);
+    if (ixHi < ixLo) continue;
+    gfx.drawFastHLine(ixLo, worldY, ixHi - ixLo + 1, color);
   }
 }
 
@@ -228,23 +359,25 @@ inline void eyesFillRoundedRect(T& gfx, int16_t cx, int16_t cy, int16_t w, int16
 // fillCircle() aren't virtual in Adafruit_GFX, so a buffered subclass like
 // EyesBufferedDisplay below only gets called correctly when the concrete type is known at
 // compile time. \`bgColor\` should match your Display panel's background so eyelids blend in.
+// \`colors\` is passed in (not hardcoded macros) so the two eyes can use different palettes
+// when Eye Target: Left/Right editing gave them different colors in the studio.
 template <typename T>
-inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor) {
+inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor, const EyeColorSet& colors) {
   int16_t w = (int16_t)e.width, h = (int16_t)e.height;
   int16_t radius = (int16_t)e.radius;
   int16_t x = cx - w / 2, y = cy - h / 2;
 
   // Border — an outer stadium/oval shape EYE_BORDER_WIDTH larger on every side, in a color
-  // already pre-blended toward the background by Border Opacity (see EYE_COLOR_BORDER
+  // already pre-blended toward the background by Border Opacity (see EYE_COLORS_LEFT/RIGHT
   // above). The sclera fill right after this covers everything except a thin ring, giving
   // an opaque border with no per-pixel alpha needed. Both fills go through
   // eyesFillRoundedRect() (elliptical corners) rather than Adafruit_GFX's own
   // fillRoundRect(), so a maxed-out Radius on a non-square eye renders as a smooth oval
   // here exactly like it does in the studio's preview.
   eyesFillRoundedRect(gfx, cx, cy, w + EYE_BORDER_WIDTH * 2, h + EYE_BORDER_WIDTH * 2,
-                       radius + EYE_BORDER_WIDTH, EYE_COLOR_BORDER);
+                       radius + EYE_BORDER_WIDTH, colors.border);
 
-  eyesFillRoundedRect(gfx, cx, cy, w, h, radius, EYE_COLOR_SCLERA);
+  eyesFillRoundedRect(gfx, cx, cy, w, h, radius, colors.sclera);
 
   int sign = mirror ? -1 : 1;
   int16_t px = cx + (int16_t)(sign * (e.pupilX / 100.0f) * (w / 2.0f));
@@ -255,8 +388,11 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   int16_t pupilRX = (int16_t)((e.pupilWidth / 100.0f) * (w / 2.0f));
   int16_t pupilRY = (int16_t)((e.pupilHeight / 100.0f) * (h / 2.0f));
 
-  if (irisRX > 0 && irisRY > 0) eyesFillEllipse(gfx, px, py, irisRX, irisRY, EYE_COLOR_IRIS);
-  if (pupilRX > 0 && pupilRY > 0) eyesFillEllipse(gfx, px, py, pupilRX, pupilRY, EYE_COLOR_PUPIL);
+  // Both clipped to the eye's own silhouette (see eyesFillEllipseInEye) since Pupil X/Y can
+  // now push the shared iris/pupil center out toward the eye's edge. The iris never rotates
+  // (0deg); the pupil uses its own independent Pupil Rotation.
+  if (irisRX > 0 && irisRY > 0) eyesFillEllipseInEye(gfx, cx, cy, w, h, radius, px, py, irisRX, irisRY, 0.0f, colors.iris);
+  if (pupilRX > 0 && pupilRY > 0) eyesFillEllipseInEye(gfx, cx, cy, w, h, radius, px, py, pupilRX, pupilRY, e.pupilRotation, colors.pupil);
 
   float hlBaseX = pupilRX > 0 ? pupilRX : irisRX;
   float hlBaseY = pupilRY > 0 ? pupilRY : irisRY;
@@ -265,7 +401,7 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   if (hR > 0 && hlBase > 0) {
     int16_t hx = px + (int16_t)(sign * (e.highlightX / 100.0f) * hlBaseX);
     int16_t hy = py + (int16_t)((e.highlightY / 100.0f) * hlBaseY);
-    gfx.fillCircle(hx, hy, hR, EYE_COLOR_HIGHLIGHT);
+    gfx.fillCircle(hx, hy, hR, colors.highlight);
   }
 
   if (e.upperEyelid > 0) {
@@ -278,11 +414,16 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   }
 }
 
+// Draws both eyes from one shared LiveEye pose (the common case: animations always play
+// back mirrored). Pass EYE_COLORS_LEFT/EYE_COLORS_RIGHT — when the studio's two eyes have
+// identical colors, EYE_COLORS_RIGHT is just a reference to EYE_COLORS_LEFT (see above), so
+// this always works whether or not the eyes actually differ.
 template <typename T>
-inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& e, uint16_t bgColor) {
+inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& e, uint16_t bgColor,
+                             const EyeColorSet& leftColors, const EyeColorSet& rightColors) {
   int16_t half = (int16_t)(e.distance / 2);
-  eyesDrawEye(gfx, screenCx - half, screenCy, e, false, bgColor);
-  eyesDrawEye(gfx, screenCx + half, screenCy, e, true, bgColor);
+  eyesDrawEye(gfx, screenCx - half, screenCy, e, false, bgColor, leftColors);
+  eyesDrawEye(gfx, screenCx + half, screenCy, e, true, bgColor, rightColors);
 }
 
 // ---- Playback — call every loop() with the same (frames, count, loop, startMillis, ----
@@ -378,13 +519,24 @@ export function generateCppHeader(project: Project): string {
  *
  * Field order in EyeFrame matches the studio's EyeParams model:
  *   width, height, radius, rotation, distance, irisWidth, irisHeight, pupilWidth,
- *   pupilHeight, pupilX, pupilY, upperEyelid, lowerEyelid, highlightX, highlightY,
- *   highlightSize, durationMs, easing, bezierX1, bezierY1, bezierX2, bezierY2
+ *   pupilHeight, pupilX, pupilY, pupilRotation, upperEyelid, lowerEyelid, highlightX,
+ *   highlightY, highlightSize, durationMs, easing, bezierX1, bezierY1, bezierX2, bezierY2
  * (bezier fields only matter when easing == EYE_EASE_BEZIER, scaled 0-100)
+ *
+ * Pupil X/Y can reach +-100 (the pupil's center can travel all the way to the eye's own
+ * edge) and Pupil Rotation spins the pupil ellipse 0-360deg independent of the eye's own
+ * rotation. Both are clipped to the eye's silhouette in eyesFillEllipseInEye() below, so the
+ * pupil never paints outside the eye no matter how far it's pushed or rotated — matching the
+ * studio preview, which gets the same clipping for free from its canvas clip path.
  *
  * Eye colors are exported below as RGB565 #defines (sclera/iris/pupil/highlight/shadow/
  * glow/border) matching the studio's Color panel. EYE_COLOR_BORDER already has Border
  * Opacity pre-blended into it (RGB565 has no alpha channel) — see eyesDrawEye() below.
+ *
+ * EYE_TARGET_FPS / EYE_FRAME_DELAY_MS match the Display FPS set in the studio's Display
+ * panel. eyesPlayAnimation() itself is time-based (millis()-driven), so it always plays at
+ * the correct speed regardless of loop() rate — EYE_FRAME_DELAY_MS only paces how often a
+ * frame is drawn/presented, i.e. the actual "frames per second" on the panel.
  *
  * This file is plug-and-play: it also bundles the "player" (easing, interpolation, and
  * drawing) as inline functions, so you don't need a separate companion file. Minimal usage:
@@ -411,10 +563,17 @@ export function generateCppHeader(project: Project): string {
  *     LiveEye live;
  *     eyesPlayAnimation(Anim_Idle, Anim_Idle_count, Anim_Idle_loop, animStart, frameIndex, live);
  *     tft.fillScreen(EYE_COLOR_BACKGROUND);
- *     eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND);  // 120,120 = center of a 240x240 panel
+ *     eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND, EYE_COLORS_LEFT, EYE_COLORS_RIGHT);
  *     tft.present();
- *     delay(16);
+ *     delay(EYE_FRAME_DELAY_MS);  // paces drawing to EYE_TARGET_FPS
  *   }
+ *
+ * EYE_COLORS_LEFT/EYE_COLORS_RIGHT are always both defined -- pass both to eyesDrawEyePair()
+ * every time. When the studio's two eyes have identical colors, EYE_COLORS_RIGHT is just a
+ * reference to EYE_COLORS_LEFT (no duplicate data); when Eye Target: Left/Right editing gave
+ * them different colors, both are real, distinct structs. Static poses saved with a
+ * left/right shape divergence export as two constants instead of one, e.g. Expr_Blink_L /
+ * Expr_Blink_R rather than a plain Expr_Blink.
  *
  * Using TFT_eSPI/LovyanGFX instead of Adafruit_GC9A01A? Skip that #include — pass your own
  * sprite/canvas object as the template type to eyesDrawEyePair()/eyesDrawEye() instead;
@@ -446,6 +605,7 @@ struct EyeFrame {
   uint8_t irisWidth, irisHeight;
   uint8_t pupilWidth, pupilHeight;
   int8_t pupilX, pupilY;
+  uint16_t pupilRotation; // degrees, 0-360
   uint8_t upperEyelid, lowerEyelid;
   int8_t highlightX, highlightY;
   uint8_t highlightSize;
@@ -454,9 +614,20 @@ struct EyeFrame {
   int8_t bezierX1, bezierY1, bezierX2, bezierY2;
 };
 
+// One eye's full color palette (RGB565) — the studio's Eye Target: Left/Right editing lets
+// the two eyes end up with different palettes, so colors are a value passed to the drawing
+// functions rather than fixed macros.
+struct EyeColorSet {
+  uint16_t sclera, iris, pupil, highlight, shadow, glow, border;
+};
+
 // ---- Colors -----------------------------------------------------------
 
-${exportColors(project.colors, project.display)}
+${exportColors(project)}
+
+// ---- Timing -------------------------------------------------------------
+
+${exportTiming(project.display)}
 
 // ---- Player (easing, interpolation, drawing, playback) -----------------------
 

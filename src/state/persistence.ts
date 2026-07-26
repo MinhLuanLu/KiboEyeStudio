@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid'
-import type { Animation, Expression, EyeParams, Project } from '@/types'
+import type { Animation, Expression, EyeColors, EyeParams, Project } from '@/types'
 import { DEFAULT_DISPLAY, DEFAULT_EYE_COLORS, DEFAULT_EYE_PARAMS, DEFAULT_PERSONALITY, DEFAULT_TIMING } from '@/types'
 
 const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
@@ -17,10 +17,19 @@ function normalizeEyeParams(params: Partial<EyeParams> | undefined): EyeParams {
   return { ...DEFAULT_EYE_PARAMS, ...(params ?? {}) }
 }
 
+function normalizeEyeParamsOverride(params: Partial<EyeParams> | null | undefined): EyeParams | null {
+  return params ? normalizeEyeParams(params) : null
+}
+
+function normalizeEyeColorsOverride(colors: Partial<EyeColors> | null | undefined): EyeColors | null {
+  return colors ? { ...DEFAULT_EYE_COLORS, ...colors } : null
+}
+
 /** Backfills fields added after a project/autosave was written (e.g. the old scalar
  * `irisSize`/`pupilSize` becoming `irisWidth`/`irisHeight`/`pupilWidth`/`pupilHeight`, or
- * the whole `colors`/`display` themes) with defaults, so older saves on disk or in
- * localStorage don't break the renderer or leave sliders holding `undefined`. */
+ * the whole `colors`/`display` themes, or the per-eye override fields added for the Eye
+ * Target feature) with defaults, so older saves on disk or in localStorage don't break the
+ * renderer or leave sliders holding `undefined`. */
 function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Project {
   const animations: Animation[] = (raw.animations ?? []).map((a) => ({
     ...a,
@@ -29,7 +38,11 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
   const expressions: Expression[] = (raw.expressions ?? []).map((e) => ({
     ...e,
     params: normalizeEyeParams(e.params),
-    colors: { ...DEFAULT_EYE_COLORS, ...(e.colors ?? {}) }
+    colors: { ...DEFAULT_EYE_COLORS, ...(e.colors ?? {}) },
+    leftParams: normalizeEyeParamsOverride(e.leftParams),
+    rightParams: normalizeEyeParamsOverride(e.rightParams),
+    leftColors: normalizeEyeColorsOverride(e.leftColors),
+    rightColors: normalizeEyeColorsOverride(e.rightColors)
   }))
 
   return {
@@ -39,6 +52,10 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     updatedAt: raw.updatedAt ?? Date.now(),
     eyeBase: normalizeEyeParams(raw.eyeBase),
     colors: { ...DEFAULT_EYE_COLORS, ...(raw.colors ?? {}) },
+    eyeLeftOverride: normalizeEyeParamsOverride(raw.eyeLeftOverride),
+    eyeRightOverride: normalizeEyeParamsOverride(raw.eyeRightOverride),
+    colorsLeftOverride: normalizeEyeColorsOverride(raw.colorsLeftOverride),
+    colorsRightOverride: normalizeEyeColorsOverride(raw.colorsRightOverride),
     display: { ...DEFAULT_DISPLAY, ...(raw.display ?? {}) },
     personality: { ...DEFAULT_PERSONALITY, ...(raw.personality ?? {}) },
     timing: { ...DEFAULT_TIMING, ...(raw.timing ?? {}) },

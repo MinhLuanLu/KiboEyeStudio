@@ -1,7 +1,8 @@
 import { useStore, getActiveAnimation } from '@/state/store'
-import { EYE_PARAM_RANGES } from '@/types'
+import { effectiveEyeParams, EYE_PARAM_RANGES } from '@/types'
 import type { EyeParams } from '@/types'
 import { Slider } from '@/components/ui/Slider'
+import { EyeTargetSelector } from '@/components/ui/EyeTargetSelector'
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -15,7 +16,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 export function ControlsPanel() {
-  const eyeBase = useStore((s) => s.project.eyeBase)
+  const project = useStore((s) => s.project)
+  const eyeTarget = useStore((s) => s.eyeTarget)
   const timing = useStore((s) => s.project.timing)
   const setEyeParam = useStore((s) => s.setEyeParam)
   const setTiming = useStore((s) => s.setTiming)
@@ -27,7 +29,9 @@ export function ControlsPanel() {
   const anim = useStore(() => getActiveAnimation())
   const selectedKeyframe = mode === 'animate' ? anim?.keyframes.find((k) => k.id === selectedKeyframeId) : undefined
 
-  const target: EyeParams = selectedKeyframe ? selectedKeyframe.params : eyeBase
+  // Keyframes stay a single shared pose (mirrored for both eyes) — the Eye Target selector
+  // only applies to the live base pose, so it's disabled while a keyframe is selected.
+  const target: EyeParams = selectedKeyframe ? selectedKeyframe.params : effectiveEyeParams(project, eyeTarget)
   const setParam = <K extends keyof EyeParams>(key: K, value: EyeParams[K]) => {
     if (selectedKeyframe) updateKeyframeParams(selectedKeyframe.id, { [key]: value } as Partial<EyeParams>)
     else setEyeParam(key, value)
@@ -37,13 +41,15 @@ export function ControlsPanel() {
     <div className="flex flex-col gap-5 p-3 overflow-y-auto h-full">
       {selectedKeyframe ? (
         <div className="text-xs bg-studio-accent/15 text-studio-accent border border-studio-accent/40 rounded-md px-2 py-1.5">
-          Editing selected keyframe
+          Editing selected keyframe (shared, both eyes)
         </div>
       ) : (
         <div className="text-xs bg-studio-panel2 text-studio-muted border border-studio-border rounded-md px-2 py-1.5">
-          Editing base design pose
+          Editing base design pose — {eyeTarget === 'both' ? 'Both Eyes' : eyeTarget === 'left' ? 'Left Eye' : 'Right Eye'}
         </div>
       )}
+
+      <EyeTargetSelector disabled={!!selectedKeyframe} />
 
       <Section title="Eye Shape">
         <Slider label="Eye Width" value={target.width} min={EYE_PARAM_RANGES.width[0]} max={EYE_PARAM_RANGES.width[1]} onCommitStart={checkpoint} onChange={(v) => setParam('width', v)} />
@@ -60,6 +66,7 @@ export function ControlsPanel() {
         <Slider label="Pupil Height" value={target.pupilHeight} min={EYE_PARAM_RANGES.pupilHeight[0]} max={EYE_PARAM_RANGES.pupilHeight[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilHeight', v)} />
         <Slider label="Pupil X" value={target.pupilX} min={EYE_PARAM_RANGES.pupilX[0]} max={EYE_PARAM_RANGES.pupilX[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilX', v)} />
         <Slider label="Pupil Y" value={target.pupilY} min={EYE_PARAM_RANGES.pupilY[0]} max={EYE_PARAM_RANGES.pupilY[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilY', v)} />
+        <Slider label="Pupil Rotation" value={target.pupilRotation} min={EYE_PARAM_RANGES.pupilRotation[0]} max={EYE_PARAM_RANGES.pupilRotation[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('pupilRotation', v)} />
       </Section>
 
       <Section title="Eyelids">

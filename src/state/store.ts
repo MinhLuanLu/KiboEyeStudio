@@ -7,6 +7,7 @@ import type {
   EasingType,
   EyeColors,
   EyeParams,
+  EyeSide,
   GlobalTiming,
   Keyframe,
   Personality,
@@ -31,6 +32,10 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     updatedAt: now,
     eyeBase: { ...DEFAULT_EYE_PARAMS },
     colors: { ...DEFAULT_EYE_COLORS },
+    eyeLeftOverride: null,
+    eyeRightOverride: null,
+    colorsLeftOverride: null,
+    colorsRightOverride: null,
     display: { ...DEFAULT_DISPLAY },
     personality: { ...DEFAULT_PERSONALITY },
     timing: { ...DEFAULT_TIMING },
@@ -53,6 +58,10 @@ interface StoreState {
   activeAnimationId: string
   selectedKeyframeId: string | null
   selectedExpressionId: string | null
+
+  /** Which eye(s) setEyeParam/setEyeParams/setColor currently write to. Switching this
+   * alone never mutates the project — only a subsequent edit does. */
+  eyeTarget: EyeSide
 
   mode: PlaybackMode
   playbackState: PlaybackState
@@ -80,6 +89,7 @@ interface StoreState {
   touch: () => void
 
   // design
+  setEyeTarget: (target: EyeSide) => void
   setEyeParam: <K extends keyof EyeParams>(key: K, value: EyeParams[K]) => void
   setEyeParams: (partial: Partial<EyeParams>) => void
 
@@ -153,6 +163,7 @@ export const useStore = create<StoreState>()(
     activeAnimationId: '',
     selectedKeyframeId: null,
     selectedExpressionId: null,
+    eyeTarget: 'both',
 
     mode: 'design',
     playbackState: 'stopped',
@@ -201,6 +212,7 @@ export const useStore = create<StoreState>()(
         s.activeAnimationId = s.project.animations[0]?.id ?? ''
         s.selectedKeyframeId = null
         s.selectedExpressionId = null
+        s.eyeTarget = 'both'
         s.playbackState = 'stopped'
         s.playbackTimeMs = 0
       }),
@@ -215,6 +227,7 @@ export const useStore = create<StoreState>()(
         s.activeAnimationId = project.animations[0]?.id ?? ''
         s.selectedKeyframeId = null
         s.selectedExpressionId = null
+        s.eyeTarget = 'both'
         s.playbackState = 'stopped'
         s.playbackTimeMs = 0
       }),
@@ -233,21 +246,53 @@ export const useStore = create<StoreState>()(
         s.dirty = true
       }),
 
+    setEyeTarget: (target) => set((s) => void (s.eyeTarget = target)),
+
     setEyeParam: (key, value) =>
       set((s) => {
-        s.project.eyeBase[key] = value
+        if (s.eyeTarget === 'both') {
+          s.project.eyeBase[key] = value
+          s.project.eyeLeftOverride = null
+          s.project.eyeRightOverride = null
+        } else if (s.eyeTarget === 'left') {
+          if (!s.project.eyeLeftOverride) s.project.eyeLeftOverride = { ...s.project.eyeBase }
+          s.project.eyeLeftOverride[key] = value
+        } else {
+          if (!s.project.eyeRightOverride) s.project.eyeRightOverride = { ...s.project.eyeBase }
+          s.project.eyeRightOverride[key] = value
+        }
         s.dirty = true
       }),
 
     setEyeParams: (partial) =>
       set((s) => {
-        Object.assign(s.project.eyeBase, partial)
+        if (s.eyeTarget === 'both') {
+          Object.assign(s.project.eyeBase, partial)
+          s.project.eyeLeftOverride = null
+          s.project.eyeRightOverride = null
+        } else if (s.eyeTarget === 'left') {
+          if (!s.project.eyeLeftOverride) s.project.eyeLeftOverride = { ...s.project.eyeBase }
+          Object.assign(s.project.eyeLeftOverride, partial)
+        } else {
+          if (!s.project.eyeRightOverride) s.project.eyeRightOverride = { ...s.project.eyeBase }
+          Object.assign(s.project.eyeRightOverride, partial)
+        }
         s.dirty = true
       }),
 
     setColor: (key, value) =>
       set((s) => {
-        s.project.colors[key] = value
+        if (s.eyeTarget === 'both') {
+          s.project.colors[key] = value
+          s.project.colorsLeftOverride = null
+          s.project.colorsRightOverride = null
+        } else if (s.eyeTarget === 'left') {
+          if (!s.project.colorsLeftOverride) s.project.colorsLeftOverride = { ...s.project.colors }
+          s.project.colorsLeftOverride[key] = value
+        } else {
+          if (!s.project.colorsRightOverride) s.project.colorsRightOverride = { ...s.project.colors }
+          s.project.colorsRightOverride[key] = value
+        }
         s.dirty = true
       }),
 
@@ -255,12 +300,20 @@ export const useStore = create<StoreState>()(
       set((s) => {
         Object.assign(s.project.eyeBase, params)
         s.project.colors = { ...colors }
+        s.project.eyeLeftOverride = null
+        s.project.eyeRightOverride = null
+        s.project.colorsLeftOverride = null
+        s.project.colorsRightOverride = null
         const newId = nanoid(10)
         s.project.expressions.push({
           id: newId,
           name: expressionName,
           params: { ...s.project.eyeBase, ...params },
-          colors: { ...colors }
+          colors: { ...colors },
+          leftParams: null,
+          rightParams: null,
+          leftColors: null,
+          rightColors: null
         })
         s.selectedExpressionId = newId
         s.mode = 'design'
@@ -445,7 +498,11 @@ export const useStore = create<StoreState>()(
           id: newId,
           name,
           params: { ...s.project.eyeBase },
-          colors: { ...s.project.colors }
+          colors: { ...s.project.colors },
+          leftParams: s.project.eyeLeftOverride ? { ...s.project.eyeLeftOverride } : null,
+          rightParams: s.project.eyeRightOverride ? { ...s.project.eyeRightOverride } : null,
+          leftColors: s.project.colorsLeftOverride ? { ...s.project.colorsLeftOverride } : null,
+          rightColors: s.project.colorsRightOverride ? { ...s.project.colorsRightOverride } : null
         })
         s.selectedExpressionId = newId
         s.dirty = true
@@ -458,6 +515,10 @@ export const useStore = create<StoreState>()(
         if (expr) {
           s.project.eyeBase = { ...expr.params }
           s.project.colors = { ...expr.colors }
+          s.project.eyeLeftOverride = expr.leftParams ? { ...expr.leftParams } : null
+          s.project.eyeRightOverride = expr.rightParams ? { ...expr.rightParams } : null
+          s.project.colorsLeftOverride = expr.leftColors ? { ...expr.leftColors } : null
+          s.project.colorsRightOverride = expr.rightColors ? { ...expr.rightColors } : null
           s.selectedExpressionId = id
           s.mode = 'design'
         }
@@ -470,6 +531,10 @@ export const useStore = create<StoreState>()(
         if (expr) {
           expr.params = { ...s.project.eyeBase }
           expr.colors = { ...s.project.colors }
+          expr.leftParams = s.project.eyeLeftOverride ? { ...s.project.eyeLeftOverride } : null
+          expr.rightParams = s.project.eyeRightOverride ? { ...s.project.eyeRightOverride } : null
+          expr.leftColors = s.project.colorsLeftOverride ? { ...s.project.colorsLeftOverride } : null
+          expr.rightColors = s.project.colorsRightOverride ? { ...s.project.colorsRightOverride } : null
         }
         s.dirty = true
       }),

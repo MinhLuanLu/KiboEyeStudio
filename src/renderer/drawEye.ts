@@ -67,6 +67,7 @@ export function drawEye(
     pupilHeight,
     pupilX,
     pupilY,
+    pupilRotation,
     upperEyelid,
     lowerEyelid,
     highlightX,
@@ -157,11 +158,13 @@ export function drawEye(
     ctx.restore()
   }
 
-  // Pupil
+  // Pupil — rotates around its own center independent of the eye's own `rotation`. Like the
+  // eye clip above, this is automatically confined inside the eye shape by the ctx.clip()
+  // already in effect, however far Pupil X/Y push it toward (or past) the edge.
   if (pupilRX > 0.1 && pupilRY > 0.1) {
     ctx.beginPath()
     ctx.fillStyle = theme.pupil
-    ctx.ellipse(pcx, pcy, pupilRX, pupilRY, 0, 0, Math.PI * 2)
+    ctx.ellipse(pcx, pcy, pupilRX, pupilRY, (pupilRotation * Math.PI) / 180, 0, Math.PI * 2)
     ctx.fill()
   }
 

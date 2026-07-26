@@ -4,7 +4,16 @@ import { DEFAULT_EYE_COLORS } from '@/types'
 import { p } from './helpers'
 
 function expr(name: string, overrides: Parameters<typeof p>[0] = {}): Expression {
-  return { id: nanoid(8), name, params: p(overrides), colors: { ...DEFAULT_EYE_COLORS } }
+  return {
+    id: nanoid(8),
+    name,
+    params: p(overrides),
+    colors: { ...DEFAULT_EYE_COLORS },
+    leftParams: null,
+    rightParams: null,
+    leftColors: null,
+    rightColors: null
+  }
 }
 
 export const builtinExpressions: Expression[] = [

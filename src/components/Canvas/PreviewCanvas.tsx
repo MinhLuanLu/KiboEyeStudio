@@ -3,7 +3,8 @@ import { useStore, getActiveAnimation } from '@/state/store'
 import { renderFace } from '@/renderer/faceRenderer'
 import { sampleAnimation, animationDuration, wrapTime } from '@/engine/interpolate'
 import { IdleEngine } from '@/engine/idleEngine'
-import type { EyeParams } from '@/types'
+import { clampFps, leftEyeColors, leftEyeParams, rightEyeColors, rightEyeParams } from '@/types'
+import type { EyeColors, EyeParams } from '@/types'
 
 const MAX_DT_MS = 100
 
@@ -13,6 +14,12 @@ export function PreviewCanvas() {
   const rafRef = useRef<number>()
   const lastTimeRef = useRef<number | null>(null)
   const fpsAccumRef = useRef({ frames: 0, elapsed: 0 })
+  // Time banked since the last actual tick+draw — lets the loop skip frames to hit the
+  // configured Display FPS while still handing the *full* elapsed real time to the tick
+  // logic below (so animation speed stays real-time-accurate regardless of draw rate,
+  // exactly like the exported firmware: eyesPlayAnimation() reads absolute millis(), so
+  // throttling how often it's called doesn't change how fast an animation plays).
+  const pendingDtRef = useRef(0)
 
   const display = useStore((s) => s.project.display)
 
@@ -37,17 +44,39 @@ export function PreviewCanvas() {
 
     function loop(now: number) {
       if (lastTimeRef.current === null) lastTimeRef.current = now
-      const dt = Math.min(MAX_DT_MS, now - lastTimeRef.current)
+      const rawDt = Math.min(MAX_DT_MS, now - lastTimeRef.current)
       lastTimeRef.current = now
 
       const state = useStore.getState()
+
+      // Throttle to the configured Display FPS. Re-read every rAF (not cached) so a change
+      // to the slider takes effect on the very next frame.
+      const targetFps = clampFps(state.project.display.fps)
+      const frameInterval = 1000 / targetFps
+      pendingDtRef.current += rawDt
+      if (pendingDtRef.current < frameInterval) {
+        rafRef.current = requestAnimationFrame(loop)
+        return
+      }
+      const dt = pendingDtRef.current
+      pendingDtRef.current = 0
+
       let params: EyeParams = state.project.eyeBase
+      let rightParams: EyeParams = params
+      let theme: EyeColors = state.project.colors
+      let rightTheme: EyeColors = theme
       let frameIndex = 0
       let timeMs = state.playbackTimeMs
 
       if (state.mode === 'design') {
         idleEngineRef.current.reset()
-        params = state.project.eyeBase
+        // Design mode is the only place the live pose can actually diverge per eye (Eye
+        // Target: Left/Right) — Animate/Idle keep playing back one shared pose mirrored, as
+        // before, since keyframes/idle drift aren't split per eye.
+        params = leftEyeParams(state.project)
+        rightParams = rightEyeParams(state.project)
+        theme = leftEyeColors(state.project)
+        rightTheme = rightEyeColors(state.project)
         timeMs = 0
       } else if (state.mode === 'animate') {
         const anim = getActiveAnimation()
@@ -80,7 +109,7 @@ export function PreviewCanvas() {
         timeMs = 0
       }
 
-      renderFace(ctx!, params, { ...state.project.display, theme: state.project.colors })
+      renderFace(ctx!, params, { ...state.project.display, theme, rightParams, rightTheme })
 
       const fpsAccum = fpsAccumRef.current
       fpsAccum.frames += 1

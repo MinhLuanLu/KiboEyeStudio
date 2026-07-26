@@ -1,5 +1,5 @@
 import { useStore } from '@/state/store'
-import { DISPLAY_RANGES } from '@/types'
+import { clampFps, DISPLAY_RANGES } from '@/types'
 import type { DisplayShape } from '@/types'
 import { Slider } from '@/components/ui/Slider'
 import { ColorField } from '@/components/ui/ColorField'
@@ -80,6 +80,15 @@ export function DisplayPanel() {
             onChange={(v) => setDisplay('cornerRadius', v)}
           />
         )}
+        <Slider
+          label="Display FPS"
+          value={display.fps}
+          min={DISPLAY_RANGES.fps[0]}
+          max={DISPLAY_RANGES.fps[1]}
+          suffix=" fps"
+          onCommitStart={checkpoint}
+          onChange={(v) => setDisplay('fps', clampFps(v))}
+        />
       </div>
 
       <ColorField

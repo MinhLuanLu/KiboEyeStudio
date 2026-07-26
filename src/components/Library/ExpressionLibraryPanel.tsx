@@ -2,19 +2,24 @@ import { useState, useEffect, useRef } from 'react'
 import { useStore } from '@/state/store'
 import { renderFace } from '@/renderer/faceRenderer'
 import { fitDisplayToBox } from '@/renderer/displayMask'
-import type { EyeColors, EyeParams } from '@/types'
+import { expressionLeftColors, expressionLeftParams, expressionRightColors, expressionRightParams } from '@/types'
+import type { Expression } from '@/types'
 
 const THUMB_BOX = 48
 
-function ExpressionThumb({ params, colors }: { params: EyeParams; colors: EyeColors }) {
+function ExpressionThumb({ expr }: { expr: Expression }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const display = useStore((s) => s.project.display)
   const fitted = fitDisplayToBox(display, THUMB_BOX)
+  const leftParams = expressionLeftParams(expr)
+  const rightParams = expressionRightParams(expr)
+  const leftColors = expressionLeftColors(expr)
+  const rightColors = expressionRightColors(expr)
   useEffect(() => {
     const ctx = ref.current?.getContext('2d')
     if (!ctx) return
-    renderFace(ctx, params, { ...fitted, theme: colors })
-  }, [params, colors, fitted])
+    renderFace(ctx, leftParams, { ...fitted, theme: leftColors, rightParams, rightTheme: rightColors })
+  }, [leftParams, rightParams, leftColors, rightColors, fitted])
   const borderRadius = fitted.shape === 'circle' ? '50%' : fitted.shape === 'rounded' ? `${fitted.cornerRadius}px` : '0px'
   return (
     <canvas
@@ -31,6 +36,10 @@ export function ExpressionLibraryPanel() {
   const expressions = useStore((s) => s.project.expressions)
   const eyeBase = useStore((s) => s.project.eyeBase)
   const projectColors = useStore((s) => s.project.colors)
+  const eyeLeftOverride = useStore((s) => s.project.eyeLeftOverride)
+  const eyeRightOverride = useStore((s) => s.project.eyeRightOverride)
+  const colorsLeftOverride = useStore((s) => s.project.colorsLeftOverride)
+  const colorsRightOverride = useStore((s) => s.project.colorsRightOverride)
   const selectedExpressionId = useStore((s) => s.selectedExpressionId)
   const addExpression = useStore((s) => s.addExpression)
   const applyExpression = useStore((s) => s.applyExpression)
@@ -44,7 +53,14 @@ export function ExpressionLibraryPanel() {
   const [newName, setNewName] = useState('')
 
   const selected = expressions.find((e) => e.id === selectedExpressionId)
-  const isDirty = !!selected && (JSON.stringify(selected.params) !== JSON.stringify(eyeBase) || JSON.stringify(selected.colors) !== JSON.stringify(projectColors))
+  const isDirty =
+    !!selected &&
+    (JSON.stringify(selected.params) !== JSON.stringify(eyeBase) ||
+      JSON.stringify(selected.colors) !== JSON.stringify(projectColors) ||
+      JSON.stringify(selected.leftParams) !== JSON.stringify(eyeLeftOverride) ||
+      JSON.stringify(selected.rightParams) !== JSON.stringify(eyeRightOverride) ||
+      JSON.stringify(selected.leftColors) !== JSON.stringify(colorsLeftOverride) ||
+      JSON.stringify(selected.rightColors) !== JSON.stringify(colorsRightOverride))
 
   const handleSelect = (id: string) => {
     if (id === selectedExpressionId) return
@@ -107,7 +123,7 @@ export function ExpressionLibraryPanel() {
               }`}
               onClick={() => handleSelect(expr.id)}
             >
-              <ExpressionThumb params={expr.params} colors={expr.colors} />
+              <ExpressionThumb expr={expr} />
               {editingId === expr.id ? (
                 <input
                   autoFocus

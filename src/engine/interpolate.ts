@@ -13,6 +13,7 @@ const EYE_PARAM_KEYS = [
   'pupilHeight',
   'pupilX',
   'pupilY',
+  'pupilRotation',
   'upperEyelid',
   'lowerEyelid',
   'highlightX',
@@ -20,10 +21,21 @@ const EYE_PARAM_KEYS = [
   'highlightSize'
 ] as const satisfies readonly (keyof EyeParams)[]
 
+/** Shortest-path interpolation between two angles in degrees, wrapping through 0/360 rather
+ * than always going the "long way" — e.g. lerping 350deg -> 10deg at t=0.5 gives 0deg, not
+ * 180deg. Kept in sync with eyesLerpAngleDeg() in cppExport.ts so the exported firmware
+ * animates pupil rotation identically to the studio's own preview. */
+function lerpAngleDeg(a: number, b: number, t: number): number {
+  const diff = (((b - a + 180) % 360) + 360) % 360
+  const shortest = diff - 180
+  const result = a + shortest * t
+  return ((result % 360) + 360) % 360
+}
+
 export function lerpParams(a: EyeParams, b: EyeParams, t: number): EyeParams {
   const out = {} as EyeParams
   for (const key of EYE_PARAM_KEYS) {
-    out[key] = a[key] + (b[key] - a[key]) * t
+    out[key] = key === 'pupilRotation' ? lerpAngleDeg(a[key], b[key], t) : a[key] + (b[key] - a[key]) * t
   }
   return out
 }
