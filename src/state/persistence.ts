@@ -26,7 +26,11 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     ...a,
     keyframes: a.keyframes.map((k) => ({ ...k, params: normalizeEyeParams(k.params) }))
   }))
-  const expressions: Expression[] = (raw.expressions ?? []).map((e) => ({ ...e, params: normalizeEyeParams(e.params) }))
+  const expressions: Expression[] = (raw.expressions ?? []).map((e) => ({
+    ...e,
+    params: normalizeEyeParams(e.params),
+    colors: { ...DEFAULT_EYE_COLORS, ...(e.colors ?? {}) }
+  }))
 
   return {
     id: raw.id ?? nanoid(10),

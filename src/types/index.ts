@@ -67,6 +67,7 @@ export interface Expression {
   id: string
   name: string
   params: EyeParams
+  colors: EyeColors
 }
 
 export interface Personality {

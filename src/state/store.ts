@@ -52,6 +52,7 @@ interface StoreState {
 
   activeAnimationId: string
   selectedKeyframeId: string | null
+  selectedExpressionId: string | null
 
   mode: PlaybackMode
   playbackState: PlaybackState
@@ -116,6 +117,7 @@ interface StoreState {
   // expressions
   addExpression: (name: string) => void
   applyExpression: (id: string) => void
+  saveExpression: (id: string) => void
   renameExpression: (id: string, name: string) => void
   deleteExpression: (id: string) => void
 
@@ -150,6 +152,7 @@ export const useStore = create<StoreState>()(
 
     activeAnimationId: '',
     selectedKeyframeId: null,
+    selectedExpressionId: null,
 
     mode: 'design',
     playbackState: 'stopped',
@@ -197,6 +200,7 @@ export const useStore = create<StoreState>()(
         s.future = []
         s.activeAnimationId = s.project.animations[0]?.id ?? ''
         s.selectedKeyframeId = null
+        s.selectedExpressionId = null
         s.playbackState = 'stopped'
         s.playbackTimeMs = 0
       }),
@@ -210,6 +214,7 @@ export const useStore = create<StoreState>()(
         s.future = []
         s.activeAnimationId = project.animations[0]?.id ?? ''
         s.selectedKeyframeId = null
+        s.selectedExpressionId = null
         s.playbackState = 'stopped'
         s.playbackTimeMs = 0
       }),
@@ -250,7 +255,14 @@ export const useStore = create<StoreState>()(
       set((s) => {
         Object.assign(s.project.eyeBase, params)
         s.project.colors = { ...colors }
-        s.project.expressions.push({ id: nanoid(10), name: expressionName, params: { ...s.project.eyeBase, ...params } })
+        const newId = nanoid(10)
+        s.project.expressions.push({
+          id: newId,
+          name: expressionName,
+          params: { ...s.project.eyeBase, ...params },
+          colors: { ...colors }
+        })
+        s.selectedExpressionId = newId
         s.mode = 'design'
         s.dirty = true
       }),
@@ -428,16 +440,36 @@ export const useStore = create<StoreState>()(
 
     addExpression: (name) =>
       set((s) => {
-        s.project.expressions.push({ id: nanoid(10), name, params: { ...s.project.eyeBase } })
+        const newId = nanoid(10)
+        s.project.expressions.push({
+          id: newId,
+          name,
+          params: { ...s.project.eyeBase },
+          colors: { ...s.project.colors }
+        })
+        s.selectedExpressionId = newId
         s.dirty = true
       }),
 
     applyExpression: (id) =>
       set((s) => {
+        if (s.selectedExpressionId === id) return // already open — avoid discarding live edits on a stray click
         const expr = s.project.expressions.find((e) => e.id === id)
         if (expr) {
           s.project.eyeBase = { ...expr.params }
+          s.project.colors = { ...expr.colors }
+          s.selectedExpressionId = id
           s.mode = 'design'
+        }
+        s.dirty = true
+      }),
+
+    saveExpression: (id) =>
+      set((s) => {
+        const expr = s.project.expressions.find((e) => e.id === id)
+        if (expr) {
+          expr.params = { ...s.project.eyeBase }
+          expr.colors = { ...s.project.colors }
         }
         s.dirty = true
       }),
@@ -452,6 +484,7 @@ export const useStore = create<StoreState>()(
     deleteExpression: (id) =>
       set((s) => {
         s.project.expressions = s.project.expressions.filter((e) => e.id !== id)
+        if (s.selectedExpressionId === id) s.selectedExpressionId = null
         s.dirty = true
       }),
 
@@ -460,6 +493,7 @@ export const useStore = create<StoreState>()(
         s.mode = mode
         s.playbackState = mode === 'animate' ? s.playbackState : 'stopped'
         if (mode !== 'animate') s.playbackTimeMs = 0
+        if (mode !== 'design') s.selectedExpressionId = null
       }),
 
     play: () => set((s) => void (s.playbackState = 'playing')),
