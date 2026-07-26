@@ -8,6 +8,7 @@ import { ExpressionLibraryPanel } from '@/components/Library/ExpressionLibraryPa
 import { ControlsPanel } from '@/components/Controls/ControlsPanel'
 import { PersonalityPanel } from '@/components/Personality/PersonalityPanel'
 import { ColorPanel } from '@/components/Colors/ColorPanel'
+import { DisplayPanel } from '@/components/Display/DisplayPanel'
 import { DevModePanel } from '@/components/DevMode/DevModePanel'
 import { ExportDialog } from '@/components/Export/ExportDialog'
 import { ReferenceImportDialog } from '@/components/Import/ReferenceImportDialog'
@@ -24,7 +25,7 @@ function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'ho
 
 export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions }) {
   const [leftTab, setLeftTab] = useState<'animations' | 'expressions'>('animations')
-  const [rightTab, setRightTab] = useState<'controls' | 'colors' | 'personality'>('controls')
+  const [rightTab, setRightTab] = useState<'controls' | 'colors' | 'display' | 'personality'>('controls')
 
   return (
     <div className="flex flex-col h-screen w-screen">
@@ -90,6 +91,12 @@ export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions })
                   Colors
                 </button>
                 <button
+                  className={`studio-tab flex-1 ${rightTab === 'display' ? 'studio-tab-active' : ''}`}
+                  onClick={() => setRightTab('display')}
+                >
+                  Display
+                </button>
+                <button
                   className={`studio-tab flex-1 ${rightTab === 'personality' ? 'studio-tab-active' : ''}`}
                   onClick={() => setRightTab('personality')}
                 >
@@ -99,6 +106,7 @@ export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions })
               <div className="flex-1 min-h-0">
                 {rightTab === 'controls' && <ControlsPanel />}
                 {rightTab === 'colors' && <ColorPanel />}
+                {rightTab === 'display' && <DisplayPanel />}
                 {rightTab === 'personality' && <PersonalityPanel />}
               </div>
             </div>

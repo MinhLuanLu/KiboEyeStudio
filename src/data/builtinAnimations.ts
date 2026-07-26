@@ -64,8 +64,8 @@ export const builtinAnimations: Animation[] = [
 
   anim('Curious', false, [
     kf(200, 'easeOut', OPEN),
-    kf(420, 'elastic', { width: 90, height: 90, pupilSize: 48, rotation: 8, pupilY: -8 }),
-    kf(900, 'linear', { width: 90, height: 90, pupilSize: 48, rotation: 8, pupilY: -8 }),
+    kf(420, 'elastic', { width: 90, height: 90, pupilWidth: 48, pupilHeight: 48, rotation: 8, pupilY: -8 }),
+    kf(900, 'linear', { width: 90, height: 90, pupilWidth: 48, pupilHeight: 48, rotation: 8, pupilY: -8 }),
     kf(260, 'easeIn', OPEN),
   ]),
 
@@ -89,9 +89,9 @@ export const builtinAnimations: Animation[] = [
   ]),
 
   anim('Notification', false, [
-    kf(140, 'easeOut', { height: 88, width: 84, pupilSize: 48 }),
+    kf(140, 'easeOut', { height: 88, width: 84, pupilWidth: 48, pupilHeight: 48 }),
     kf(120, 'easeIn', OPEN),
-    kf(140, 'easeOut', { height: 88, width: 84, pupilSize: 48 }),
+    kf(140, 'easeOut', { height: 88, width: 84, pupilWidth: 48, pupilHeight: 48 }),
     kf(180, 'easeIn', OPEN),
   ]),
 
@@ -121,9 +121,9 @@ export const builtinAnimations: Animation[] = [
   ]),
 
   anim('Processing', true, [
-    kf(220, 'linear', { pupilX: 0, pupilY: -20, pupilSize: 36 }),
-    kf(220, 'linear', { pupilX: 20, pupilY: 0, pupilSize: 40 }),
-    kf(220, 'linear', { pupilX: 0, pupilY: 20, pupilSize: 36 }),
-    kf(220, 'linear', { pupilX: -20, pupilY: 0, pupilSize: 40 }),
+    kf(220, 'linear', { pupilX: 0, pupilY: -20, pupilWidth: 36, pupilHeight: 36 }),
+    kf(220, 'linear', { pupilX: 20, pupilY: 0, pupilWidth: 40, pupilHeight: 40 }),
+    kf(220, 'linear', { pupilX: 0, pupilY: 20, pupilWidth: 36, pupilHeight: 36 }),
+    kf(220, 'linear', { pupilX: -20, pupilY: 0, pupilWidth: 40, pupilHeight: 40 }),
   ]),
 ]

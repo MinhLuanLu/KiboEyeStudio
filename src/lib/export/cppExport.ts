@@ -30,8 +30,10 @@ function eyeFrameLiteral(params: EyeParams, durationMs: number, easing: EasingTy
     Math.round(params.radius),
     clampByte(params.rotation),
     Math.round(params.distance),
-    Math.round(params.irisSize),
-    Math.round(params.pupilSize),
+    Math.round(params.irisWidth),
+    Math.round(params.irisHeight),
+    Math.round(params.pupilWidth),
+    Math.round(params.pupilHeight),
     clampByte(params.pupilX),
     clampByte(params.pupilY),
     Math.round(params.upperEyelid),
@@ -90,9 +92,9 @@ export function generateCppHeader(project: Project): string {
  * Generated: ${new Date().toISOString()}
  *
  * Field order in EyeFrame matches the studio's EyeParams model:
- *   width, height, radius, rotation, distance, irisSize, pupilSize, pupilX, pupilY,
- *   upperEyelid, lowerEyelid, highlightX, highlightY, highlightSize,
- *   durationMs, easing, bezierX1, bezierY1, bezierX2, bezierY2
+ *   width, height, radius, rotation, distance, irisWidth, irisHeight, pupilWidth,
+ *   pupilHeight, pupilX, pupilY, upperEyelid, lowerEyelid, highlightX, highlightY,
+ *   highlightSize, durationMs, easing, bezierX1, bezierY1, bezierX2, bezierY2
  * (bezier fields only matter when easing == EYE_EASE_BEZIER, scaled 0-100)
  *
  * Eye colors are exported below as RGB565 #defines (sclera/iris/pupil/highlight/shadow/
@@ -109,7 +111,9 @@ export function generateCppHeader(project: Project): string {
 #define ${guard}
 
 #include <stdint.h>
-#include <avr/pgmspace.h> // remove if your ESP32 core already provides PROGMEM (it does by default)
+#if defined(__AVR__)
+#include <avr/pgmspace.h> // only classic AVR boards need this; ESP32/ESP8266/SAMD/RP2040 cores already define PROGMEM
+#endif
 
 enum EyeEasing : uint8_t {
   EYE_EASE_LINEAR = 0,
@@ -125,8 +129,8 @@ struct EyeFrame {
   uint8_t width, height, radius;
   int8_t rotation;
   uint8_t distance;
-  uint8_t irisSize;
-  uint8_t pupilSize;
+  uint8_t irisWidth, irisHeight;
+  uint8_t pupilWidth, pupilHeight;
   int8_t pupilX, pupilY;
   uint8_t upperEyelid, lowerEyelid;
   int8_t highlightX, highlightY;

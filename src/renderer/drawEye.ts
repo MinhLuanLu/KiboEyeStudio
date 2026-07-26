@@ -39,8 +39,10 @@ export function drawEye(
     height,
     radius,
     rotation,
-    irisSize,
-    pupilSize,
+    irisWidth,
+    irisHeight,
+    pupilWidth,
+    pupilHeight,
     pupilX,
     pupilY,
     upperEyelid,
@@ -92,38 +94,49 @@ export function drawEye(
     ctx.restore()
   }
 
-  const halfSpan = Math.min(width, height) / 2
-  const irisR = Math.max(0, (irisSize / 100) * halfSpan)
-  const pupilR = Math.max(0, (pupilSize / 100) * halfSpan)
+  // Iris/pupil radii scale independently per axis off the eye's own width/height, mirroring
+  // how the eye shape itself is controlled (not a single shared "size" like older versions).
+  const irisRX = Math.max(0, (irisWidth / 100) * (width / 2))
+  const irisRY = Math.max(0, (irisHeight / 100) * (height / 2))
+  const pupilRX = Math.max(0, (pupilWidth / 100) * (width / 2))
+  const pupilRY = Math.max(0, (pupilHeight / 100) * (height / 2))
   const pcx = sign * (pupilX / 100) * (width / 2)
   const pcy = (pupilY / 100) * (height / 2)
 
-  // Iris
-  if (irisR > 0.1) {
-    const irisGrad = ctx.createRadialGradient(pcx, pcy, irisR * 0.15, pcx, pcy, irisR)
+  // Iris — drawn via a scale transform so the radial gradient stretches into a true ellipse
+  // (canvas gradients are otherwise always circular).
+  if (irisRX > 0.1 && irisRY > 0.1) {
+    ctx.save()
+    ctx.translate(pcx, pcy)
+    ctx.scale(irisRX, irisRY)
+    const irisGrad = ctx.createRadialGradient(0, 0, 0.15, 0, 0, 1)
     irisGrad.addColorStop(0, shadeColor(theme.iris, 12))
     irisGrad.addColorStop(0.75, theme.iris)
     irisGrad.addColorStop(1, shadeColor(theme.iris, -22))
     ctx.beginPath()
     ctx.fillStyle = irisGrad
-    ctx.arc(pcx, pcy, irisR, 0, Math.PI * 2)
+    ctx.arc(0, 0, 1, 0, Math.PI * 2)
     ctx.fill()
+    ctx.restore()
   }
 
   // Pupil
-  if (pupilR > 0.1) {
+  if (pupilRX > 0.1 && pupilRY > 0.1) {
     ctx.beginPath()
     ctx.fillStyle = theme.pupil
-    ctx.arc(pcx, pcy, pupilR, 0, Math.PI * 2)
+    ctx.ellipse(pcx, pcy, pupilRX, pupilRY, 0, 0, Math.PI * 2)
     ctx.fill()
   }
 
-  // Highlight glint, positioned relative to the pupil
-  const highlightBase = pupilR > 0.1 ? pupilR : irisR
+  // Highlight glint, positioned relative to the pupil (or iris if the pupil is hidden) —
+  // stays a simple circle even when the iris/pupil are stretched into ellipses.
+  const highlightBaseX = pupilRX > 0.1 ? pupilRX : irisRX
+  const highlightBaseY = pupilRY > 0.1 ? pupilRY : irisRY
+  const highlightBase = (highlightBaseX + highlightBaseY) / 2
   const hR = Math.max(0, (highlightSize / 100) * highlightBase)
   if (hR > 0.1 && highlightBase > 0.1) {
-    const hx = pcx + sign * (highlightX / 100) * highlightBase
-    const hy = pcy + (highlightY / 100) * highlightBase
+    const hx = pcx + sign * (highlightX / 100) * highlightBaseX
+    const hy = pcy + (highlightY / 100) * highlightBaseY
     ctx.beginPath()
     ctx.fillStyle = theme.highlight
     ctx.globalAlpha = 0.92

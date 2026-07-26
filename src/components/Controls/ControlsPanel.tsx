@@ -54,8 +54,10 @@ export function ControlsPanel() {
       </Section>
 
       <Section title="Iris & Pupil">
-        <Slider label="Iris Size" value={target.irisSize} min={EYE_PARAM_RANGES.irisSize[0]} max={EYE_PARAM_RANGES.irisSize[1]} onCommitStart={checkpoint} onChange={(v) => setParam('irisSize', v)} />
-        <Slider label="Pupil Size" value={target.pupilSize} min={EYE_PARAM_RANGES.pupilSize[0]} max={EYE_PARAM_RANGES.pupilSize[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilSize', v)} />
+        <Slider label="Iris Width" value={target.irisWidth} min={EYE_PARAM_RANGES.irisWidth[0]} max={EYE_PARAM_RANGES.irisWidth[1]} onCommitStart={checkpoint} onChange={(v) => setParam('irisWidth', v)} />
+        <Slider label="Iris Height" value={target.irisHeight} min={EYE_PARAM_RANGES.irisHeight[0]} max={EYE_PARAM_RANGES.irisHeight[1]} onCommitStart={checkpoint} onChange={(v) => setParam('irisHeight', v)} />
+        <Slider label="Pupil Width" value={target.pupilWidth} min={EYE_PARAM_RANGES.pupilWidth[0]} max={EYE_PARAM_RANGES.pupilWidth[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilWidth', v)} />
+        <Slider label="Pupil Height" value={target.pupilHeight} min={EYE_PARAM_RANGES.pupilHeight[0]} max={EYE_PARAM_RANGES.pupilHeight[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilHeight', v)} />
         <Slider label="Pupil X" value={target.pupilX} min={EYE_PARAM_RANGES.pupilX[0]} max={EYE_PARAM_RANGES.pupilX[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilX', v)} />
         <Slider label="Pupil Y" value={target.pupilY} min={EYE_PARAM_RANGES.pupilY[0]} max={EYE_PARAM_RANGES.pupilY[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilY', v)} />
       </Section>

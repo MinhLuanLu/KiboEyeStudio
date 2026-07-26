@@ -203,11 +203,12 @@ export function analyzeEyeImage(imageData: ImageData): AnalysisResult {
     }
   }
 
-  const halfSpanPx = Math.min(W, H) / 2
+  const halfW = W / 2
+  const halfH = H / 2
   const clamp = (v: number, [lo, hi]: [number, number]) => Math.max(lo, Math.min(hi, v))
 
-  const pupilOffsetX = clamp(((cx - W / 2) / halfSpanPx) * 100, EYE_PARAM_RANGES.pupilX)
-  const pupilOffsetY = clamp(((cy - H / 2) / halfSpanPx) * 100, EYE_PARAM_RANGES.pupilY)
+  const pupilOffsetX = clamp(((cx - halfW) / halfW) * 100, EYE_PARAM_RANGES.pupilX)
+  const pupilOffsetY = clamp(((cy - halfH) / halfH) * 100, EYE_PARAM_RANGES.pupilY)
   const highlightBaseR = pupilRpx > 1 ? pupilRpx : irisRpx
   const highlightX = clamp(((hlx - cx) / highlightBaseR) * 100, EYE_PARAM_RANGES.highlightX)
   const highlightY = clamp(((hly - cy) / highlightBaseR) * 100, EYE_PARAM_RANGES.highlightY)
@@ -221,8 +222,14 @@ export function analyzeEyeImage(imageData: ImageData): AnalysisResult {
   const height = clamp(aspect >= 1 ? targetMax / aspect : targetMax, EYE_PARAM_RANGES.height)
   const radius = clamp(Math.min(width, height) * 0.22, EYE_PARAM_RANGES.radius)
 
-  const irisSize = clamp((irisRpx / halfSpanPx) * 100, EYE_PARAM_RANGES.irisSize)
-  const pupilSize = clamp((pupilRpx / halfSpanPx) * 100, EYE_PARAM_RANGES.pupilSize)
+  // The detected pupil/iris are circular in crop-pixel space, but expressed here as a
+  // fraction of each axis independently (matching the studio's irisWidth/irisHeight and
+  // pupilWidth/pupilHeight sliders) — comes out perfectly round for a square crop, and
+  // scales sensibly with the crop's own aspect ratio otherwise.
+  const irisWidth = clamp((irisRpx / halfW) * 100, EYE_PARAM_RANGES.irisWidth)
+  const irisHeight = clamp((irisRpx / halfH) * 100, EYE_PARAM_RANGES.irisHeight)
+  const pupilWidth = clamp((pupilRpx / halfW) * 100, EYE_PARAM_RANGES.pupilWidth)
+  const pupilHeight = clamp((pupilRpx / halfH) * 100, EYE_PARAM_RANGES.pupilHeight)
 
   const irisHex = rgbToHex(...irisColorRgb)
 
@@ -232,8 +239,10 @@ export function analyzeEyeImage(imageData: ImageData): AnalysisResult {
       height,
       radius,
       rotation: 0,
-      irisSize,
-      pupilSize,
+      irisWidth,
+      irisHeight,
+      pupilWidth,
+      pupilHeight,
       pupilX: pupilOffsetX,
       pupilY: pupilOffsetY,
       upperEyelid: 0,

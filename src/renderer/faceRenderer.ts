@@ -6,14 +6,15 @@ export interface FaceRenderOptions extends DisplayMaskOptions {
   theme?: EyeTheme
 }
 
-/** Renders the full 240x240 (or `size`x`size`) round-display face: black background,
- * circular clip, mirrored left/right eye pair, optional bezel. Call once per animation frame. */
+/** Renders the full display face onto a `width`x`height` canvas: background fill, shape
+ * clip (circle/square/rounded), mirrored left/right eye pair, optional bezel. Call once
+ * per animation frame. */
 export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, options: FaceRenderOptions): void {
-  const { size, theme = DEFAULT_EYE_THEME } = options
+  const { width, height, theme = DEFAULT_EYE_THEME } = options
   applyDisplayMask(ctx, options)
 
-  const cx = size / 2
-  const cy = size / 2
+  const cx = width / 2
+  const cy = height / 2
   const half = params.distance / 2
 
   ctx.save()
@@ -26,6 +27,6 @@ export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, opt
   drawEye(ctx, params, theme, true)
   ctx.restore()
 
-  ctx.restore() // lift the circular clip from applyDisplayMask
+  ctx.restore() // lift the shape clip from applyDisplayMask
   drawBezel(ctx, options)
 }

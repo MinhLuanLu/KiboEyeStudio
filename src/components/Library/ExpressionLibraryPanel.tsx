@@ -1,17 +1,31 @@
 import { useState, useEffect, useRef } from 'react'
 import { useStore } from '@/state/store'
 import { renderFace } from '@/renderer/faceRenderer'
+import { fitDisplayToBox } from '@/renderer/displayMask'
 import type { EyeParams } from '@/types'
+
+const THUMB_BOX = 48
 
 function ExpressionThumb({ params }: { params: EyeParams }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const colors = useStore((s) => s.project.colors)
+  const display = useStore((s) => s.project.display)
+  const fitted = fitDisplayToBox(display, THUMB_BOX)
   useEffect(() => {
     const ctx = ref.current?.getContext('2d')
     if (!ctx) return
-    renderFace(ctx, params, { size: 48, showBezel: false, theme: colors })
-  }, [params, colors])
-  return <canvas ref={ref} width={48} height={48} className="rounded-full shrink-0" />
+    renderFace(ctx, params, { ...fitted, theme: colors })
+  }, [params, colors, fitted])
+  const borderRadius = fitted.shape === 'circle' ? '50%' : fitted.shape === 'rounded' ? `${fitted.cornerRadius}px` : '0px'
+  return (
+    <canvas
+      ref={ref}
+      width={Math.round(fitted.width)}
+      height={Math.round(fitted.height)}
+      style={{ borderRadius }}
+      className="shrink-0"
+    />
+  )
 }
 
 export function ExpressionLibraryPanel() {

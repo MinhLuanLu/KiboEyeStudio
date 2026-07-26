@@ -18,7 +18,7 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
   const future = useStore((s) => s.future.length)
   const devModeOpen = useStore((s) => s.devModeOpen)
   const toggleDevMode = useStore((s) => s.toggleDevMode)
-  const showBezel = useStore((s) => s.showBezel)
+  const showBezel = useStore((s) => s.project.display.showBezel)
   const toggleBezel = useStore((s) => s.toggleBezel)
   const setExportDialogOpen = useStore((s) => s.setExportDialogOpen)
   const setReferenceImportOpen = useStore((s) => s.setReferenceImportOpen)

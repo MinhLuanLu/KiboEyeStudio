@@ -1,6 +1,6 @@
 import { nanoid } from 'nanoid'
 import type { Animation, Expression, EyeParams, Project } from '@/types'
-import { DEFAULT_EYE_COLORS, DEFAULT_EYE_PARAMS, DEFAULT_PERSONALITY, DEFAULT_TIMING } from '@/types'
+import { DEFAULT_DISPLAY, DEFAULT_EYE_COLORS, DEFAULT_EYE_PARAMS, DEFAULT_PERSONALITY, DEFAULT_TIMING } from '@/types'
 
 const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
 const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
@@ -17,9 +17,10 @@ function normalizeEyeParams(params: Partial<EyeParams> | undefined): EyeParams {
   return { ...DEFAULT_EYE_PARAMS, ...(params ?? {}) }
 }
 
-/** Backfills fields added after a project/autosave was written (e.g. `irisSize`, the whole
- * `colors` theme) with defaults, so older saves on disk or in localStorage don't break the
- * renderer or leave sliders holding `undefined`. */
+/** Backfills fields added after a project/autosave was written (e.g. the old scalar
+ * `irisSize`/`pupilSize` becoming `irisWidth`/`irisHeight`/`pupilWidth`/`pupilHeight`, or
+ * the whole `colors`/`display` themes) with defaults, so older saves on disk or in
+ * localStorage don't break the renderer or leave sliders holding `undefined`. */
 function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Project {
   const animations: Animation[] = (raw.animations ?? []).map((a) => ({
     ...a,
@@ -34,6 +35,7 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     updatedAt: raw.updatedAt ?? Date.now(),
     eyeBase: normalizeEyeParams(raw.eyeBase),
     colors: { ...DEFAULT_EYE_COLORS, ...(raw.colors ?? {}) },
+    display: { ...DEFAULT_DISPLAY, ...(raw.display ?? {}) },
     personality: { ...DEFAULT_PERSONALITY, ...(raw.personality ?? {}) },
     timing: { ...DEFAULT_TIMING, ...(raw.timing ?? {}) },
     animations,

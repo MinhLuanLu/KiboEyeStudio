@@ -5,7 +5,6 @@ import { sampleAnimation, animationDuration, wrapTime } from '@/engine/interpola
 import { IdleEngine } from '@/engine/idleEngine'
 import type { EyeParams } from '@/types'
 
-const CANVAS_SIZE = 240
 const MAX_DT_MS = 100
 
 export function PreviewCanvas() {
@@ -15,16 +14,26 @@ export function PreviewCanvas() {
   const lastTimeRef = useRef<number | null>(null)
   const fpsAccumRef = useRef({ frames: 0, elapsed: 0 })
 
+  const display = useStore((s) => s.project.display)
+
+  // Resize the backing canvas + reset the DPR transform whenever the configured display
+  // size changes. Kept separate from the rAF loop below so resizing doesn't restart it.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-
     const dpr = window.devicePixelRatio || 1
-    canvas.width = CANVAS_SIZE * dpr
-    canvas.height = CANVAS_SIZE * dpr
+    canvas.width = display.width * dpr
+    canvas.height = display.height * dpr
     ctx.scale(dpr, dpr)
+  }, [display.width, display.height])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
 
     function loop(now: number) {
       if (lastTimeRef.current === null) lastTimeRef.current = now
@@ -71,7 +80,7 @@ export function PreviewCanvas() {
         timeMs = 0
       }
 
-      renderFace(ctx!, params, { size: CANVAS_SIZE, showBezel: state.showBezel, theme: state.project.colors })
+      renderFace(ctx!, params, { ...state.project.display, theme: state.project.colors })
 
       const fpsAccum = fpsAccumRef.current
       fpsAccum.frames += 1
@@ -93,13 +102,11 @@ export function PreviewCanvas() {
     }
   }, [])
 
+  const borderRadius = display.shape === 'circle' ? '50%' : display.shape === 'rounded' ? `${display.cornerRadius}px` : '0px'
+
   return (
     <div className="flex items-center justify-center w-full h-full">
-      <canvas
-        ref={canvasRef}
-        style={{ width: CANVAS_SIZE, height: CANVAS_SIZE }}
-        className="rounded-full shadow-floating"
-      />
+      <canvas ref={canvasRef} style={{ width: display.width, height: display.height, borderRadius }} className="shadow-floating" />
     </div>
   )
 }

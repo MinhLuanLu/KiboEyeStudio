@@ -4,8 +4,10 @@ export interface EyeParams {
   radius: number
   distance: number
   rotation: number
-  irisSize: number
-  pupilSize: number
+  irisWidth: number
+  irisHeight: number
+  pupilWidth: number
+  pupilHeight: number
   pupilX: number
   pupilY: number
   upperEyelid: number
@@ -24,6 +26,17 @@ export interface EyeColors {
   glow: string
   shadowIntensity: number
   glowIntensity: number
+}
+
+export type DisplayShape = 'circle' | 'square' | 'rounded'
+
+export interface DisplaySettings {
+  shape: DisplayShape
+  width: number
+  height: number
+  cornerRadius: number
+  backgroundColor: string
+  showBezel: boolean
 }
 
 export type EasingType =
@@ -81,6 +94,7 @@ export interface Project {
   updatedAt: number
   eyeBase: EyeParams
   colors: EyeColors
+  display: DisplaySettings
   personality: Personality
   timing: GlobalTiming
   animations: Animation[]
@@ -96,8 +110,10 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   radius: 26,
   distance: 96,
   rotation: 0,
-  irisSize: 58,
-  pupilSize: 32,
+  irisWidth: 58,
+  irisHeight: 58,
+  pupilWidth: 32,
+  pupilHeight: 32,
   pupilX: 0,
   pupilY: 0,
   upperEyelid: 0,
@@ -116,6 +132,21 @@ export const DEFAULT_EYE_COLORS: EyeColors = {
   glow: '#5b8cff',
   shadowIntensity: 30,
   glowIntensity: 25
+}
+
+export const DEFAULT_DISPLAY: DisplaySettings = {
+  shape: 'circle',
+  width: 240,
+  height: 240,
+  cornerRadius: 24,
+  backgroundColor: '#000000',
+  showBezel: true
+}
+
+export const DISPLAY_RANGES = {
+  width: [60, 480] as [number, number],
+  height: [60, 480] as [number, number],
+  cornerRadius: [0, 160] as [number, number]
 }
 
 export const DEFAULT_PERSONALITY: Personality = {
@@ -139,11 +170,13 @@ export const DEFAULT_TIMING: GlobalTiming = {
 export const EYE_PARAM_RANGES: Record<keyof EyeParams, [number, number]> = {
   width: [20, 130],
   height: [20, 130],
-  radius: [0, 65],
+  radius: [0, 130],
   distance: [0, 160],
   rotation: [-45, 45],
-  irisSize: [10, 100],
-  pupilSize: [5, 100],
+  irisWidth: [10, 100],
+  irisHeight: [10, 100],
+  pupilWidth: [5, 100],
+  pupilHeight: [5, 100],
   pupilX: [-40, 40],
   pupilY: [-40, 40],
   upperEyelid: [0, 100],

@@ -3,10 +3,12 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from '@/state/store'
 import { analyzeEyeImage, type AnalysisResult } from '@/lib/analysis/imageAnalyzer'
 import { renderFace } from '@/renderer/faceRenderer'
+import { fitDisplayToBox } from '@/renderer/displayMask'
 import type { EyeParams } from '@/types'
 
 const ANALYSIS_SIZE = 160
 const DISPLAY_MAX = 420
+const PREVIEW_BOX = 200
 
 interface Rect {
   x: number
@@ -19,6 +21,7 @@ export function ReferenceImportDialog() {
   const open = useStore((s) => s.referenceImportOpen)
   const setOpen = useStore((s) => s.setReferenceImportOpen)
   const eyeBase = useStore((s) => s.project.eyeBase)
+  const projectDisplay = useStore((s) => s.project.display)
   const checkpoint = useStore((s) => s.checkpoint)
   const applyGeneratedEye = useStore((s) => s.applyGeneratedEye)
 
@@ -40,8 +43,8 @@ export function ReferenceImportDialog() {
     const ctx = previewCanvasRef.current.getContext('2d')
     if (!ctx) return
     const merged: EyeParams = { ...eyeBase, ...result.eyeParams }
-    renderFace(ctx, merged, { size: 200, showBezel: false, theme: result.colors })
-  }, [result, eyeBase])
+    renderFace(ctx, merged, { ...fitDisplayToBox(projectDisplay, PREVIEW_BOX), theme: result.colors })
+  }, [result, eyeBase, projectDisplay])
 
   useEffect(
     () => () => {
@@ -51,6 +54,9 @@ export function ReferenceImportDialog() {
   )
 
   if (!open) return null
+
+  const previewFit = fitDisplayToBox(projectDisplay, PREVIEW_BOX)
+  const previewBorderRadius = previewFit.shape === 'circle' ? '50%' : previewFit.shape === 'rounded' ? `${previewFit.cornerRadius}px` : '0px'
 
   const reset = () => {
     setFileName(null)
@@ -230,14 +236,20 @@ export function ReferenceImportDialog() {
               <div className="flex items-center gap-6">
                 <div className="flex flex-col items-center gap-1.5">
                   <span className="studio-label">Generated Eye</span>
-                  <canvas ref={previewCanvasRef} width={200} height={200} className="rounded-full shadow-floating" />
+                  <canvas
+                    ref={previewCanvasRef}
+                    width={Math.round(previewFit.width)}
+                    height={Math.round(previewFit.height)}
+                    style={{ borderRadius: previewBorderRadius }}
+                    className="shadow-floating"
+                  />
                 </div>
                 <div className="flex flex-col gap-1 text-xs font-mono text-studio-muted">
                   <span>sclera {result.colors.sclera}</span>
                   <span>iris {result.colors.iris}</span>
                   <span>pupil {result.colors.pupil}</span>
-                  <span>iris size {result.eyeParams.irisSize?.toFixed(0)}</span>
-                  <span>pupil size {result.eyeParams.pupilSize?.toFixed(0)}</span>
+                  <span>iris {result.eyeParams.irisWidth?.toFixed(0)}×{result.eyeParams.irisHeight?.toFixed(0)}</span>
+                  <span>pupil {result.eyeParams.pupilWidth?.toFixed(0)}×{result.eyeParams.pupilHeight?.toFixed(0)}</span>
                 </div>
                 <button className="studio-btn-primary ml-auto self-center" onClick={handleApply}>
                   Apply to Project
