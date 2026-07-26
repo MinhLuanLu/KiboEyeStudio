@@ -28,6 +28,7 @@ export function ColorPanel() {
         <ColorField label="Highlight" value={colors.highlight} onCommitStart={checkpoint} onChange={(v) => setColor('highlight', v)} />
         <ColorField label="Shadow" value={colors.shadow} onCommitStart={checkpoint} onChange={(v) => setColor('shadow', v)} />
         <ColorField label="Glow" value={colors.glow} onCommitStart={checkpoint} onChange={(v) => setColor('glow', v)} />
+        <ColorField label="Border" value={colors.border} onCommitStart={checkpoint} onChange={(v) => setColor('border', v)} />
       </div>
 
       <div className="flex flex-col gap-2.5">
@@ -48,6 +49,15 @@ export function ColorPanel() {
           suffix="%"
           onCommitStart={checkpoint}
           onChange={(v) => setColor('glowIntensity', v)}
+        />
+        <Slider
+          label="Border Opacity"
+          value={colors.borderOpacity}
+          min={0}
+          max={100}
+          suffix="%"
+          onCommitStart={checkpoint}
+          onChange={(v) => setColor('borderOpacity', v)}
         />
       </div>
 

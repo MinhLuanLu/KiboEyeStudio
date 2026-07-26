@@ -10,7 +10,7 @@ export interface FaceRenderOptions extends DisplayMaskOptions {
  * clip (circle/square/rounded), mirrored left/right eye pair, optional bezel. Call once
  * per animation frame. */
 export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, options: FaceRenderOptions): void {
-  const { width, height, theme = DEFAULT_EYE_THEME } = options
+  const { width, height, theme = DEFAULT_EYE_THEME, backgroundColor } = options
   applyDisplayMask(ctx, options)
 
   const cx = width / 2
@@ -19,12 +19,12 @@ export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, opt
 
   ctx.save()
   ctx.translate(cx - half, cy)
-  drawEye(ctx, params, theme, false)
+  drawEye(ctx, params, theme, false, backgroundColor)
   ctx.restore()
 
   ctx.save()
   ctx.translate(cx + half, cy)
-  drawEye(ctx, params, theme, true)
+  drawEye(ctx, params, theme, true, backgroundColor)
   ctx.restore()
 
   ctx.restore() // lift the shape clip from applyDisplayMask

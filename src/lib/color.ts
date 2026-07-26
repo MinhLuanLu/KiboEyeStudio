@@ -20,6 +20,16 @@ export function shadeColor(hex: string, percent: number): string {
   return rgbToHex(r + (t - r) * p, g + (t - g) * p, b + (t - b) * p)
 }
 
+/** Linearly blends two hex colors; t=0 -> a, t=1 -> b. Used to pre-bake an opacity-like
+ * effect into a single flat color for targets (Canvas 2D ring trick, RGB565 firmware) that
+ * either shouldn't or can't do real per-pixel alpha compositing. */
+export function mixColors(a: string, b: string, t: number): string {
+  const [ar, ag, ab] = hexToRgb(a)
+  const [br, bg, bb] = hexToRgb(b)
+  const clamped = Math.max(0, Math.min(1, t))
+  return rgbToHex(ar + (br - ar) * clamped, ag + (bg - ag) * clamped, ab + (bb - ab) * clamped)
+}
+
 export function luminance01(r: number, g: number, b: number): number {
   return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
 }

@@ -24,8 +24,10 @@ export interface EyeColors {
   highlight: string
   shadow: string
   glow: string
+  border: string
   shadowIntensity: number
   glowIntensity: number
+  borderOpacity: number
 }
 
 export type DisplayShape = 'circle' | 'square' | 'rounded'
@@ -131,8 +133,10 @@ export const DEFAULT_EYE_COLORS: EyeColors = {
   highlight: '#ffffff',
   shadow: '#000010',
   glow: '#5b8cff',
+  border: '#ffffff',
   shadowIntensity: 30,
-  glowIntensity: 25
+  glowIntensity: 25,
+  borderOpacity: 5
 }
 
 export const DEFAULT_DISPLAY: DisplaySettings = {

@@ -1,5 +1,9 @@
 import type { Animation, DisplaySettings, EasingType, Expression, EyeColors, EyeParams, Project } from '@/types'
-import { hexToRgb565 } from '@/lib/color'
+import { hexToRgb565, mixColors } from '@/lib/color'
+
+// Ring thickness in device pixels — matches the BORDER_WIDTH constant in
+// src/renderer/drawEye.ts so the preview and this export draw an identical width.
+const BORDER_WIDTH_PX = 3
 
 const EASING_ENUM: Record<EasingType, string> = {
   linear: 'EYE_EASE_LINEAR',
@@ -74,6 +78,10 @@ function toRgb565Hex(hex: string): string {
 }
 
 function exportColors(colors: EyeColors, display: DisplaySettings): string {
+  // RGB565 has no alpha channel, so Border Opacity is pre-blended here into a single flat
+  // color against the display background (matching the ring trick eyesDrawEye uses below):
+  // 0% -> exactly the background color (invisible ring), 100% -> the pure border color.
+  const borderBlend = mixColors(display.backgroundColor, colors.border, colors.borderOpacity / 100)
   return [
     `#define EYE_COLOR_BACKGROUND ${toRgb565Hex(display.backgroundColor)} // RGB565 — Display panel's background color`,
     `#define EYE_COLOR_SCLERA     ${toRgb565Hex(colors.sclera)}`,
@@ -81,21 +89,23 @@ function exportColors(colors: EyeColors, display: DisplaySettings): string {
     `#define EYE_COLOR_PUPIL      ${toRgb565Hex(colors.pupil)}`,
     `#define EYE_COLOR_HIGHLIGHT  ${toRgb565Hex(colors.highlight)}`,
     `#define EYE_COLOR_SHADOW     ${toRgb565Hex(colors.shadow)}  // shadow arc, intensity ${Math.round(colors.shadowIntensity)}% (not encodable in RGB565 — blend in software)`,
-    `#define EYE_COLOR_GLOW       ${toRgb565Hex(colors.glow)}  // outer glow, intensity ${Math.round(colors.glowIntensity)}%`
+    `#define EYE_COLOR_GLOW       ${toRgb565Hex(colors.glow)}  // outer glow, intensity ${Math.round(colors.glowIntensity)}%`,
+    `#define EYE_COLOR_BORDER     ${toRgb565Hex(borderBlend)}  // border color pre-blended with background at ${Math.round(colors.borderOpacity)}% opacity`,
+    `#define EYE_BORDER_WIDTH     ${BORDER_WIDTH_PX}  // ring thickness in pixels`
   ].join('\n')
 }
 
 // Bundled "player": easing + interpolation + drawing + playback, so the export is
 // plug-and-play — no separate companion file needed. Own nested include guard so two
 // exported headers (different projects) can both be #included in the same sketch without
-// a duplicate-definition error; only the outer KIBO_EYE_ANIMATIONS_* guard differs per file.
-const PLAYER_CODE = `#ifndef KIBO_EYE_PLAYER_H
-#define KIBO_EYE_PLAYER_H
+// a duplicate-definition error; only the outer EYES_EYE_ANIMATIONS_* guard differs per file.
+const PLAYER_CODE = `#ifndef EYES_EYE_PLAYER_H
+#define EYES_EYE_PLAYER_H
 
 #include <math.h>
 
 // ---- Easing — same curves as the studio's Easing picker ----
-inline float kiboEase(float t, uint8_t type, int8_t bx1, int8_t by1, int8_t bx2, int8_t by2) {
+inline float eyesEase(float t, uint8_t type, int8_t bx1, int8_t by1, int8_t bx2, int8_t by2) {
   if (t < 0) t = 0;
   if (t > 1) t = 1;
   switch (type) {
@@ -149,7 +159,7 @@ struct LiveEye {
   float highlightX, highlightY, highlightSize;
 };
 
-inline LiveEye kiboLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
+inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   LiveEye r;
   r.width = a.width + (b.width - a.width) * t;
   r.height = a.height + (b.height - a.height) * t;
@@ -172,7 +182,7 @@ inline LiveEye kiboLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
 // Adafruit_GFX has no fillEllipse — fill one via horizontal scanlines using the ellipse
 // equation, same technique fillCircle() itself uses internally for a circle.
 template <typename T>
-inline void kiboFillEllipse(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, uint16_t color) {
+inline void eyesFillEllipse(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, uint16_t color) {
   if (rx <= 0 || ry <= 0) return;
   for (int16_t dy = -ry; dy <= ry; dy++) {
     float t = (float)dy / (float)ry;
@@ -185,13 +195,20 @@ inline void kiboFillEllipse(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t 
 // ---- Drawing — flat-color layered render: sclera -> iris -> pupil -> highlight -> ----
 // eyelids. \`T\` is a template (not \`Adafruit_GFX&\`) on purpose: fillRoundRect()/
 // fillCircle() aren't virtual in Adafruit_GFX, so a buffered subclass like
-// KiboBufferedDisplay below only gets called correctly when the concrete type is known at
+// EyesBufferedDisplay below only gets called correctly when the concrete type is known at
 // compile time. \`bgColor\` should match your Display panel's background so eyelids blend in.
 template <typename T>
-inline void kiboDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor) {
+inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor) {
   int16_t w = (int16_t)e.width, h = (int16_t)e.height;
   int16_t r = (int16_t)min(e.radius, (float)min(w, h) / 2.0f);
   int16_t x = cx - w / 2, y = cy - h / 2;
+
+  // Border — an outer rounded-rect EYE_BORDER_WIDTH larger, in a color already pre-blended
+  // toward the background by Border Opacity (see EYE_COLOR_BORDER above). The sclera fill
+  // right after this covers everything except a thin ring, giving an opaque, flicker-free
+  // border with no per-pixel alpha needed.
+  gfx.fillRoundRect(x - EYE_BORDER_WIDTH, y - EYE_BORDER_WIDTH, w + EYE_BORDER_WIDTH * 2, h + EYE_BORDER_WIDTH * 2,
+                     r + EYE_BORDER_WIDTH, EYE_COLOR_BORDER);
 
   gfx.fillRoundRect(x, y, w, h, r, EYE_COLOR_SCLERA);
 
@@ -204,8 +221,8 @@ inline void kiboDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   int16_t pupilRX = (int16_t)((e.pupilWidth / 100.0f) * (w / 2.0f));
   int16_t pupilRY = (int16_t)((e.pupilHeight / 100.0f) * (h / 2.0f));
 
-  if (irisRX > 0 && irisRY > 0) kiboFillEllipse(gfx, px, py, irisRX, irisRY, EYE_COLOR_IRIS);
-  if (pupilRX > 0 && pupilRY > 0) kiboFillEllipse(gfx, px, py, pupilRX, pupilRY, EYE_COLOR_PUPIL);
+  if (irisRX > 0 && irisRY > 0) eyesFillEllipse(gfx, px, py, irisRX, irisRY, EYE_COLOR_IRIS);
+  if (pupilRX > 0 && pupilRY > 0) eyesFillEllipse(gfx, px, py, pupilRX, pupilRY, EYE_COLOR_PUPIL);
 
   float hlBaseX = pupilRX > 0 ? pupilRX : irisRX;
   float hlBaseY = pupilRY > 0 ? pupilRY : irisRY;
@@ -228,20 +245,20 @@ inline void kiboDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
 }
 
 template <typename T>
-inline void kiboDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& e, uint16_t bgColor) {
+inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& e, uint16_t bgColor) {
   int16_t half = (int16_t)(e.distance / 2);
-  kiboDrawEye(gfx, screenCx - half, screenCy, e, false, bgColor);
-  kiboDrawEye(gfx, screenCx + half, screenCy, e, true, bgColor);
+  eyesDrawEye(gfx, screenCx - half, screenCy, e, false, bgColor);
+  eyesDrawEye(gfx, screenCx + half, screenCy, e, true, bgColor);
 }
 
 // ---- Playback — call every loop() with the same (frames, count, loop, startMillis, ----
 // frameIndex) variables; advances state in-place and fills \`outLive\`. Returns true while
 // still playing, false once a non-looping animation has finished.
-inline bool kiboPlayAnimation(const EyeFrame frames[], uint16_t count, bool loop,
+inline bool eyesPlayAnimation(const EyeFrame frames[], uint16_t count, bool loop,
                                unsigned long& startMillis, uint16_t& frameIndex, LiveEye& outLive) {
   if (count == 0) return false;
   if (count == 1) {
-    outLive = kiboLerpFrame(frames[0], frames[0], 0);
+    outLive = eyesLerpFrame(frames[0], frames[0], 0);
     frameIndex = 0;
     return false;
   }
@@ -261,8 +278,8 @@ inline bool kiboPlayAnimation(const EyeFrame frames[], uint16_t count, bool loop
       if (t > 1) t = 1;
       if (t < 0) t = 0;
       bool finished = !loop && lastSegment && elapsed >= acc + dur;
-      float eased = kiboEase(t, frames[i].easing, frames[i].bezierX1, frames[i].bezierY1, frames[i].bezierX2, frames[i].bezierY2);
-      outLive = kiboLerpFrame(frames[i], frames[next], eased);
+      float eased = eyesEase(t, frames[i].easing, frames[i].bezierX1, frames[i].bezierY1, frames[i].bezierX2, frames[i].bezierY2);
+      outLive = eyesLerpFrame(frames[i], frames[next], eased);
       frameIndex = i;
       return !finished;
     }
@@ -271,22 +288,22 @@ inline bool kiboPlayAnimation(const EyeFrame frames[], uint16_t count, bool loop
 
   if (loop) {
     startMillis += acc;
-    return kiboPlayAnimation(frames, count, loop, startMillis, frameIndex, outLive);
+    return eyesPlayAnimation(frames, count, loop, startMillis, frameIndex, outLive);
   }
-  outLive = kiboLerpFrame(frames[count - 1], frames[count - 1], 0);
+  outLive = eyesLerpFrame(frames[count - 1], frames[count - 1], 0);
   return false;
 }
 
 // ---- Optional: flicker-free buffered display for Adafruit_GC9A01A. Only defined if ----
 // that library is actually installed (checked via __has_include), so this header never
 // forces the dependency on projects using TFT_eSPI/LovyanGFX/etc. — pass your own
-// sprite/canvas type as T to kiboDrawEyePair() instead in that case.
+// sprite/canvas type as T to eyesDrawEyePair() instead in that case.
 #if __has_include(<Adafruit_GC9A01A.h>)
 #include <Adafruit_GC9A01A.h>
-class KiboBufferedDisplay : public Adafruit_GC9A01A {
+class EyesBufferedDisplay : public Adafruit_GC9A01A {
 public:
   using Adafruit_GC9A01A::Adafruit_GC9A01A;
-  ~KiboBufferedDisplay() { delete canvas; }
+  ~EyesBufferedDisplay() { delete canvas; }
 
   void begin(uint32_t freq = 0) {
     Adafruit_GC9A01A::begin(freq);
@@ -315,13 +332,13 @@ private:
 };
 #endif // __has_include(<Adafruit_GC9A01A.h>)
 
-#endif // KIBO_EYE_PLAYER_H
+#endif // EYES_EYE_PLAYER_H
 `
 
 export function generateCppHeader(project: Project): string {
-  const guard = `KIBO_EYE_ANIMATIONS_${toIdentifier(project.name).toUpperCase() || 'PROJECT'}_H`
+  const guard = `EYES_EYE_ANIMATIONS_${toIdentifier(project.name).toUpperCase() || 'PROJECT'}_H`
   const header = `/*
- * Generated by Kibo Eye Studio — do not hand-edit, re-export instead.
+ * Generated by Eyes Eye Studio — do not hand-edit, re-export instead.
  * Project: ${project.name}
  * Generated: ${new Date().toISOString()}
  *
@@ -332,7 +349,8 @@ export function generateCppHeader(project: Project): string {
  * (bezier fields only matter when easing == EYE_EASE_BEZIER, scaled 0-100)
  *
  * Eye colors are exported below as RGB565 #defines (sclera/iris/pupil/highlight/shadow/
- * glow) matching the studio's Color panel.
+ * glow/border) matching the studio's Color panel. EYE_COLOR_BORDER already has Border
+ * Opacity pre-blended into it (RGB565 has no alpha channel) — see eyesDrawEye() below.
  *
  * This file is plug-and-play: it also bundles the "player" (easing, interpolation, and
  * drawing) as inline functions, so you don't need a separate companion file. Minimal usage:
@@ -341,11 +359,11 @@ export function generateCppHeader(project: Project): string {
  *   #include "eyes.h"              //    (Arduino's auto-library-discovery only scans your
  *                                  //     .ino's own #include lines, not ones nested inside
  *                                  //     a conditional #if in an included header — so this
- *                                  //     explicit line is what makes KiboBufferedDisplay
+ *                                  //     explicit line is what makes EyesBufferedDisplay
  *                                  //     below actually get defined; omit it and it's
  *                                  //     silently skipped instead of failing to compile)
  *
- *   KiboBufferedDisplay tft(TFT_CS, TFT_DC, TFT_RST);  // flicker-free buffered display
+ *   EyesBufferedDisplay tft(TFT_CS, TFT_DC, TFT_RST);  // flicker-free buffered display
  *   unsigned long animStart = 0;
  *   uint16_t frameIndex = 0;
  *
@@ -357,15 +375,15 @@ export function generateCppHeader(project: Project): string {
  *
  *   void loop() {
  *     LiveEye live;
- *     kiboPlayAnimation(Anim_Idle, Anim_Idle_count, Anim_Idle_loop, animStart, frameIndex, live);
+ *     eyesPlayAnimation(Anim_Idle, Anim_Idle_count, Anim_Idle_loop, animStart, frameIndex, live);
  *     tft.fillScreen(EYE_COLOR_BACKGROUND);
- *     kiboDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND);  // 120,120 = center of a 240x240 panel
+ *     eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND);  // 120,120 = center of a 240x240 panel
  *     tft.present();
  *     delay(16);
  *   }
  *
  * Using TFT_eSPI/LovyanGFX instead of Adafruit_GC9A01A? Skip that #include — pass your own
- * sprite/canvas object as the template type to kiboDrawEyePair()/kiboDrawEye() instead;
+ * sprite/canvas object as the template type to eyesDrawEyePair()/eyesDrawEye() instead;
  * they just need fillRoundRect/fillCircle/fillRect/drawFastHLine methods with the usual
  * Adafruit_GFX signatures.
  */

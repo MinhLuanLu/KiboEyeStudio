@@ -1,5 +1,5 @@
 import type { EyeColors, EyeParams } from '@/types'
-import { EYE_PARAM_RANGES } from '@/types'
+import { DEFAULT_EYE_COLORS, EYE_PARAM_RANGES } from '@/types'
 import { luminance01, saturation01, rgbToHex, shadeColor } from '@/lib/color'
 
 export interface AnalysisResult {
@@ -258,8 +258,10 @@ export function analyzeEyeImage(imageData: ImageData): AnalysisResult {
       highlight: '#ffffff',
       shadow: shadeColor(irisHex, -65),
       glow: shadeColor(irisHex, 15),
+      border: '#ffffff',
       shadowIntensity: 20,
-      glowIntensity: 20
+      glowIntensity: 20,
+      borderOpacity: DEFAULT_EYE_COLORS.borderOpacity
     }
   }
 }
