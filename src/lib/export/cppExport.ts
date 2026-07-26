@@ -55,6 +55,10 @@ function eyeFrameLiteral(params: EyeParams, durationMs: number, easing: EasingTy
     clampDegrees(params.pupilRotation),
     Math.round(params.upperEyelid),
     Math.round(params.lowerEyelid),
+    clampByte(params.upperEyelidTilt),
+    clampByte(params.lowerEyelidTilt),
+    Math.round(params.upperEyelidCurvature),
+    Math.round(params.lowerEyelidCurvature),
     clampByte(params.highlightX),
     clampByte(params.highlightY),
     Math.round(params.highlightSize),
@@ -217,6 +221,8 @@ struct LiveEye {
   float irisWidth, irisHeight, pupilWidth, pupilHeight;
   float pupilX, pupilY, pupilRotation;
   float upperEyelid, lowerEyelid;
+  float upperEyelidTilt, lowerEyelidTilt;
+  float upperEyelidCurvature, lowerEyelidCurvature;
   float highlightX, highlightY, highlightSize;
 };
 
@@ -248,6 +254,10 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   r.pupilRotation = eyesLerpAngleDeg(a.pupilRotation, b.pupilRotation, t);
   r.upperEyelid = a.upperEyelid + (b.upperEyelid - a.upperEyelid) * t;
   r.lowerEyelid = a.lowerEyelid + (b.lowerEyelid - a.lowerEyelid) * t;
+  r.upperEyelidTilt = a.upperEyelidTilt + (b.upperEyelidTilt - a.upperEyelidTilt) * t;
+  r.lowerEyelidTilt = a.lowerEyelidTilt + (b.lowerEyelidTilt - a.lowerEyelidTilt) * t;
+  r.upperEyelidCurvature = a.upperEyelidCurvature + (b.upperEyelidCurvature - a.upperEyelidCurvature) * t;
+  r.lowerEyelidCurvature = a.lowerEyelidCurvature + (b.lowerEyelidCurvature - a.lowerEyelidCurvature) * t;
   r.highlightX = a.highlightX + (b.highlightX - a.highlightX) * t;
   r.highlightY = a.highlightY + (b.highlightY - a.highlightY) * t;
   r.highlightSize = a.highlightSize + (b.highlightSize - a.highlightSize) * t;
@@ -354,6 +364,52 @@ inline void eyesFillEllipseInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t e
   }
 }
 
+// Fills one eyelid: a background-colored region from the eye's own top/bottom edge down to
+// a cutoff line that combines a linear tilt (shear) and a symmetric curvature bulge —
+//   taper(x)  = (1 - (x/halfW)^2)^2      for |x| <= halfW, else 0
+//   yCutoff(x) = yBase + slope*x + curveOffset * taper(x)
+// The taper is a border-radius-style bump, not a plain parabola: at x=0 (lid center) it's 1
+// (full curveOffset bulge), and at x=±halfW (the eye's own flat-side edge) it reaches 0 WITH
+// zero slope, so the curve blends smoothly into the flat sides — and from there into the
+// eye's rounded corners — with no kink, at any eye width/height/radius. This is mathematically
+// identical to what the studio's preview draws: it samples this exact formula one point per
+// pixel column and connects the dots (see the comment above the eyelid block in drawEye.ts).
+// Filled column-by-column (drawFastVLine) since the cutoff is naturally a function of x, not
+// y, which also makes the curve inherently smooth — no per-pixel corner cases, so no sharp
+// edges regardless of how extreme the tilt/curvature values are.
+template <typename T>
+inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, bool isUpper,
+                            float coveragePct, float tiltDeg, float curvaturePct, uint16_t color) {
+  if (coveragePct <= 0) return;
+  float halfW = w / 2.0f;
+  float coverage = (coveragePct / 100.0f) * h;
+  float yBase = isUpper ? (-h / 2.0f + coverage) : (h / 2.0f - coverage);
+  float curveOffset = (curvaturePct / 100.0f) * h * 0.5f;
+  float slope = tanf(tiltDeg * (float)PI / 180.0f);
+  int16_t edgeMargin = (int16_t)ceilf(h / 2.0f) + 2; // a couple px past the eye's own top/bottom, safely covers the flat side
+
+  int16_t halfWi = (int16_t)ceilf(halfW);
+  for (int16_t dx = -halfWi; dx <= halfWi; dx++) {
+    float u = halfW > 0.01f ? (float)dx / halfW : 0.0f;
+    if (u > 1.0f) u = 1.0f;
+    if (u < -1.0f) u = -1.0f;
+    float t = 1.0f - u * u;
+    float taper = t * t;
+    float yCutoff = yBase + slope * (float)dx + curveOffset * taper;
+    int16_t worldX = cx + dx;
+    int16_t yTop, yBottom;
+    if (isUpper) {
+      yTop = cy - edgeMargin;
+      yBottom = cy + (int16_t)roundf(yCutoff);
+    } else {
+      yTop = cy + (int16_t)roundf(yCutoff);
+      yBottom = cy + edgeMargin;
+    }
+    if (yBottom < yTop) continue;
+    gfx.drawFastVLine(worldX, yTop, yBottom - yTop + 1, color);
+  }
+}
+
 // ---- Drawing — flat-color layered render: sclera -> iris -> pupil -> highlight -> ----
 // eyelids. \`T\` is a template (not \`Adafruit_GFX&\`) on purpose: fillRoundRect()/
 // fillCircle() aren't virtual in Adafruit_GFX, so a buffered subclass like
@@ -365,7 +421,6 @@ template <typename T>
 inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor, const EyeColorSet& colors) {
   int16_t w = (int16_t)e.width, h = (int16_t)e.height;
   int16_t radius = (int16_t)e.radius;
-  int16_t x = cx - w / 2, y = cy - h / 2;
 
   // Border — an outer stadium/oval shape EYE_BORDER_WIDTH larger on every side, in a color
   // already pre-blended toward the background by Border Opacity (see EYE_COLORS_LEFT/RIGHT
@@ -404,14 +459,8 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
     gfx.fillCircle(hx, hy, hR, colors.highlight);
   }
 
-  if (e.upperEyelid > 0) {
-    int16_t cover = (int16_t)((e.upperEyelid / 100.0f) * h);
-    gfx.fillRect(x, y, w, cover, bgColor);
-  }
-  if (e.lowerEyelid > 0) {
-    int16_t cover = (int16_t)((e.lowerEyelid / 100.0f) * h);
-    gfx.fillRect(x, y + h - cover, w, cover, bgColor);
-  }
+  eyesFillEyelid(gfx, cx, cy, w, h, true, e.upperEyelid, e.upperEyelidTilt, e.upperEyelidCurvature, bgColor);
+  eyesFillEyelid(gfx, cx, cy, w, h, false, e.lowerEyelid, e.lowerEyelidTilt, e.lowerEyelidCurvature, bgColor);
 }
 
 // Draws both eyes from one shared LiveEye pose (the common case: animations always play
@@ -519,8 +568,9 @@ export function generateCppHeader(project: Project): string {
  *
  * Field order in EyeFrame matches the studio's EyeParams model:
  *   width, height, radius, rotation, distance, irisWidth, irisHeight, pupilWidth,
- *   pupilHeight, pupilX, pupilY, pupilRotation, upperEyelid, lowerEyelid, highlightX,
- *   highlightY, highlightSize, durationMs, easing, bezierX1, bezierY1, bezierX2, bezierY2
+ *   pupilHeight, pupilX, pupilY, pupilRotation, upperEyelid, lowerEyelid, upperEyelidTilt,
+ *   lowerEyelidTilt, upperEyelidCurvature, lowerEyelidCurvature, highlightX, highlightY,
+ *   highlightSize, durationMs, easing, bezierX1, bezierY1, bezierX2, bezierY2
  * (bezier fields only matter when easing == EYE_EASE_BEZIER, scaled 0-100)
  *
  * Pupil X/Y can reach +-100 (the pupil's center can travel all the way to the eye's own
@@ -528,6 +578,12 @@ export function generateCppHeader(project: Project): string {
  * rotation. Both are clipped to the eye's silhouette in eyesFillEllipseInEye() below, so the
  * pupil never paints outside the eye no matter how far it's pushed or rotated — matching the
  * studio preview, which gets the same clipping for free from its canvas clip path.
+ *
+ * Eyelid Tilt (-45..45deg) shears each lid's covering edge independently of the other; Eyelid
+ * Curvature (0-100) controls how pronounced its soft rounded edge is, from flat to highly
+ * curved, blending smoothly into the eye's own rounded corners like a border-radius. The
+ * curve is a closed-form quartic taper; eyesFillEyelid() below evaluates the exact same
+ * yCutoff(x) formula the studio's preview draws, so the two always render identically.
  *
  * Eye colors are exported below as RGB565 #defines (sclera/iris/pupil/highlight/shadow/
  * glow/border) matching the studio's Color panel. EYE_COLOR_BORDER already has Border
@@ -607,6 +663,8 @@ struct EyeFrame {
   int8_t pupilX, pupilY;
   uint16_t pupilRotation; // degrees, 0-360
   uint8_t upperEyelid, lowerEyelid;
+  int8_t upperEyelidTilt, lowerEyelidTilt; // degrees, -45..45
+  uint8_t upperEyelidCurvature, lowerEyelidCurvature; // 0 (flat) - 100 (highly curved)
   int8_t highlightX, highlightY;
   uint8_t highlightSize;
   uint16_t durationMs;

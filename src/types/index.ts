@@ -14,6 +14,12 @@ export interface EyeParams {
   pupilRotation: number
   upperEyelid: number
   lowerEyelid: number
+  /** Tilts each lid's covering edge independently, -45..45°. */
+  upperEyelidTilt: number
+  lowerEyelidTilt: number
+  /** How pronounced each lid's soft curved edge is, 0 (flat) to 100 (highly curved). */
+  upperEyelidCurvature: number
+  lowerEyelidCurvature: number
   highlightX: number
   highlightY: number
   highlightSize: number
@@ -142,6 +148,12 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   pupilRotation: 0,
   upperEyelid: 0,
   lowerEyelid: 0,
+  upperEyelidTilt: 0,
+  lowerEyelidTilt: 0,
+  // 5 reproduces the old fixed curve exactly (a project saved before this control existed
+  // backfills to this value via {...DEFAULT_EYE_PARAMS, ...saved} and renders unchanged).
+  upperEyelidCurvature: 5,
+  lowerEyelidCurvature: 5,
   highlightX: -18,
   highlightY: -18,
   highlightSize: 22
@@ -221,6 +233,10 @@ export const EYE_PARAM_RANGES: Record<keyof EyeParams, [number, number]> = {
   pupilRotation: [0, 360],
   upperEyelid: [0, 100],
   lowerEyelid: [0, 100],
+  upperEyelidTilt: [-45, 45],
+  lowerEyelidTilt: [-45, 45],
+  upperEyelidCurvature: [0, 100],
+  lowerEyelidCurvature: [0, 100],
   highlightX: [-40, 40],
   highlightY: [-40, 40],
   highlightSize: [0, 60]

@@ -5,11 +5,12 @@ import { expressionShapeDiverges } from '@/types'
 // padding: 3x uint8 + 1x int8 + 1x uint8 + 2x uint8 (irisWidth/Height) + 2x uint8
 // (pupilWidth/Height) + 2x int8 (pupilX/Y) = 11 bytes, then uint16 pupilRotation needs
 // 2-byte alignment so 1 pad byte is inserted (-> offset 12) + 2 bytes = 14, + 2x uint8
-// (eyelids) + 2x int8 (highlight X/Y) + 1x uint8 (highlightSize) = 19, then uint16
-// durationMs needs 2-byte alignment so 1 more pad byte (-> offset 20) + 2 bytes = 22,
-// + uint8 easing + 4x int8 bezier = 27, rounded up to 28 for the struct's own 2-byte
-// alignment (from its uint16 members).
-const EYE_FRAME_BYTES = 28
+// (eyelids) + 2x int8 (eyelid tilt) + 2x uint8 (eyelid curvature) + 2x int8 (highlight X/Y)
+// + 1x uint8 (highlightSize) = 23 (all packed tightly, no further padding since offset 14
+// was already 2-byte aligned), then uint16 durationMs needs 2-byte alignment so 1 more pad
+// byte (-> offset 24) + 2 bytes = 26, + uint8 easing + 4x int8 bezier = 31, rounded up to
+// 32 for the struct's own 2-byte alignment (from its uint16 members).
+const EYE_FRAME_BYTES = 32
 
 export interface SizeEstimate {
   keyframeCount: number

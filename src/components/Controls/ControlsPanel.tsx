@@ -72,6 +72,10 @@ export function ControlsPanel() {
       <Section title="Eyelids">
         <Slider label="Upper Eyelid" value={target.upperEyelid} min={EYE_PARAM_RANGES.upperEyelid[0]} max={EYE_PARAM_RANGES.upperEyelid[1]} onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelid', v)} />
         <Slider label="Lower Eyelid" value={target.lowerEyelid} min={EYE_PARAM_RANGES.lowerEyelid[0]} max={EYE_PARAM_RANGES.lowerEyelid[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelid', v)} />
+        <Slider label="Upper Eyelid Tilt" value={target.upperEyelidTilt} min={EYE_PARAM_RANGES.upperEyelidTilt[0]} max={EYE_PARAM_RANGES.upperEyelidTilt[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidTilt', v)} />
+        <Slider label="Lower Eyelid Tilt" value={target.lowerEyelidTilt} min={EYE_PARAM_RANGES.lowerEyelidTilt[0]} max={EYE_PARAM_RANGES.lowerEyelidTilt[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidTilt', v)} />
+        <Slider label="Upper Eyelid Curvature" value={target.upperEyelidCurvature} min={EYE_PARAM_RANGES.upperEyelidCurvature[0]} max={EYE_PARAM_RANGES.upperEyelidCurvature[1]} onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidCurvature', v)} />
+        <Slider label="Lower Eyelid Curvature" value={target.lowerEyelidCurvature} min={EYE_PARAM_RANGES.lowerEyelidCurvature[0]} max={EYE_PARAM_RANGES.lowerEyelidCurvature[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidCurvature', v)} />
       </Section>
 
       <Section title="Highlight">

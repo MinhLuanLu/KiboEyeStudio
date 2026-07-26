@@ -70,6 +70,10 @@ export function drawEye(
     pupilRotation,
     upperEyelid,
     lowerEyelid,
+    upperEyelidTilt,
+    lowerEyelidTilt,
+    upperEyelidCurvature,
+    lowerEyelidCurvature,
     highlightX,
     highlightY,
     highlightSize
@@ -187,28 +191,83 @@ export function drawEye(
 
   // Eyelids — slide in from top/bottom, softly curved, clipped to the eye shape. Always
   // matches the display's black background so it reads as the lid occluding the eye.
+  //
+  // Tilt is a *shear* (ctx.transform(1, slope, 0, 1, 0, 0), i.e. y' = y + slope*x), not a
+  // rotation: rotating the covering shape around the eye's distant center reads as an
+  // unnatural swoop for a small local feature like a lid, whereas shearing tilts the edge's
+  // *angle* while keeping it anchored near the eye's own center — the standard technique for
+  // this in 2D character rigs.
+  //
+  // The curved edge itself is a quartic "bump" — a border-radius-style taper, not a plain
+  // parabola:
+  //   taper(x) = (1 - (x/halfW)^2)^2      for |x| <= halfW, else 0
+  //   y(x)     = yBase + curveOffset * taper(x)
+  // At x=0 (lid center) taper=1, giving the full curveOffset bulge. At x=±halfW (the eye's
+  // own flat-side edge) taper AND its slope both reach exactly 0, so the curve blends into
+  // the flat sides — and from there into the eye's rounded corners — with no kink, at any
+  // eye width/height/radius. (A plain parabola (1-(x/halfW)^2) reaches 0 at the edge but with
+  // a nonzero slope, which is what produced a visible corner there; squaring the taper fixes
+  // that while keeping the same closed form.)
+  //
+  // Canvas has no built-in primitive for a quartic curve, so the path is built by sampling
+  // this exact formula at one point per device pixel column and connecting with lineTo — with
+  // that many samples the polyline is visually indistinguishable from a true smooth curve,
+  // and it guarantees this preview evaluates the identical formula eyesFillEyelid() in the
+  // C++ export evaluates per-column, so exported firmware renders the same lid shape.
   ctx.fillStyle = '#000000'
+  const lidMargin = (width + height) * 2 // generous: keeps the lid's flat sides covering fully even after a 45° shear
+  const halfW = width / 2
+  const curveSamples = Math.max(32, Math.ceil(width))
+
+  function eyelidCurvePoints(yBase: number, curveOffset: number, sign: 1 | -1): [number, number][] {
+    const pts: [number, number][] = []
+    if (halfW < 0.01) {
+      pts.push([0, yBase])
+      return pts
+    }
+    for (let i = 0; i <= curveSamples; i++) {
+      const x = halfW - (2 * halfW * i) / curveSamples
+      const u = x / halfW
+      const t = 1 - u * u
+      const taper = t * t
+      pts.push([x, yBase + sign * curveOffset * taper])
+    }
+    return pts
+  }
+
   if (upperEyelid > 0) {
     const coverage = (upperEyelid / 100) * height
-    const y = -height / 2 + coverage
+    const yBase = -height / 2 + coverage
+    const curveOffset = (upperEyelidCurvature / 100) * height * 0.5
+    const slope = Math.tan((upperEyelidTilt * Math.PI) / 180)
+    ctx.save()
+    ctx.transform(1, slope, 0, 1, 0, 0)
     ctx.beginPath()
-    ctx.moveTo(-width / 2 - 2, -height / 2 - 2)
-    ctx.lineTo(width / 2 + 2, -height / 2 - 2)
-    ctx.lineTo(width / 2 + 2, y)
-    ctx.quadraticCurveTo(0, y + height * 0.05, -width / 2 - 2, y)
+    ctx.moveTo(-lidMargin, -lidMargin)
+    ctx.lineTo(lidMargin, -lidMargin)
+    ctx.lineTo(lidMargin, yBase)
+    for (const [x, y] of eyelidCurvePoints(yBase, curveOffset, 1)) ctx.lineTo(x, y)
+    ctx.lineTo(-lidMargin, yBase)
     ctx.closePath()
     ctx.fill()
+    ctx.restore()
   }
   if (lowerEyelid > 0) {
     const coverage = (lowerEyelid / 100) * height
-    const y = height / 2 - coverage
+    const yBase = height / 2 - coverage
+    const curveOffset = (lowerEyelidCurvature / 100) * height * 0.5
+    const slope = Math.tan((lowerEyelidTilt * Math.PI) / 180)
+    ctx.save()
+    ctx.transform(1, slope, 0, 1, 0, 0)
     ctx.beginPath()
-    ctx.moveTo(-width / 2 - 2, height / 2 + 2)
-    ctx.lineTo(width / 2 + 2, height / 2 + 2)
-    ctx.lineTo(width / 2 + 2, y)
-    ctx.quadraticCurveTo(0, y - height * 0.05, -width / 2 - 2, y)
+    ctx.moveTo(-lidMargin, lidMargin)
+    ctx.lineTo(lidMargin, lidMargin)
+    ctx.lineTo(lidMargin, yBase)
+    for (const [x, y] of eyelidCurvePoints(yBase, curveOffset, -1)) ctx.lineTo(x, y)
+    ctx.lineTo(-lidMargin, yBase)
     ctx.closePath()
     ctx.fill()
+    ctx.restore()
   }
 
   ctx.restore()

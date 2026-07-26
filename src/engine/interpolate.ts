@@ -16,6 +16,10 @@ const EYE_PARAM_KEYS = [
   'pupilRotation',
   'upperEyelid',
   'lowerEyelid',
+  'upperEyelidTilt',
+  'lowerEyelidTilt',
+  'upperEyelidCurvature',
+  'lowerEyelidCurvature',
   'highlightX',
   'highlightY',
   'highlightSize'
