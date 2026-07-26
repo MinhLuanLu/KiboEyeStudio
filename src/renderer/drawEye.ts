@@ -10,20 +10,37 @@ export const DEFAULT_EYE_THEME: EyeTheme = DEFAULT_EYE_COLORS
 // (EYE_BORDER_WIDTH in cppExport.ts) so preview and firmware draw an identical width.
 const BORDER_WIDTH = 3
 
+/**
+ * Traces a rounded-rect whose corners are quarter-*ellipses* (independent x/y radii)
+ * rather than plain circular arcTo() corners. A single shared `radius` clamps
+ * independently against half-width and half-height (rx = min(radius, w/2), ry = min(radius,
+ * h/2)), so on a non-square eye the two clamps hit their ceiling at different radius values.
+ * At the true maximum (radius >= max(w/2, h/2)) both rx and ry saturate at w/2 and h/2, every
+ * flat edge segment shrinks to zero length, and the four corner arcs are literally four
+ * quarters of the same ellipse — i.e. a smooth oval, not a rounded rectangle with flat
+ * sides left over on the shorter axis (which is what a single circular corner radius,
+ * clamped only by the smaller dimension, used to leave behind).
+ */
 function roundedRectPath(ctx: CanvasRenderingContext2D, w: number, h: number, radius: number): void {
-  const r = Math.min(radius, w / 2, h / 2)
-  const x = -w / 2
-  const y = -h / 2
+  const hx = w / 2
+  const hy = h / 2
+  const rx = Math.max(0, Math.min(radius, hx))
+  const ry = Math.max(0, Math.min(radius, hy))
   ctx.beginPath()
-  ctx.moveTo(x + r, y)
-  ctx.lineTo(x + w - r, y)
-  ctx.arcTo(x + w, y, x + w, y + r, r)
-  ctx.lineTo(x + w, y + h - r)
-  ctx.arcTo(x + w, y + h, x + w - r, y + h, r)
-  ctx.lineTo(x + r, y + h)
-  ctx.arcTo(x, y + h, x, y + h - r, r)
-  ctx.lineTo(x, y + r)
-  ctx.arcTo(x, y, x + r, y, r)
+  if (rx < 0.01 || ry < 0.01) {
+    ctx.rect(-hx, -hy, w, h)
+    ctx.closePath()
+    return
+  }
+  ctx.moveTo(-hx + rx, -hy)
+  ctx.lineTo(hx - rx, -hy)
+  ctx.ellipse(hx - rx, -hy + ry, rx, ry, 0, -Math.PI / 2, 0)
+  ctx.lineTo(hx, hy - ry)
+  ctx.ellipse(hx - rx, hy - ry, rx, ry, 0, 0, Math.PI / 2)
+  ctx.lineTo(-hx + rx, hy)
+  ctx.ellipse(-hx + rx, hy - ry, rx, ry, 0, Math.PI / 2, Math.PI)
+  ctx.lineTo(-hx, -hy + ry)
+  ctx.ellipse(-hx + rx, -hy + ry, rx, ry, 0, Math.PI, (3 * Math.PI) / 2)
   ctx.closePath()
 }
 

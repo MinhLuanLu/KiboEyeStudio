@@ -192,6 +192,37 @@ inline void eyesFillEllipse(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t 
   }
 }
 
+// Fills a rounded-rect whose corners are quarter-*ellipses* (independent x/y radii), via
+// horizontal scanlines — Adafruit_GFX's own fillRoundRect() only supports a single circular
+// corner radius clamped by the *smaller* of w/h, which leaves flat straight edges on the
+// longer axis even at max radius on a non-square eye. Here rx = min(radius, w/2) and
+// ry = min(radius, h/2) clamp independently, so at radius >= max(w/2, h/2) both saturate
+// (rx=w/2, ry=h/2), every flat segment shrinks to zero, and the shape is a true ellipse —
+// matching roundedRectPath() in the studio's Canvas 2D preview exactly.
+template <typename T>
+inline void eyesFillRoundedRect(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius, uint16_t color) {
+  if (w <= 0 || h <= 0) return;
+  float hx = w / 2.0f;
+  float hy = h / 2.0f;
+  float rx = radius < hx ? (float)radius : hx;
+  float ry = radius < hy ? (float)radius : hy;
+  int16_t halfH = (int16_t)ceilf(hy);
+  for (int16_t dy = -halfH; dy <= halfH; dy++) {
+    float ySide = fabsf((float)dy);
+    if (ySide > hy) continue;
+    float xExtent;
+    if (ry < 0.01f || ySide <= hy - ry) {
+      xExtent = hx;
+    } else {
+      float t = (ySide - (hy - ry)) / ry;
+      if (t > 1.0f) t = 1.0f;
+      xExtent = (hx - rx) + rx * sqrtf(max(0.0f, 1.0f - t * t));
+    }
+    int16_t ix = (int16_t)xExtent;
+    gfx.drawFastHLine(cx - ix, cy + dy, ix * 2 + 1, color);
+  }
+}
+
 // ---- Drawing — flat-color layered render: sclera -> iris -> pupil -> highlight -> ----
 // eyelids. \`T\` is a template (not \`Adafruit_GFX&\`) on purpose: fillRoundRect()/
 // fillCircle() aren't virtual in Adafruit_GFX, so a buffered subclass like
@@ -200,17 +231,20 @@ inline void eyesFillEllipse(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t 
 template <typename T>
 inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor) {
   int16_t w = (int16_t)e.width, h = (int16_t)e.height;
-  int16_t r = (int16_t)min(e.radius, (float)min(w, h) / 2.0f);
+  int16_t radius = (int16_t)e.radius;
   int16_t x = cx - w / 2, y = cy - h / 2;
 
-  // Border — an outer rounded-rect EYE_BORDER_WIDTH larger, in a color already pre-blended
-  // toward the background by Border Opacity (see EYE_COLOR_BORDER above). The sclera fill
-  // right after this covers everything except a thin ring, giving an opaque, flicker-free
-  // border with no per-pixel alpha needed.
-  gfx.fillRoundRect(x - EYE_BORDER_WIDTH, y - EYE_BORDER_WIDTH, w + EYE_BORDER_WIDTH * 2, h + EYE_BORDER_WIDTH * 2,
-                     r + EYE_BORDER_WIDTH, EYE_COLOR_BORDER);
+  // Border — an outer stadium/oval shape EYE_BORDER_WIDTH larger on every side, in a color
+  // already pre-blended toward the background by Border Opacity (see EYE_COLOR_BORDER
+  // above). The sclera fill right after this covers everything except a thin ring, giving
+  // an opaque border with no per-pixel alpha needed. Both fills go through
+  // eyesFillRoundedRect() (elliptical corners) rather than Adafruit_GFX's own
+  // fillRoundRect(), so a maxed-out Radius on a non-square eye renders as a smooth oval
+  // here exactly like it does in the studio's preview.
+  eyesFillRoundedRect(gfx, cx, cy, w + EYE_BORDER_WIDTH * 2, h + EYE_BORDER_WIDTH * 2,
+                       radius + EYE_BORDER_WIDTH, EYE_COLOR_BORDER);
 
-  gfx.fillRoundRect(x, y, w, h, r, EYE_COLOR_SCLERA);
+  eyesFillRoundedRect(gfx, cx, cy, w, h, radius, EYE_COLOR_SCLERA);
 
   int sign = mirror ? -1 : 1;
   int16_t px = cx + (int16_t)(sign * (e.pupilX / 100.0f) * (w / 2.0f));
