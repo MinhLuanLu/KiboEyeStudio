@@ -547,6 +547,12 @@ public:
   void fillCircle(int16_t x, int16_t y, int16_t r, uint16_t color) { canvas->fillCircle(x, y, r, color); }
   void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) { canvas->fillRect(x, y, w, h, color); }
   void drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) { canvas->drawFastHLine(x, y, w, color); }
+  // eyesFillEyelid() fills each eyelid column-by-column via drawFastVLine — without this
+  // override those calls fall through to Adafruit_SPITFT's own drawFastVLine, which writes
+  // straight to the live panel (unbuffered) instead of the offscreen canvas, so the eyelids
+  // flash directly onto the screen for an instant before present() overwrites them with the
+  // correct buffered frame. That was the flicker.
+  void drawFastVLine(int16_t x, int16_t y, int16_t h, uint16_t color) { canvas->drawFastVLine(x, y, h, color); }
 
   // Blit the finished frame to the panel in a single windowed SPI burst.
   void present() { drawRGBBitmap(0, 0, canvas->getBuffer(), width(), height()); }
@@ -633,8 +639,11 @@ export function generateCppHeader(project: Project): string {
  *
  * Using TFT_eSPI/LovyanGFX instead of Adafruit_GC9A01A? Skip that #include — pass your own
  * sprite/canvas object as the template type to eyesDrawEyePair()/eyesDrawEye() instead;
- * they just need fillRoundRect/fillCircle/fillRect/drawFastHLine methods with the usual
- * Adafruit_GFX signatures.
+ * they just need drawFastHLine/drawFastVLine/fillCircle methods with the usual Adafruit_GFX
+ * signatures. If your object is a buffered/offscreen canvas wrapper, make sure ALL THREE are
+ * overridden to draw into the buffer — a method left un-overridden silently falls through to
+ * a live/unbuffered draw straight to the panel, which shows up as flicker (only the eyelids
+ * needing drawFastVLine, so this is easy to miss if you copy an older buffered-wrapper class).
  */
 #ifndef ${guard}
 #define ${guard}
