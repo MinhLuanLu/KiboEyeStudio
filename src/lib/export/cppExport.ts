@@ -106,52 +106,6 @@ function toRgb565Hex(hex: string): string {
   return `0x${hexToRgb565(hex).toString(16).toUpperCase().padStart(4, '0')}`
 }
 
-// Both arrays below pre-bake a *stepped* approximation of a studio effect that relies on
-// real alpha compositing and/or canvas blur — neither of which RGB565/Adafruit_GFX have —
-// into a small fixed set of flat colors, computed once here rather than blended per-pixel on
-// the device. Sizes are shared with the EyeColorSet struct/eyesFillShadowBand()/
-// eyesFillGlowRings() in the generated header, so they must stay in sync with those.
-const SHADOW_BAND_STEPS = 6
-const GLOW_RING_OFFSETS_PX = [11, 6, 2] // outermost to innermost
-
-// Matches the "Ambient shadow arc" in drawEye.ts: a linear gradient from theme.shadow (t=0,
-// top of eye) fading to fully transparent over the top 32% of the eye's height, with an
-// overall alpha of 0.15 + shadowIntensity/100*0.45 — i.e. shadowIntensity never fully hides
-// or fully solidifies the band, matching the preview's own floor/ceiling. Baked into
-// SHADOW_BAND_STEPS flat sclera<->shadow blends here; eyesFillShadowBand() in the header
-// picks the right one per scanline row from the *live* (animated) eye height at runtime.
-function shadowBandLiteral(colors: EyeColors): string {
-  if (colors.shadowIntensity <= 0) {
-    return `{ ${Array.from({ length: SHADOW_BAND_STEPS }, () => toRgb565Hex(colors.sclera)).join(', ')} }`
-  }
-  const overallAlpha = 0.15 + (colors.shadowIntensity / 100) * 0.45
-  const steps = Array.from({ length: SHADOW_BAND_STEPS }, (_, i) => {
-    const f = i / (SHADOW_BAND_STEPS - 1)
-    const alpha = (1 - f) * overallAlpha
-    return toRgb565Hex(mixColors(colors.sclera, colors.shadow, alpha))
-  })
-  return `{ ${steps.join(', ')} }`
-}
-
-// Matches the "Outer glow" in drawEye.ts: theme.glow filled at alpha 0.25 + glowIntensity/
-// 100*0.55 with a canvas blur (4 + glowIntensity/100*22 px) so the edges fade out smoothly.
-// Adafruit_GFX has no blur, so this bakes GLOW_RING_OFFSETS_PX.length concentric rounded-
-// rects here instead, each at a fixed pixel offset beyond the eye's own edge, with alpha
-// split evenly across rings (outermost faintest, innermost strongest) so eyesFillGlowRings()
-// drawing them outer-to-inner in the header reads as a soft halo rather than a hard-edged ring.
-function glowRingLiteral(colors: EyeColors, backgroundColor: string): string {
-  const n = GLOW_RING_OFFSETS_PX.length
-  if (colors.glowIntensity <= 0) {
-    return `{ ${Array.from({ length: n }, () => toRgb565Hex(backgroundColor)).join(', ')} }`
-  }
-  const baseAlpha = 0.25 + (colors.glowIntensity / 100) * 0.55
-  const rings = Array.from({ length: n }, (_, i) => {
-    const alpha = baseAlpha * ((i + 1) / n)
-    return toRgb565Hex(mixColors(backgroundColor, colors.glow, alpha))
-  })
-  return `{ ${rings.join(', ')} }`
-}
-
 // RGB565 has no alpha channel, so Border Opacity is pre-blended here into a single flat
 // color against the display background (matching the ring trick eyesDrawEye uses below):
 // 0% -> exactly the background color (invisible ring), 100% -> the pure border color.
@@ -167,7 +121,7 @@ function colorSetLiteral(colors: EyeColors, backgroundColor: string): string {
     toRgb565Hex(borderBlend),
     Math.round(colors.borderWidth)
   ]
-  return `{ ${fields.join(', ')}, ${shadowBandLiteral(colors)}, ${glowRingLiteral(colors, backgroundColor)} }`
+  return `{ ${fields.join(', ')} }`
 }
 
 // Eye Target (Left/Right editing) lets the two eyes' colors diverge — EYE_COLORS_LEFT and
@@ -183,8 +137,7 @@ function exportColors(project: Project): string {
     `#define EYE_COLOR_BACKGROUND ${toRgb565Hex(display.backgroundColor)} // RGB565 — Display panel's background color`,
     ``,
     `// sclera, iris, pupil, highlight, shadow, glow, border, borderWidth (border already has`,
-    `// Border Opacity pre-blended in — RGB565 has no alpha channel), then the precomputed`,
-    `// shadowBand/glowRing arrays eyesFillShadowBand()/eyesFillGlowRings() below draw from.`,
+    `// Border Opacity pre-blended in — RGB565 has no alpha channel).`,
     `const EyeColorSet EYE_COLORS_LEFT = ${colorSetLiteral(left, display.backgroundColor)};`
   ]
   if (same) {
@@ -491,53 +444,8 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
   }
 }
 
-// Ambient shadow band under the (implied) upper lid crease — a stepped approximation of the
-// studio preview's smooth top-of-eye gradient (see the "Ambient shadow arc" comment in
-// drawEye.ts): RGB565/Adafruit_GFX have no per-pixel alpha, so colors.shadowBand was already
-// pre-baked into EYE_SHADOW_STEPS flat sclera/shadow blends at export time (see
-// shadowBandLiteral() in the studio's cppExport.ts) — this just picks the right one per
-// scanline row from the *live* (possibly mid-animation) eye height and paints it, clipped to
-// the eye's own rounded silhouette the same way eyesFillRoundedRect() is.
-template <typename T>
-inline void eyesFillShadowBand(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius, const uint16_t band[]) {
-  float hx = w / 2.0f;
-  float hy = h / 2.0f;
-  float rx = radius < hx ? (float)radius : hx;
-  float ry = radius < hy ? (float)radius : hy;
-  float shadowH = h * 0.32f;
-  if (shadowH < 0.5f) return;
-  int16_t bandPx = (int16_t)ceilf(shadowH);
-  for (int16_t dy = 0; dy <= bandPx; dy++) {
-    float f = (float)dy / shadowH;
-    if (f > 1.0f) f = 1.0f;
-    uint8_t step = (uint8_t)(f * (EYE_SHADOW_STEPS - 1) + 0.5f);
-    if (step >= EYE_SHADOW_STEPS) step = EYE_SHADOW_STEPS - 1;
-    float worldDy = -hy + dy;
-    float xExtent = eyesEyeHalfWidthAt(worldDy, hx, hy, rx, ry);
-    if (xExtent < 0) continue;
-    int16_t ix = (int16_t)xExtent;
-    gfx.drawFastHLine(cx - ix, cy + (int16_t)worldDy, ix * 2 + 1, band[step]);
-  }
-}
-
-// Outer glow halo — a stepped approximation of the studio preview's blurred glow (see the
-// "Outer glow" comment in drawEye.ts): Adafruit_GFX has no blur primitive, so
-// colors.glowRing was already pre-baked into EYE_GLOW_RINGS concentric background/glow
-// blends at export time (see glowRingLiteral() in the studio's cppExport.ts), each at a
-// fixed pixel offset beyond the eye's own edge. Drawn outermost (faintest) first so each
-// smaller, stronger ring after it paints over that ring's inner portion, reading as a soft
-// fade toward the eye rather than hard-edged rings.
-template <typename T>
-inline void eyesFillGlowRings(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius, const uint16_t rings[]) {
-  static const uint8_t offsets[EYE_GLOW_RINGS] = { 11, 6, 2 }; // px beyond the eye's own edge, outermost to innermost
-  for (uint8_t i = 0; i < EYE_GLOW_RINGS; i++) {
-    uint8_t off = offsets[i];
-    eyesFillRoundedRect(gfx, cx, cy, w + off * 2, h + off * 2, radius + off, rings[i]);
-  }
-}
-
-// ---- Drawing — flat-color layered render: glow -> border -> sclera -> shadow -> iris -> ----
-// pupil -> highlight -> eyelids. \`T\` is a template (not \`Adafruit_GFX&\`) on purpose: fillRoundRect()/
+// ---- Drawing — flat-color layered render: border -> sclera -> iris -> pupil -> highlight -> ----
+// eyelids. \`T\` is a template (not \`Adafruit_GFX&\`) on purpose: fillRoundRect()/
 // fillCircle() aren't virtual in Adafruit_GFX, so a buffered subclass like
 // EyesBufferedDisplay below only gets called correctly when the concrete type is known at
 // compile time. \`bgColor\` should match your Display panel's background so eyelids blend in.
@@ -547,14 +455,6 @@ template <typename T>
 inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor, const EyeColorSet& colors) {
   int16_t w = (int16_t)e.width, h = (int16_t)e.height;
   int16_t radius = (int16_t)e.radius;
-
-  // Outer glow halo — drawn first/outside everything else, same order as the studio preview.
-  // colors.glowRing's innermost ring equals bgColor exactly when Glow Intensity was 0 at
-  // export time (see glowRingLiteral()), so this skips the (otherwise harmless but wasted)
-  // draw calls entirely rather than painting background-colored rings no one would ever see.
-  if (colors.glowRing[EYE_GLOW_RINGS - 1] != bgColor) {
-    eyesFillGlowRings(gfx, cx, cy, w, h, radius, colors.glowRing);
-  }
 
   // Border — an outer stadium/oval shape colors.borderWidth larger on every side, in a color
   // already pre-blended toward the background by Border Opacity (see EYE_COLORS_LEFT/RIGHT
@@ -571,14 +471,6 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   }
 
   eyesFillRoundedRect(gfx, cx, cy, w, h, radius, colors.sclera);
-
-  // Ambient shadow band under the (implied) upper lid crease, same order as the studio
-  // preview (after the sclera fill, before iris/pupil so the shadow reads as being under
-  // them). colors.shadowBand's first step equals colors.sclera exactly when Shadow Intensity
-  // was 0 at export time (see shadowBandLiteral()), so this skips cleanly in that case.
-  if (colors.shadowBand[0] != colors.sclera) {
-    eyesFillShadowBand(gfx, cx, cy, w, h, radius, colors.shadowBand);
-  }
 
   int sign = mirror ? -1 : 1;
   int16_t px = cx + (int16_t)(sign * (e.pupilX / 100.0f) * (w / 2.0f));
@@ -1073,9 +965,6 @@ struct EyeFrame {
   int8_t bezierX1, bezierY1, bezierX2, bezierY2;
 };
 
-#define EYE_SHADOW_STEPS 6
-#define EYE_GLOW_RINGS 3
-
 // One eye's full color palette (RGB565) plus its border thickness — the studio's Eye
 // Target: Left/Right editing lets the two eyes end up with different palettes (and
 // different border widths, via Visual Reference per-eye overrides), so this is a value
@@ -1083,14 +972,6 @@ struct EyeFrame {
 struct EyeColorSet {
   uint16_t sclera, iris, pupil, highlight, shadow, glow, border;
   uint8_t borderWidth; // ring thickness in pixels
-  // Studio's Shadow/Glow effects rely on real alpha blending and canvas blur that RGB565/
-  // Adafruit_GFX don't have — these are that effect pre-baked into a small stepped
-  // approximation at export time (see shadowBandLiteral()/glowRingLiteral() in the studio's
-  // cppExport.ts). All-sclera / all-background respectively means the effect is off
-  // (Shadow/Glow Intensity was 0) — eyesFillShadowBand()/eyesFillGlowRings() below skip
-  // drawing entirely in that case.
-  uint16_t shadowBand[EYE_SHADOW_STEPS]; // top-of-eye gradient, step 0 = strongest (top) .. last = pure sclera
-  uint16_t glowRing[EYE_GLOW_RINGS]; // outer halo, ring 0 = outermost/faintest .. last = innermost/strongest
 };
 
 // One playable animation, bundled into a single value so PlayAnimation() below only needs
