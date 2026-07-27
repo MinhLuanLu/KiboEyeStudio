@@ -261,7 +261,8 @@ export function analyzeEyeImage(imageData: ImageData): AnalysisResult {
       border: '#ffffff',
       shadowIntensity: 20,
       glowIntensity: 20,
-      borderOpacity: DEFAULT_EYE_COLORS.borderOpacity
+      borderOpacity: DEFAULT_EYE_COLORS.borderOpacity,
+      borderWidth: DEFAULT_EYE_COLORS.borderWidth
     }
   }
 }

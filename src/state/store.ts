@@ -6,6 +6,7 @@ import type {
   DisplaySettings,
   EasingType,
   EditorState,
+  Expression,
   EyeColors,
   EyeParams,
   EyeSide,
@@ -16,7 +17,19 @@ import type {
   PlaybackState,
   Project
 } from '@/types'
-import { DEFAULT_DISPLAY, DEFAULT_EYE_COLORS, DEFAULT_EYE_PARAMS, DEFAULT_PERSONALITY, DEFAULT_TIMING } from '@/types'
+import {
+  DEFAULT_DISPLAY,
+  DEFAULT_EYE_COLORS,
+  DEFAULT_EYE_PARAMS,
+  DEFAULT_PERSONALITY,
+  DEFAULT_TIMING,
+  STYLE_EYE_COLOR_FIELDS,
+  STYLE_EYE_PARAM_FIELDS,
+  applyStyleToColors,
+  applyStyleToParams,
+  computeStyleOverrides,
+  defaultVisualReference
+} from '@/types'
 import { builtinAnimations } from '@/data/builtinAnimations'
 import { builtinExpressions } from '@/data/builtinExpressions'
 import { animationDuration } from '@/engine/interpolate'
@@ -26,6 +39,26 @@ const FRAME_STEP_MS = 1000 / 30
 
 export function createDefaultProject(name = 'Untitled Project'): Project {
   const now = Date.now()
+  // The Visual Reference starts identical to the plain defaults, so a fresh project's
+  // built-in animations/expressions compute styleOverrides against the exact same baseline
+  // they were authored against — anything they deliberately changed (Happy's squashed eye
+  // shape, Sleepy's curvature) becomes a protected override; anything left at the default
+  // (Blink's untouched eye shape, only its behavioral eyelid values differ) stays inherited.
+  const visualReference = defaultVisualReference()
+  const animations: Animation[] = builtinAnimations.map((a) => ({
+    ...a,
+    id: nanoid(10),
+    keyframes: a.keyframes.map((k) => ({
+      ...k,
+      id: nanoid(10),
+      styleOverrides: computeStyleOverrides(k.params, null, visualReference)
+    }))
+  }))
+  const expressions: Expression[] = builtinExpressions.map((e) => ({
+    ...e,
+    id: nanoid(10),
+    styleOverrides: computeStyleOverrides(e.params, e.colors, visualReference)
+  }))
   return {
     id: nanoid(10),
     name,
@@ -40,8 +73,9 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     display: { ...DEFAULT_DISPLAY },
     personality: { ...DEFAULT_PERSONALITY },
     timing: { ...DEFAULT_TIMING },
-    animations: builtinAnimations.map((a) => ({ ...a, id: nanoid(10), keyframes: a.keyframes.map((k) => ({ ...k, id: nanoid(10) })) })),
-    expressions: builtinExpressions.map((e) => ({ ...e, id: nanoid(10) }))
+    animations,
+    expressions,
+    visualReference
   }
 }
 
@@ -52,6 +86,14 @@ export interface DevStats {
 }
 
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
+
+export type LeftTab = 'animations' | 'expressions' | 'visual-reference'
+
+export interface ApplyVisualReferenceOptions {
+  scope: 'all' | 'expressions' | 'animations' | 'selected'
+  eyeTarget: EyeSide
+  overrideMode: 'preserve' | 'replace'
+}
 
 interface StoreState {
   project: Project
@@ -76,8 +118,15 @@ interface StoreState {
   devModeOpen: boolean
   devStats: DevStats
   exportDialogOpen: boolean
+  /** One-shot navigation signal: Toolbar sets this true to ask the Visual Reference panel to
+   * jump to its Import Image sub-tab; the panel consumes it (flips back to false) once seen. */
   referenceImportOpen: boolean
   guideOpen: boolean
+
+  /** Which top-level section the left library panel shows. Lives in the store (not local
+   * component state) so actions like the toolbar's "Import Reference..." button can drive
+   * navigation into it directly. */
+  leftTab: LeftTab
 
   past: Project[]
   future: Project[]
@@ -104,6 +153,12 @@ interface StoreState {
   // colors
   setColor: <K extends keyof EyeColors>(key: K, value: EyeColors[K]) => void
   applyGeneratedEye: (params: Partial<EyeParams>, colors: EyeColors, expressionName: string) => void
+
+  // visual reference (shared style inheritance — see types/index.ts)
+  setVisualReferenceParam: <K extends keyof EyeParams>(key: K, value: EyeParams[K]) => void
+  setVisualReferenceColor: <K extends keyof EyeColors>(key: K, value: EyeColors[K]) => void
+  applyVisualReference: (options: ApplyVisualReferenceOptions) => void
+  resetFieldToVisualReference: (kind: 'expression' | 'keyframe', id: string, field: string) => void
 
   // display
   setDisplay: <K extends keyof DisplaySettings>(key: K, value: DisplaySettings[K]) => void
@@ -157,6 +212,8 @@ interface StoreState {
   setExportDialogOpen: (open: boolean) => void
   setReferenceImportOpen: (open: boolean) => void
   setGuideOpen: (open: boolean) => void
+  setLeftTab: (tab: LeftTab) => void
+  openReferenceImport: () => void
 }
 
 function activeAnimationOf(project: Project, id: string): Animation | undefined {
@@ -184,6 +241,7 @@ export const useStore = create<StoreState>()(
     exportDialogOpen: false,
     referenceImportOpen: false,
     guideOpen: false,
+    leftTab: 'animations',
 
     past: [],
     future: [],
@@ -324,18 +382,163 @@ export const useStore = create<StoreState>()(
         s.project.colorsLeftOverride = null
         s.project.colorsRightOverride = null
         const newId = nanoid(10)
+        const newParams = { ...s.project.eyeBase, ...params }
+        const newColors = { ...colors }
         s.project.expressions.push({
           id: newId,
           name: expressionName,
-          params: { ...s.project.eyeBase, ...params },
-          colors: { ...colors },
+          params: newParams,
+          colors: newColors,
           leftParams: null,
           rightParams: null,
           leftColors: null,
-          rightColors: null
+          rightColors: null,
+          styleOverrides: computeStyleOverrides(newParams, newColors, s.project.visualReference)
         })
         s.selectedExpressionId = newId
         s.mode = 'design'
+        s.dirty = true
+      }),
+
+    setVisualReferenceParam: (key, value) =>
+      set((s) => {
+        s.project.visualReference.params[key] = value
+        s.dirty = true
+      }),
+
+    setVisualReferenceColor: (key, value) =>
+      set((s) => {
+        s.project.visualReference.colors[key] = value
+        s.dirty = true
+      }),
+
+    // Applies the current Visual Reference to every field NOT pinned as a custom override
+    // (or, in 'replace' mode, clears all pins first and applies to everything). Runs as one
+    // synchronous Immer producer, so it's atomic — if anything here threw, none of it would
+    // commit — and it's one single entry on the undo stack when the caller checkpoints
+    // beforehand (see VisualReferencePanel's Apply button).
+    applyVisualReference: (options) =>
+      set((s) => {
+        const vr = s.project.visualReference
+
+        // The shared base pose has no protected identity of its own to worry about — UNLESS
+        // it's currently mirroring a selected Expression (applyExpression copies the
+        // expression's pose into eyeBase for live editing). In that case eyeBase must respect
+        // that expression's own styleOverrides too, or the live view would visibly "lose" the
+        // expression's protected customizations the instant Apply runs, even though the
+        // expression's own saved params (handled below) were correctly protected — leaving
+        // the live preview and the saved data inconsistent with each other until the user
+        // re-selects the expression (which a stray click can't even do — see applyExpression's
+        // already-open guard).
+        const liveExpr = s.selectedExpressionId ? s.project.expressions.find((e) => e.id === s.selectedExpressionId) : undefined
+        // In 'replace' mode the expression's own overrides get cleared below too (see
+        // applyToExpression), so the base pose must match that — otherwise eyeBase and the
+        // expression's saved params would disagree about a field this exact Apply call was
+        // supposed to reset.
+        const baseOverrides = options.overrideMode === 'replace' ? [] : liveExpr ? liveExpr.styleOverrides : []
+
+        if (options.eyeTarget === 'both') {
+          applyStyleToParams(s.project.eyeBase, vr.params, baseOverrides)
+          applyStyleToColors(s.project.colors, vr.colors, baseOverrides)
+          if (s.project.eyeLeftOverride) applyStyleToParams(s.project.eyeLeftOverride, vr.params, baseOverrides)
+          if (s.project.eyeRightOverride) applyStyleToParams(s.project.eyeRightOverride, vr.params, baseOverrides)
+          if (s.project.colorsLeftOverride) applyStyleToColors(s.project.colorsLeftOverride, vr.colors, baseOverrides)
+          if (s.project.colorsRightOverride) applyStyleToColors(s.project.colorsRightOverride, vr.colors, baseOverrides)
+        } else if (options.eyeTarget === 'left') {
+          if (!s.project.eyeLeftOverride) s.project.eyeLeftOverride = { ...s.project.eyeBase }
+          if (!s.project.colorsLeftOverride) s.project.colorsLeftOverride = { ...s.project.colors }
+          applyStyleToParams(s.project.eyeLeftOverride, vr.params, baseOverrides)
+          applyStyleToColors(s.project.colorsLeftOverride, vr.colors, baseOverrides)
+        } else {
+          if (!s.project.eyeRightOverride) s.project.eyeRightOverride = { ...s.project.eyeBase }
+          if (!s.project.colorsRightOverride) s.project.colorsRightOverride = { ...s.project.colors }
+          applyStyleToParams(s.project.eyeRightOverride, vr.params, baseOverrides)
+          applyStyleToColors(s.project.colorsRightOverride, vr.colors, baseOverrides)
+        }
+
+        const applyToExpression = (expr: Expression) => {
+          if (options.overrideMode === 'replace') expr.styleOverrides = []
+          const overrides = expr.styleOverrides
+          if (options.eyeTarget === 'both') {
+            applyStyleToParams(expr.params, vr.params, overrides)
+            applyStyleToColors(expr.colors, vr.colors, overrides)
+            if (expr.leftParams) applyStyleToParams(expr.leftParams, vr.params, overrides)
+            if (expr.rightParams) applyStyleToParams(expr.rightParams, vr.params, overrides)
+            if (expr.leftColors) applyStyleToColors(expr.leftColors, vr.colors, overrides)
+            if (expr.rightColors) applyStyleToColors(expr.rightColors, vr.colors, overrides)
+          } else if (options.eyeTarget === 'left') {
+            if (!expr.leftParams) expr.leftParams = { ...expr.params }
+            if (!expr.leftColors) expr.leftColors = { ...expr.colors }
+            applyStyleToParams(expr.leftParams, vr.params, overrides)
+            applyStyleToColors(expr.leftColors, vr.colors, overrides)
+          } else {
+            if (!expr.rightParams) expr.rightParams = { ...expr.params }
+            if (!expr.rightColors) expr.rightColors = { ...expr.colors }
+            applyStyleToParams(expr.rightParams, vr.params, overrides)
+            applyStyleToColors(expr.rightColors, vr.colors, overrides)
+          }
+        }
+
+        // Animations have no left/right concept (keyframes always share one pose between
+        // both eyes) and no colors of their own (colors are always project-global) — so
+        // eyeTarget only matters for expressions/the base pose above, and only EyeParams
+        // style fields need updating per keyframe here.
+        const applyToAnimation = (anim: Animation) => {
+          for (const kf of anim.keyframes) {
+            if (options.overrideMode === 'replace') kf.styleOverrides = []
+            applyStyleToParams(kf.params, vr.params, kf.styleOverrides)
+          }
+        }
+
+        if (options.scope === 'all' || options.scope === 'expressions') {
+          s.project.expressions.forEach(applyToExpression)
+        } else if (options.scope === 'selected' && s.selectedExpressionId) {
+          const expr = s.project.expressions.find((e) => e.id === s.selectedExpressionId)
+          if (expr) applyToExpression(expr)
+        }
+
+        if (options.scope === 'all' || options.scope === 'animations') {
+          s.project.animations.forEach(applyToAnimation)
+        } else if (options.scope === 'selected') {
+          const anim = activeAnimationOf(s.project, s.activeAnimationId)
+          if (anim) applyToAnimation(anim)
+        }
+
+        s.dirty = true
+      }),
+
+    resetFieldToVisualReference: (kind, id, field) =>
+      set((s) => {
+        const vr = s.project.visualReference
+        const isParamField = (STYLE_EYE_PARAM_FIELDS as string[]).includes(field)
+        const isColorField = (STYLE_EYE_COLOR_FIELDS as string[]).includes(field)
+        if (kind === 'expression') {
+          const expr = s.project.expressions.find((e) => e.id === id)
+          if (!expr) return
+          expr.styleOverrides = expr.styleOverrides.filter((f) => f !== field)
+          if (isParamField) {
+            const value = vr.params[field as keyof EyeParams]
+            expr.params[field as keyof EyeParams] = value
+            if (expr.leftParams) expr.leftParams[field as keyof EyeParams] = value
+            if (expr.rightParams) expr.rightParams[field as keyof EyeParams] = value
+          } else if (isColorField) {
+            // EyeColors mixes string (hex colors) and number (intensities/opacity/width)
+            // fields, so a generic keyof-indexed assignment needs a loosened view here —
+            // same reasoning as applyStyleToColors in types/index.ts.
+            const value = (vr.colors as unknown as Record<string, string | number>)[field]
+            ;(expr.colors as unknown as Record<string, string | number>)[field] = value
+            if (expr.leftColors) (expr.leftColors as unknown as Record<string, string | number>)[field] = value
+            if (expr.rightColors) (expr.rightColors as unknown as Record<string, string | number>)[field] = value
+          }
+        } else {
+          const a = activeAnimationOf(s.project, s.activeAnimationId)
+          const kf = a?.keyframes.find((k) => k.id === id)
+          if (!kf) return
+          kf.styleOverrides = kf.styleOverrides.filter((f) => f !== field)
+          if (isParamField) {
+            kf.params[field as keyof EyeParams] = vr.params[field as keyof EyeParams]
+          }
+        }
         s.dirty = true
       }),
 
@@ -374,13 +577,14 @@ export const useStore = create<StoreState>()(
     addAnimation: (name = 'New Animation') => {
       const id = nanoid(10)
       set((s) => {
+        const overrides = computeStyleOverrides(s.project.eyeBase, null, s.project.visualReference)
         s.project.animations.push({
           id,
           name,
           loop: false,
           keyframes: [
-            { id: nanoid(10), duration: 500, easing: 'easeInOut', params: { ...s.project.eyeBase } },
-            { id: nanoid(10), duration: 500, easing: 'easeInOut', params: { ...s.project.eyeBase } }
+            { id: nanoid(10), duration: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, styleOverrides: overrides },
+            { id: nanoid(10), duration: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, styleOverrides: overrides }
           ]
         })
         s.dirty = true
@@ -429,7 +633,17 @@ export const useStore = create<StoreState>()(
 
     importAnimation: (animation) =>
       set((s) => {
-        const copy = { ...animation, id: nanoid(10), keyframes: animation.keyframes.map((k) => ({ ...k, id: nanoid(10) })) }
+        const copy = {
+          ...animation,
+          id: nanoid(10),
+          // Older/external animation JSON predates styleOverrides — fall back to computing
+          // it fresh against the current Visual Reference, same as loading a legacy project.
+          keyframes: animation.keyframes.map((k) => ({
+            ...k,
+            id: nanoid(10),
+            styleOverrides: k.styleOverrides ?? computeStyleOverrides(k.params, null, s.project.visualReference)
+          }))
+        }
         s.project.animations.push(copy)
         s.activeAnimationId = copy.id
         s.dirty = true
@@ -443,7 +657,14 @@ export const useStore = create<StoreState>()(
         if (!a) return
         const insertAt = afterKeyframeId ? a.keyframes.findIndex((k) => k.id === afterKeyframeId) + 1 : a.keyframes.length
         const template = a.keyframes[Math.max(0, insertAt - 1)]?.params ?? s.project.eyeBase
-        const newKf: Keyframe = { id: nanoid(10), duration: 400, easing: 'easeInOut', params: { ...template } }
+        const newParams = { ...template }
+        const newKf: Keyframe = {
+          id: nanoid(10),
+          duration: 400,
+          easing: 'easeInOut',
+          params: newParams,
+          styleOverrides: computeStyleOverrides(newParams, null, s.project.visualReference)
+        }
         a.keyframes.splice(insertAt, 0, newKf)
         s.selectedKeyframeId = newKf.id
         s.dirty = true
@@ -453,7 +674,13 @@ export const useStore = create<StoreState>()(
       set((s) => {
         const a = activeAnimationOf(s.project, s.activeAnimationId)
         const kf = a?.keyframes.find((k) => k.id === keyframeId)
-        if (kf) Object.assign(kf.params, partial)
+        if (kf) {
+          Object.assign(kf.params, partial)
+          // Editing a keyframe directly IS its save point (there's no separate save step
+          // like expressions have) — recompute which fields now differ from the Visual
+          // Reference so the next Apply knows what to protect.
+          kf.styleOverrides = computeStyleOverrides(kf.params, null, s.project.visualReference)
+        }
         s.dirty = true
       }),
 
@@ -513,15 +740,18 @@ export const useStore = create<StoreState>()(
     addExpression: (name) =>
       set((s) => {
         const newId = nanoid(10)
+        const newParams = { ...s.project.eyeBase }
+        const newColors = { ...s.project.colors }
         s.project.expressions.push({
           id: newId,
           name,
-          params: { ...s.project.eyeBase },
-          colors: { ...s.project.colors },
+          params: newParams,
+          colors: newColors,
           leftParams: s.project.eyeLeftOverride ? { ...s.project.eyeLeftOverride } : null,
           rightParams: s.project.eyeRightOverride ? { ...s.project.eyeRightOverride } : null,
           leftColors: s.project.colorsLeftOverride ? { ...s.project.colorsLeftOverride } : null,
-          rightColors: s.project.colorsRightOverride ? { ...s.project.colorsRightOverride } : null
+          rightColors: s.project.colorsRightOverride ? { ...s.project.colorsRightOverride } : null,
+          styleOverrides: computeStyleOverrides(newParams, newColors, s.project.visualReference)
         })
         s.selectedExpressionId = newId
         s.dirty = true
@@ -554,6 +784,11 @@ export const useStore = create<StoreState>()(
           expr.rightParams = s.project.eyeRightOverride ? { ...s.project.eyeRightOverride } : null
           expr.leftColors = s.project.colorsLeftOverride ? { ...s.project.colorsLeftOverride } : null
           expr.rightColors = s.project.colorsRightOverride ? { ...s.project.colorsRightOverride } : null
+          // Saving an expression IS its style-override save point (live edits before this
+          // don't touch expr.params at all — see applyExpression) — recompute fresh so any
+          // field the user just changed away from the Visual Reference becomes protected,
+          // and any field they changed back to match it becomes inherited again.
+          expr.styleOverrides = computeStyleOverrides(expr.params, expr.colors, s.project.visualReference)
         }
         s.dirty = true
       }),
@@ -626,7 +861,13 @@ export const useStore = create<StoreState>()(
     setDevStats: (stats) => set((s) => void (s.devStats = stats)),
     setExportDialogOpen: (open) => set((s) => void (s.exportDialogOpen = open)),
     setReferenceImportOpen: (open) => set((s) => void (s.referenceImportOpen = open)),
-    setGuideOpen: (open) => set((s) => void (s.guideOpen = open))
+    setGuideOpen: (open) => set((s) => void (s.guideOpen = open)),
+    setLeftTab: (tab) => set((s) => void (s.leftTab = tab)),
+    openReferenceImport: () =>
+      set((s) => {
+        s.leftTab = 'visual-reference'
+        s.referenceImportOpen = true
+      })
   }))
 )
 

@@ -48,7 +48,7 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
   const showBezel = useStore((s) => s.project.display.showBezel)
   const toggleBezel = useStore((s) => s.toggleBezel)
   const setExportDialogOpen = useStore((s) => s.setExportDialogOpen)
-  const setReferenceImportOpen = useStore((s) => s.setReferenceImportOpen)
+  const openReferenceImport = useStore((s) => s.openReferenceImport)
   const setGuideOpen = useStore((s) => s.setGuideOpen)
 
   return (
@@ -78,7 +78,7 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
         <button className="studio-btn" onClick={() => setExportDialogOpen(true)}>
           Export...
         </button>
-        <button className="studio-btn" onClick={() => setReferenceImportOpen(true)}>
+        <button className="studio-btn" onClick={openReferenceImport}>
           Import Reference...
         </button>
       </div>

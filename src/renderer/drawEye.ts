@@ -6,10 +6,6 @@ export type EyeTheme = EyeColors
 
 export const DEFAULT_EYE_THEME: EyeTheme = DEFAULT_EYE_COLORS
 
-// Ring thickness in device pixels — matches the constant baked into the C++ export
-// (EYE_BORDER_WIDTH in cppExport.ts) so preview and firmware draw an identical width.
-const BORDER_WIDTH = 3
-
 /**
  * Traces a rounded-rect whose corners are quarter-*ellipses* (independent x/y radii)
  * rather than plain circular arcTo() corners. A single shared `radius` clamps
@@ -98,17 +94,19 @@ export function drawEye(
     ctx.restore()
   }
 
-  // Border — an outer rounded-rect one BORDER_WIDTH larger, filled with the border color
+  // Border — an outer rounded-rect one theme.borderWidth larger, filled with the border color
   // pre-blended toward the display background by borderOpacity. The eye shape drawn on top
   // right after this covers everything except a thin ring, so opacity needs no real alpha
   // compositing (RGB565 on the actual panel has none) — at 100% the ring is the pure border
   // color. At 0% we skip painting the ring at all rather than trusting the blend to land on
   // an exact background-colored no-op: two adjacent same-color arc fills can still leave a
   // faint antialiased seam on some canvas backends/display scale factors, and not drawing
-  // anything is the only way to guarantee zero artifact.
-  if (theme.borderOpacity > 0) {
+  // anything is the only way to guarantee zero artifact. theme.borderWidth is a Visual
+  // Reference style field (see types/index.ts) — matches EYE_BORDER_WIDTH in the C++ export
+  // exactly, so preview and firmware always draw an identical ring thickness.
+  if (theme.borderOpacity > 0 && theme.borderWidth > 0) {
     const ringColor = mixColors(backgroundColor, theme.border, theme.borderOpacity / 100)
-    roundedRectPath(ctx, width + BORDER_WIDTH * 2, height + BORDER_WIDTH * 2, radius + BORDER_WIDTH)
+    roundedRectPath(ctx, width + theme.borderWidth * 2, height + theme.borderWidth * 2, radius + theme.borderWidth)
     ctx.fillStyle = ringColor
     ctx.fill()
   }

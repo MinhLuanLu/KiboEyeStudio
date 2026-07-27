@@ -3,6 +3,9 @@ import type { Expression } from '@/types'
 import { DEFAULT_EYE_COLORS } from '@/types'
 import { p } from './helpers'
 
+// styleOverrides is left empty here — createDefaultProject() recomputes the real value for
+// every built-in expression against the project's Visual Reference once it exists (see
+// computeStyleOverrides in types/index.ts), so this placeholder is never actually used as-is.
 function expr(name: string, overrides: Parameters<typeof p>[0] = {}): Expression {
   return {
     id: nanoid(8),
@@ -12,7 +15,8 @@ function expr(name: string, overrides: Parameters<typeof p>[0] = {}): Expression
     leftParams: null,
     rightParams: null,
     leftColors: null,
-    rightColors: null
+    rightColors: null,
+    styleOverrides: []
   }
 }
 

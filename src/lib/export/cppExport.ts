@@ -9,10 +9,6 @@ import {
 } from '@/types'
 import { hexToRgb565, mixColors } from '@/lib/color'
 
-// Ring thickness in device pixels — matches the BORDER_WIDTH constant in
-// src/renderer/drawEye.ts so the preview and this export draw an identical width.
-const BORDER_WIDTH_PX = 3
-
 const EASING_ENUM: Record<EasingType, string> = {
   linear: 'EYE_EASE_LINEAR',
   easeIn: 'EYE_EASE_IN',
@@ -117,7 +113,8 @@ function colorSetLiteral(colors: EyeColors, backgroundColor: string): string {
     toRgb565Hex(colors.highlight),
     toRgb565Hex(colors.shadow),
     toRgb565Hex(colors.glow),
-    toRgb565Hex(borderBlend)
+    toRgb565Hex(borderBlend),
+    Math.round(colors.borderWidth)
   ]
   return `{ ${fields.join(', ')} }`
 }
@@ -133,10 +130,9 @@ function exportColors(project: Project): string {
   const same = JSON.stringify(left) === JSON.stringify(right)
   const lines = [
     `#define EYE_COLOR_BACKGROUND ${toRgb565Hex(display.backgroundColor)} // RGB565 — Display panel's background color`,
-    `#define EYE_BORDER_WIDTH     ${BORDER_WIDTH_PX}  // ring thickness in pixels`,
     ``,
-    `// sclera, iris, pupil, highlight, shadow, glow, border (border already has Border`,
-    `// Opacity pre-blended in — RGB565 has no alpha channel)`,
+    `// sclera, iris, pupil, highlight, shadow, glow, border, borderWidth (border already has`,
+    `// Border Opacity pre-blended in — RGB565 has no alpha channel)`,
     `const EyeColorSet EYE_COLORS_LEFT = ${colorSetLiteral(left, display.backgroundColor)};`
   ]
   if (same) {
@@ -426,15 +422,19 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   int16_t w = (int16_t)e.width, h = (int16_t)e.height;
   int16_t radius = (int16_t)e.radius;
 
-  // Border — an outer stadium/oval shape EYE_BORDER_WIDTH larger on every side, in a color
+  // Border — an outer stadium/oval shape colors.borderWidth larger on every side, in a color
   // already pre-blended toward the background by Border Opacity (see EYE_COLORS_LEFT/RIGHT
   // above). The sclera fill right after this covers everything except a thin ring, giving
   // an opaque border with no per-pixel alpha needed. Both fills go through
   // eyesFillRoundedRect() (elliptical corners) rather than Adafruit_GFX's own
   // fillRoundRect(), so a maxed-out Radius on a non-square eye renders as a smooth oval
-  // here exactly like it does in the studio's preview.
-  eyesFillRoundedRect(gfx, cx, cy, w + EYE_BORDER_WIDTH * 2, h + EYE_BORDER_WIDTH * 2,
-                       radius + EYE_BORDER_WIDTH, colors.border);
+  // here exactly like it does in the studio's preview. borderWidth lives on EyeColorSet
+  // (not a single global #define) so left/right eyes can have different ring thicknesses,
+  // matching the studio's per-eye Visual Reference overrides.
+  if (colors.borderWidth > 0) {
+    eyesFillRoundedRect(gfx, cx, cy, w + colors.borderWidth * 2, h + colors.borderWidth * 2,
+                         radius + colors.borderWidth, colors.border);
+  }
 
   eyesFillRoundedRect(gfx, cx, cy, w, h, radius, colors.sclera);
 
@@ -867,11 +867,13 @@ struct EyeFrame {
   int8_t bezierX1, bezierY1, bezierX2, bezierY2;
 };
 
-// One eye's full color palette (RGB565) — the studio's Eye Target: Left/Right editing lets
-// the two eyes end up with different palettes, so colors are a value passed to the drawing
-// functions rather than fixed macros.
+// One eye's full color palette (RGB565) plus its border thickness — the studio's Eye
+// Target: Left/Right editing lets the two eyes end up with different palettes (and
+// different border widths, via Visual Reference per-eye overrides), so this is a value
+// passed to the drawing functions rather than fixed macros.
 struct EyeColorSet {
   uint16_t sclera, iris, pupil, highlight, shadow, glow, border;
+  uint8_t borderWidth; // ring thickness in pixels
 };
 
 // ---- Colors -----------------------------------------------------------

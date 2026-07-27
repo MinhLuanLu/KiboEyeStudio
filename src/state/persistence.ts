@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid'
-import type { Animation, EditorState, Expression, EyeColors, EyeParams, EyeSide, PlaybackMode, Project, ProjectFile } from '@/types'
+import type { Animation, EditorState, Expression, EyeColors, EyeParams, EyeSide, PlaybackMode, Project, ProjectFile, VisualReferenceStyle } from '@/types'
 import {
   DEFAULT_DISPLAY,
   DEFAULT_EYE_COLORS,
@@ -7,6 +7,7 @@ import {
   DEFAULT_PERSONALITY,
   DEFAULT_TIMING,
   PROJECT_FILE_VERSION,
+  computeStyleOverrides,
   defaultEditorState
 } from '@/types'
 
@@ -35,33 +36,65 @@ function normalizeEyeColorsOverride(colors: Partial<EyeColors> | null | undefine
   return colors ? { ...DEFAULT_EYE_COLORS, ...colors } : null
 }
 
+function normalizeStyleOverrides(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null
+  return raw.filter((f): f is string => typeof f === 'string')
+}
+
 /** Backfills fields added after a project/autosave was written (e.g. the old scalar
  * `irisSize`/`pupilSize` becoming `irisWidth`/`irisHeight`/`pupilWidth`/`pupilHeight`, or
  * the whole `colors`/`display` themes, or the per-eye override fields added for the Eye
  * Target feature) with defaults, so older saves on disk or in localStorage don't break the
  * renderer or leave sliders holding `undefined`. */
 function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Project {
+  const eyeBase = normalizeEyeParams(raw.eyeBase)
+  const colors = { ...DEFAULT_EYE_COLORS, ...(raw.colors ?? {}) }
+
+  // Files saved before the Visual Reference system existed have no visualReference field at
+  // all — seed it from this project's own shared base pose/colors (rather than the generic
+  // app defaults) so re-saving an old project changes nothing visually: every expression and
+  // keyframe that already matched the old shared look keeps matching it (now "inherited"),
+  // and everything that already diverged from it is protected as an override below.
+  const rawVr = raw.visualReference as Partial<VisualReferenceStyle> | undefined
+  const visualReference: VisualReferenceStyle = {
+    params: rawVr?.params ? normalizeEyeParams(rawVr.params) : { ...eyeBase },
+    colors: rawVr?.colors ? { ...DEFAULT_EYE_COLORS, ...rawVr.colors } : { ...colors }
+  }
+
   const animations: Animation[] = (raw.animations ?? []).map((a) => ({
     ...a,
-    keyframes: a.keyframes.map((k) => ({ ...k, params: normalizeEyeParams(k.params) }))
+    keyframes: a.keyframes.map((k) => {
+      const params = normalizeEyeParams(k.params)
+      const rawStyleOverrides = (k as unknown as Record<string, unknown>).styleOverrides
+      return {
+        ...k,
+        params,
+        styleOverrides: normalizeStyleOverrides(rawStyleOverrides) ?? computeStyleOverrides(params, null, visualReference)
+      }
+    })
   }))
-  const expressions: Expression[] = (raw.expressions ?? []).map((e) => ({
-    ...e,
-    params: normalizeEyeParams(e.params),
-    colors: { ...DEFAULT_EYE_COLORS, ...(e.colors ?? {}) },
-    leftParams: normalizeEyeParamsOverride(e.leftParams),
-    rightParams: normalizeEyeParamsOverride(e.rightParams),
-    leftColors: normalizeEyeColorsOverride(e.leftColors),
-    rightColors: normalizeEyeColorsOverride(e.rightColors)
-  }))
+  const expressions: Expression[] = (raw.expressions ?? []).map((e) => {
+    const params = normalizeEyeParams(e.params)
+    const exprColors = { ...DEFAULT_EYE_COLORS, ...(e.colors ?? {}) }
+    return {
+      ...e,
+      params,
+      colors: exprColors,
+      leftParams: normalizeEyeParamsOverride(e.leftParams),
+      rightParams: normalizeEyeParamsOverride(e.rightParams),
+      leftColors: normalizeEyeColorsOverride(e.leftColors),
+      rightColors: normalizeEyeColorsOverride(e.rightColors),
+      styleOverrides: normalizeStyleOverrides(e.styleOverrides) ?? computeStyleOverrides(params, exprColors, visualReference)
+    }
+  })
 
   return {
     id: raw.id ?? nanoid(10),
     name: raw.name ?? 'Untitled Project',
     createdAt: raw.createdAt ?? Date.now(),
     updatedAt: raw.updatedAt ?? Date.now(),
-    eyeBase: normalizeEyeParams(raw.eyeBase),
-    colors: { ...DEFAULT_EYE_COLORS, ...(raw.colors ?? {}) },
+    eyeBase,
+    colors,
     eyeLeftOverride: normalizeEyeParamsOverride(raw.eyeLeftOverride),
     eyeRightOverride: normalizeEyeParamsOverride(raw.eyeRightOverride),
     colorsLeftOverride: normalizeEyeColorsOverride(raw.colorsLeftOverride),
@@ -70,7 +103,8 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     personality: { ...DEFAULT_PERSONALITY, ...(raw.personality ?? {}) },
     timing: { ...DEFAULT_TIMING, ...(raw.timing ?? {}) },
     animations,
-    expressions
+    expressions,
+    visualReference
   }
 }
 

@@ -36,6 +36,9 @@ export interface EyeColors {
   shadowIntensity: number
   glowIntensity: number
   borderOpacity: number
+  /** Ring thickness in device pixels. Was a fixed constant (3px, matched between preview and
+   * export) until the Visual Reference system made it an adjustable, shared style property. */
+  borderWidth: number
 }
 
 export type DisplayShape = 'circle' | 'square' | 'rounded'
@@ -65,6 +68,11 @@ export interface Keyframe {
   easing: EasingType
   customBezier?: [number, number, number, number]
   params: EyeParams
+  /** Names of `params` fields (from STYLE_EYE_PARAM_FIELDS) that are pinned as intentional
+   * customizations for this keyframe — e.g. a blink's eyelid values, a look's pupil offset.
+   * Fields NOT listed here track the project's Visual Reference and get overwritten whenever
+   * it's applied. See STYLE_EYE_PARAM_FIELDS and computeStyleOverrides below. */
+  styleOverrides: string[]
 }
 
 export interface Animation {
@@ -92,6 +100,13 @@ export interface Expression {
   rightParams: EyeParams | null
   leftColors: EyeColors | null
   rightColors: EyeColors | null
+  /** Names of `params`/`colors` fields (from STYLE_EYE_PARAM_FIELDS/STYLE_EYE_COLOR_FIELDS)
+   * that are pinned as intentional customizations for this expression — e.g. Angry's eyelid
+   * tilt, Surprised's eye size. Fields NOT listed here track the project's Visual Reference
+   * and get overwritten whenever it's applied. Shared across this expression's base pose and
+   * any left/right divergence (leftParams/rightParams/leftColors/rightColors) rather than
+   * tracked separately per eye, to keep the override model simple. */
+  styleOverrides: string[]
 }
 
 export interface Personality {
@@ -112,6 +127,110 @@ export interface GlobalTiming {
   breathingAmount: number
 }
 
+// ---- Visual Reference (shared style inheritance) ---------------------------------------
+//
+// Kibo Eye Studio separates project data into two kinds:
+//   - Visual style: the shared, project-wide appearance (shape, colors, border, curvature
+//     defaults, highlight) — authored once in the Visual Reference tab.
+//   - Animation/expression data: movement, timing, positions, transitions, and the
+//     emotion-specific overrides that make a look distinctly "angry" or a motion distinctly
+//     "look left" — always local to that expression/keyframe, never shared.
+//
+// Every Expression and Keyframe still stores a complete, fully-resolved EyeParams (and, for
+// Expressions, EyeColors) — exactly as before — so the renderer and C++ export never need to
+// know this system exists; they only ever see concrete values. `styleOverrides` is pure
+// bookkeeping layered on top: it names which of those already-resolved fields are pinned
+// custom values versus which ones should be kept in sync with the Visual Reference the next
+// time it's applied. This is what lets Apply update a field in place without needing any
+// separate "resolve inherited value" step anywhere else in the codebase.
+
+/** Which EyeParams fields count as shared visual style (eligible for Visual Reference
+ * inheritance) rather than movement/position/timing data, which is always local. Kept in one
+ * place so the Visual Reference tab, the per-field override indicators, and the Apply logic
+ * all agree on exactly the same set. */
+export const STYLE_EYE_PARAM_FIELDS: (keyof EyeParams)[] = [
+  'width',
+  'height',
+  'radius',
+  'irisWidth',
+  'irisHeight',
+  'pupilWidth',
+  'pupilHeight',
+  'upperEyelidCurvature',
+  'lowerEyelidCurvature',
+  'highlightX',
+  'highlightY',
+  'highlightSize'
+]
+
+/** Every EyeColors field is shared visual style — colors were never per-keyframe to begin
+ * with (see Keyframe — it has no `colors` field at all), and Expression color divergence has
+ * always been a studio preview/thumbnail concept rather than something the C++ export reads
+ * per-expression (export colors always come from the project's shared base, see
+ * leftEyeColors/rightEyeColors). */
+export const STYLE_EYE_COLOR_FIELDS: (keyof EyeColors)[] = [
+  'sclera',
+  'iris',
+  'pupil',
+  'highlight',
+  'shadow',
+  'glow',
+  'border',
+  'shadowIntensity',
+  'glowIntensity',
+  'borderOpacity',
+  'borderWidth'
+]
+
+export interface VisualReferenceStyle {
+  params: EyeParams
+  colors: EyeColors
+}
+
+/** A field is "overridden" (pinned/custom) if it's listed by name in a styleOverrides array;
+ * anything not listed is "inherited" and tracks the Visual Reference. */
+export function isStyleFieldOverridden(styleOverrides: string[], field: string): boolean {
+  return styleOverrides.includes(field)
+}
+
+/** Computes which style fields in `params`/`colors` already differ from the Visual
+ * Reference's values, so they can be pinned as intentional customizations rather than
+ * silently reset on the next Apply. Used for: migrating legacy project files that predate
+ * this system (every field they happen to differ on becomes a protected override), and for
+ * seeding new expressions/keyframes (whatever they were created from is preserved as-is;
+ * only fields that already match the Visual Reference start out "inherited"). */
+export function computeStyleOverrides(params: EyeParams, colors: EyeColors | null, vr: VisualReferenceStyle): string[] {
+  const overrides: string[] = []
+  for (const f of STYLE_EYE_PARAM_FIELDS) {
+    if (params[f] !== vr.params[f]) overrides.push(f)
+  }
+  if (colors) {
+    for (const f of STYLE_EYE_COLOR_FIELDS) {
+      if (colors[f] !== vr.colors[f]) overrides.push(f)
+    }
+  }
+  return overrides
+}
+
+/** Copies every Visual-Reference-eligible EyeParams field from `vr` into `target` EXCEPT
+ * fields listed in `overrides` — mutates `target` in place (called from Immer producers). */
+export function applyStyleToParams(target: EyeParams, vr: EyeParams, overrides: string[]): void {
+  const t = target as unknown as Record<string, number>
+  const v = vr as unknown as Record<string, number>
+  for (const f of STYLE_EYE_PARAM_FIELDS) {
+    if (!overrides.includes(f)) t[f] = v[f]
+  }
+}
+
+/** Same as applyStyleToParams, for EyeColors. */
+export function applyStyleToColors(target: EyeColors, vr: EyeColors, overrides: string[]): void {
+  const t = target as unknown as Record<string, number | string>
+  const v = vr as unknown as Record<string, number | string>
+  for (const f of STYLE_EYE_COLOR_FIELDS) {
+    if (!overrides.includes(f)) t[f] = v[f]
+  }
+}
+
 export interface Project {
   id: string
   name: string
@@ -130,6 +249,8 @@ export interface Project {
   timing: GlobalTiming
   animations: Animation[]
   expressions: Expression[]
+  /** The project's single shared default appearance — see VisualReferenceStyle below. */
+  visualReference: VisualReferenceStyle
 }
 
 export type PlaybackMode = 'design' | 'animate' | 'idle'
@@ -201,7 +322,19 @@ export const DEFAULT_EYE_COLORS: EyeColors = {
   border: '#ffffff',
   shadowIntensity: 30,
   glowIntensity: 25,
-  borderOpacity: 5
+  borderOpacity: 5,
+  borderWidth: 3
+}
+
+export const EYE_COLOR_RANGES = {
+  shadowIntensity: [0, 100] as [number, number],
+  glowIntensity: [0, 100] as [number, number],
+  borderOpacity: [0, 100] as [number, number],
+  borderWidth: [0, 12] as [number, number]
+}
+
+export function defaultVisualReference(): VisualReferenceStyle {
+  return { params: { ...DEFAULT_EYE_PARAMS }, colors: { ...DEFAULT_EYE_COLORS } }
 }
 
 export const DEFAULT_DISPLAY: DisplaySettings = {

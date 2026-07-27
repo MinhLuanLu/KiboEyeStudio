@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
+import { useStore } from '@/state/store'
 import { Toolbar, type ToolbarActions } from './Toolbar'
 import { PreviewCanvas } from '@/components/Canvas/PreviewCanvas'
 import { Timeline } from '@/components/Timeline/Timeline'
@@ -11,8 +12,8 @@ import { ColorPanel } from '@/components/Colors/ColorPanel'
 import { DisplayPanel } from '@/components/Display/DisplayPanel'
 import { DevModePanel } from '@/components/DevMode/DevModePanel'
 import { ExportDialog } from '@/components/Export/ExportDialog'
-import { ReferenceImportDialog } from '@/components/Import/ReferenceImportDialog'
 import { UserGuideModal } from '@/components/Guide/UserGuideModal'
+import { VisualReferencePanel } from '@/components/VisualReference/VisualReferencePanel'
 
 function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'horizontal' }) {
   return (
@@ -25,7 +26,8 @@ function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'ho
 }
 
 export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions }) {
-  const [leftTab, setLeftTab] = useState<'animations' | 'expressions'>('animations')
+  const leftTab = useStore((s) => s.leftTab)
+  const setLeftTab = useStore((s) => s.setLeftTab)
   const [rightTab, setRightTab] = useState<'controls' | 'colors' | 'display' | 'personality'>('controls')
 
   return (
@@ -48,9 +50,17 @@ export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions })
                 >
                   Expressions
                 </button>
+                <button
+                  className={`studio-tab flex-1 ${leftTab === 'visual-reference' ? 'studio-tab-active' : ''}`}
+                  onClick={() => setLeftTab('visual-reference')}
+                >
+                  Visual Reference
+                </button>
               </div>
               <div className="flex-1 min-h-0">
-                {leftTab === 'animations' ? <AnimationLibraryPanel /> : <ExpressionLibraryPanel />}
+                {leftTab === 'animations' && <AnimationLibraryPanel />}
+                {leftTab === 'expressions' && <ExpressionLibraryPanel />}
+                {leftTab === 'visual-reference' && <VisualReferencePanel />}
               </div>
             </div>
           </Panel>
@@ -115,7 +125,6 @@ export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions })
         </PanelGroup>
       </div>
       <ExportDialog />
-      <ReferenceImportDialog />
       <UserGuideModal />
     </div>
   )
