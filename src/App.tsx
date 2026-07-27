@@ -1,16 +1,22 @@
 import { useEffect, useRef } from 'react'
 import { useStore } from '@/state/store'
+import type { EditorState } from '@/types'
 import { AppShell } from '@/components/Layout/AppShell'
 import { useKeyboardShortcuts } from '@/lib/shortcuts'
-import {
-  autosaveRead,
-  autosaveWrite,
-  openProjectDialog,
-  saveProjectAs,
-  saveProjectToPath
-} from '@/state/persistence'
+import { autosaveRead, autosaveWrite, openProjectDialog, saveProjectAs, saveProjectToPath } from '@/state/persistence'
 
 const AUTOSAVE_INTERVAL_MS = 20000
+const SAVE_STATUS_FLASH_MS = 2500
+
+function currentEditorState(): EditorState {
+  const s = useStore.getState()
+  return {
+    eyeTarget: s.eyeTarget,
+    selectedExpressionId: s.selectedExpressionId,
+    activeAnimationId: s.activeAnimationId,
+    mode: s.mode
+  }
+}
 
 export default function App() {
   const project = useStore((s) => s.project)
@@ -18,6 +24,7 @@ export default function App() {
   const dirty = useStore((s) => s.dirty)
   const setFilePath = useStore((s) => s.setFilePath)
   const markSaved = useStore((s) => s.markSaved)
+  const setSaveStatus = useStore((s) => s.setSaveStatus)
   const loadProject = useStore((s) => s.loadProject)
   const newProjectAction = useStore((s) => s.newProject)
   const undo = useStore((s) => s.undo)
@@ -37,46 +44,105 @@ export default function App() {
   const checkpoint = useStore((s) => s.checkpoint)
 
   const loadedAutosave = useRef(false)
+  const saveStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Load any autosave on first launch so work survives a crash / accidental close.
   useEffect(() => {
     if (loadedAutosave.current) return
     loadedAutosave.current = true
     autosaveRead().then((saved) => {
-      if (saved) loadProject(saved, null)
+      if (saved) loadProject(saved.project, saved.editorState, null)
     })
   }, [loadProject])
 
   // Periodic autosave-to-disk while there are unsaved changes.
   useEffect(() => {
     const interval = setInterval(() => {
-      if (useStore.getState().dirty) autosaveWrite(useStore.getState().project)
+      const s = useStore.getState()
+      if (s.dirty) autosaveWrite(s.project, currentEditorState())
     }, AUTOSAVE_INTERVAL_MS)
     return () => clearInterval(interval)
   }, [])
 
-  const handleSaveProject = async () => {
-    if (filePath) {
-      await saveProjectToPath(filePath, project)
-    } else {
-      const path = await saveProjectAs(project)
-      if (path) setFilePath(path)
-      else return
+  // Let the Electron main process know whether there's anything to lose, so it can warn
+  // before closing the window (see menu:save-project-then-close below).
+  useEffect(() => {
+    window.kibo?.notifyDirty(dirty)
+  }, [dirty])
+
+  // Browser/dev-preview fallback for the same "unsaved changes" warning — Electron's window
+  // close is handled by the main process dialog instead (see main/index.ts), so this native
+  // prompt effectively never fires there (the main process already intercepts the close
+  // before the page gets a chance to unload).
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (!useStore.getState().dirty) return
+      e.preventDefault()
+      e.returnValue = ''
     }
-    markSaved()
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [])
+
+  const flashSaveStatus = (status: 'saved' | 'error') => {
+    if (saveStatusTimer.current) clearTimeout(saveStatusTimer.current)
+    setSaveStatus(status)
+    saveStatusTimer.current = setTimeout(() => setSaveStatus('idle'), SAVE_STATUS_FLASH_MS)
   }
 
-  const handleSaveProjectAs = async () => {
-    const path = await saveProjectAs(project)
-    if (path) {
+  /** Returns whether the project actually ended up saved (false if the user canceled a
+   * Save As prompt, or the write failed) — callers that need to know before proceeding
+   * (e.g. closing the window) check this rather than assuming success. */
+  const handleSaveProject = async (): Promise<boolean> => {
+    setSaveStatus('saving')
+    try {
+      if (filePath) {
+        await saveProjectToPath(filePath, project, currentEditorState())
+      } else {
+        const path = await saveProjectAs(project, currentEditorState())
+        if (!path) {
+          setSaveStatus('idle')
+          return false
+        }
+        setFilePath(path)
+      }
+      markSaved()
+      flashSaveStatus('saved')
+      return true
+    } catch (err) {
+      flashSaveStatus('error')
+      window.alert(`Could not save the project.${err instanceof Error ? ` ${err.message}` : ''}`)
+      return false
+    }
+  }
+
+  const handleSaveProjectAs = async (): Promise<boolean> => {
+    setSaveStatus('saving')
+    try {
+      const path = await saveProjectAs(project, currentEditorState())
+      if (!path) {
+        setSaveStatus('idle')
+        return false
+      }
       setFilePath(path)
       markSaved()
+      flashSaveStatus('saved')
+      return true
+    } catch (err) {
+      flashSaveStatus('error')
+      window.alert(`Could not save the project.${err instanceof Error ? ` ${err.message}` : ''}`)
+      return false
     }
   }
 
   const handleOpenProject = async () => {
+    if (dirty && !window.confirm('You have unsaved changes. Discard them and open a different project?')) return
     const result = await openProjectDialog()
-    if (result) loadProject(result.project, result.filePath)
+    if (result.status === 'ok') {
+      loadProject(result.project, result.editorState, result.filePath)
+    } else if (result.status === 'error') {
+      window.alert(result.message)
+    }
   }
 
   const handleNewProject = () => {
@@ -143,11 +209,18 @@ export default function App() {
       window.kibo.onMenu('menu:stop', actions.stop),
       window.kibo.onMenu('menu:restart', actions.restart),
       window.kibo.onMenu('menu:next-frame', actions.nextFrame),
-      window.kibo.onMenu('menu:prev-frame', actions.prevFrame)
+      window.kibo.onMenu('menu:prev-frame', actions.prevFrame),
+      // The main process asks for this when the user chooses "Save" from the unsaved-
+      // changes dialog on window close — it only tells the window it's safe to actually
+      // close once the save has genuinely succeeded (see handleSaveProject's return value).
+      window.kibo.onMenu('menu:save-project-then-close', async () => {
+        const ok = await handleSaveProject()
+        if (ok) window.kibo!.notifySaveThenCloseComplete()
+      })
     ]
     return () => unsubs.forEach((u) => u())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeAnimationId, selectedKeyframeId, filePath, dirty])
+  }, [activeAnimationId, selectedKeyframeId, filePath, dirty, project])
 
   return <AppShell toolbarActions={actions} />
 }

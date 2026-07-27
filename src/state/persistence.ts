@@ -1,16 +1,26 @@
 import { nanoid } from 'nanoid'
-import type { Animation, Expression, EyeColors, EyeParams, Project } from '@/types'
-import { DEFAULT_DISPLAY, DEFAULT_EYE_COLORS, DEFAULT_EYE_PARAMS, DEFAULT_PERSONALITY, DEFAULT_TIMING } from '@/types'
+import type { Animation, EditorState, Expression, EyeColors, EyeParams, EyeSide, PlaybackMode, Project, ProjectFile } from '@/types'
+import {
+  DEFAULT_DISPLAY,
+  DEFAULT_EYE_COLORS,
+  DEFAULT_EYE_PARAMS,
+  DEFAULT_PERSONALITY,
+  DEFAULT_TIMING,
+  PROJECT_FILE_VERSION,
+  defaultEditorState
+} from '@/types'
 
 const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
 const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
+const PROJECT_FILE_EXTENSION = 'kiboeyes'
+
+/** Thrown by parseProjectFile for anything that isn't a readable Kibo Eye Studio project —
+ * caught at the call site (App.tsx) and shown to the user as a plain-language error rather
+ * than crashing or silently discarding their file. */
+export class ProjectFileError extends Error {}
 
 function hasElectron(): boolean {
   return typeof window !== 'undefined' && !!window.kibo
-}
-
-export function serializeProject(project: Project): string {
-  return JSON.stringify(project, null, 2)
 }
 
 function normalizeEyeParams(params: Partial<EyeParams> | undefined): EyeParams {
@@ -64,13 +74,82 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
   }
 }
 
-export function deserializeProject(json: string): Project {
-  return normalizeProject(JSON.parse(json))
+function normalizeEditorState(raw: Partial<EditorState> | undefined, project: Project): EditorState {
+  const fallback = defaultEditorState(project)
+  if (!raw || typeof raw !== 'object') return fallback
+
+  const eyeTarget: EyeSide = raw.eyeTarget === 'left' || raw.eyeTarget === 'right' ? raw.eyeTarget : 'both'
+  const mode: PlaybackMode = raw.mode === 'animate' || raw.mode === 'idle' ? raw.mode : 'design'
+  const activeAnimationId =
+    typeof raw.activeAnimationId === 'string' && project.animations.some((a) => a.id === raw.activeAnimationId)
+      ? raw.activeAnimationId
+      : fallback.activeAnimationId
+  const selectedExpressionId =
+    typeof raw.selectedExpressionId === 'string' && project.expressions.some((e) => e.id === raw.selectedExpressionId)
+      ? raw.selectedExpressionId
+      : null
+
+  return { eyeTarget, selectedExpressionId, activeAnimationId, mode }
 }
 
-export async function saveProjectAs(project: Project): Promise<string | null> {
-  const json = serializeProject(project)
-  const suggested = `${project.name.replace(/[^a-z0-9 _-]/gi, '_')}.json`
+function looksLikeProject(raw: unknown): raw is Partial<Project> & Record<string, unknown> {
+  if (!raw || typeof raw !== 'object') return false
+  const obj = raw as Record<string, unknown>
+  return Array.isArray(obj.animations) && Array.isArray(obj.expressions)
+}
+
+/** Parses raw file contents into a fully-normalized, current-version ProjectFile — the one
+ * place old formats get migrated forward and invalid files get rejected with a clear error.
+ * Two shapes are recognized today:
+ *   - The current versioned envelope: { formatVersion, project, editorState }
+ *   - The pre-versioning format (every project saved before this feature existed), where the
+ *     file's top level *is* the bare Project object with no wrapper at all.
+ * Future format changes should add a version-gated branch here rather than replacing this
+ * logic, so old files keep opening correctly. */
+function parseProjectFile(json: string): ProjectFile {
+  let raw: unknown
+  try {
+    raw = JSON.parse(json)
+  } catch {
+    throw new ProjectFileError('This file is not valid JSON, so it could not be opened. It may be corrupted.')
+  }
+
+  if (!raw || typeof raw !== 'object') {
+    throw new ProjectFileError('This file does not contain a Kibo Eye Studio project.')
+  }
+  const obj = raw as Record<string, unknown>
+
+  if (typeof obj.formatVersion === 'number' && looksLikeProject(obj.project)) {
+    const project = normalizeProject(obj.project)
+    const editorState = normalizeEditorState(obj.editorState as Partial<EditorState> | undefined, project)
+    return { formatVersion: PROJECT_FILE_VERSION, project, editorState }
+  }
+
+  if (looksLikeProject(obj)) {
+    const project = normalizeProject(obj)
+    return { formatVersion: PROJECT_FILE_VERSION, project, editorState: defaultEditorState(project) }
+  }
+
+  throw new ProjectFileError('This file does not contain a Kibo Eye Studio project.')
+}
+
+export function serializeProjectFile(project: Project, editorState: EditorState): string {
+  const file: ProjectFile = { formatVersion: PROJECT_FILE_VERSION, project, editorState }
+  return JSON.stringify(file, null, 2)
+}
+
+export function deserializeProjectFile(json: string): ProjectFile {
+  return parseProjectFile(json)
+}
+
+function suggestedFileName(project: Project): string {
+  const base = project.name.replace(/[^a-z0-9 _-]/gi, '_').trim() || 'Untitled Project'
+  return `${base}.${PROJECT_FILE_EXTENSION}`
+}
+
+export async function saveProjectAs(project: Project, editorState: EditorState): Promise<string | null> {
+  const json = serializeProjectFile(project, editorState)
+  const suggested = suggestedFileName(project)
   if (hasElectron()) {
     const result = await window.kibo!.saveProjectAs(json, suggested)
     return result.canceled ? null : (result.filePath ?? null)
@@ -79,8 +158,8 @@ export async function saveProjectAs(project: Project): Promise<string | null> {
   return suggested
 }
 
-export async function saveProjectToPath(filePath: string, project: Project): Promise<void> {
-  const json = serializeProject(project)
+export async function saveProjectToPath(filePath: string, project: Project, editorState: EditorState): Promise<void> {
+  const json = serializeProjectFile(project, editorState)
   if (hasElectron()) {
     await window.kibo!.saveProjectToPath(filePath, json)
     return
@@ -89,33 +168,50 @@ export async function saveProjectToPath(filePath: string, project: Project): Pro
   downloadTextFile(json, filePath)
 }
 
-export async function openProjectDialog(): Promise<{ project: Project; filePath: string } | null> {
+export type OpenProjectOutcome =
+  | { status: 'ok'; project: Project; editorState: EditorState; filePath: string }
+  | { status: 'canceled' }
+  | { status: 'error'; message: string }
+
+export async function openProjectDialog(): Promise<OpenProjectOutcome> {
   if (hasElectron()) {
     const result = await window.kibo!.openProject()
-    if (result.canceled || !result.json) return null
-    return { project: deserializeProject(result.json), filePath: result.filePath ?? '' }
+    if (result.canceled || !result.json) return { status: 'canceled' }
+    try {
+      const file = parseProjectFile(result.json)
+      return { status: 'ok', project: file.project, editorState: file.editorState, filePath: result.filePath ?? '' }
+    } catch (err) {
+      return { status: 'error', message: err instanceof ProjectFileError ? err.message : 'This file could not be opened.' }
+    }
   }
   return openProjectFilePicker()
 }
 
-function openProjectFilePicker(): Promise<{ project: Project; filePath: string } | null> {
+function openProjectFilePicker(): Promise<OpenProjectOutcome> {
   return new Promise((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
-    input.accept = 'application/json'
+    input.accept = `.${PROJECT_FILE_EXTENSION},.json,application/json`
     input.onchange = () => {
       const file = input.files?.[0]
-      if (!file) return resolve(null)
+      if (!file) return resolve({ status: 'canceled' })
       const reader = new FileReader()
-      reader.onload = () => resolve({ project: deserializeProject(String(reader.result)), filePath: file.name })
+      reader.onload = () => {
+        try {
+          const parsed = parseProjectFile(String(reader.result))
+          resolve({ status: 'ok', project: parsed.project, editorState: parsed.editorState, filePath: file.name })
+        } catch (err) {
+          resolve({ status: 'error', message: err instanceof ProjectFileError ? err.message : 'This file could not be opened.' })
+        }
+      }
       reader.readAsText(file)
     }
     input.click()
   })
 }
 
-export async function autosaveWrite(project: Project): Promise<void> {
-  const json = serializeProject(project)
+export async function autosaveWrite(project: Project, editorState: EditorState): Promise<void> {
+  const json = serializeProjectFile(project, editorState)
   if (hasElectron()) {
     await window.kibo!.autosaveWrite(json)
     return
@@ -127,14 +223,28 @@ export async function autosaveWrite(project: Project): Promise<void> {
   }
 }
 
-export async function autosaveRead(): Promise<Project | null> {
+export async function autosaveRead(): Promise<ProjectFile | null> {
   if (hasElectron()) {
     const result = await window.kibo!.autosaveRead()
-    return result.exists && result.json ? deserializeProject(result.json) : null
+    if (!result.exists || !result.json) return null
+    try {
+      return parseProjectFile(result.json)
+    } catch {
+      // A corrupted autosave shouldn't block launching the app — just skip it.
+      return null
+    }
   }
   const json = localStorage.getItem(LOCAL_STORAGE_KEY)
-  return json ? deserializeProject(json) : null
+  if (!json) return null
+  try {
+    return parseProjectFile(json)
+  } catch {
+    return null
+  }
 }
+
+// ---- Code export (separate from project save/load above: this writes generated ESP32/
+// Arduino source, never project data, and is never read back in) --------------------------
 
 export async function exportFile(defaultName: string, contents: string, extensions: string[]): Promise<boolean> {
   if (hasElectron()) {
@@ -151,7 +261,7 @@ export async function importJsonDialog(): Promise<string | null> {
     return result.canceled ? null : (result.json ?? null)
   }
   const picked = await openProjectFilePicker()
-  return picked ? serializeProject(picked.project) : null
+  return picked.status === 'ok' ? serializeProjectFile(picked.project, picked.editorState) : null
 }
 
 function downloadTextFile(contents: string, filename: string): void {

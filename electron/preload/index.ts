@@ -32,6 +32,11 @@ const kiboApi = {
   exportSaveFile: (defaultName: string, contents: string, filters: ExtFilter[]): Promise<SaveResult> =>
     ipcRenderer.invoke('export:save-file', defaultName, contents, filters),
   importOpenJson: (): Promise<OpenResult> => ipcRenderer.invoke('import:open-json'),
+  // One-way notifications the main process uses to decide whether it's safe to close the
+  // window without asking, and to know when a save it requested (via
+  // 'menu:save-project-then-close') has actually completed.
+  notifyDirty: (dirty: boolean): void => ipcRenderer.send('app:dirty-changed', dirty),
+  notifySaveThenCloseComplete: (): void => ipcRenderer.send('app:save-then-close-complete'),
   onMenu: (channel: string, callback: () => void): (() => void) => {
     const listener = (): void => callback()
     ipcRenderer.on(channel, listener)

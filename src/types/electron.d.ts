@@ -27,6 +27,8 @@ export interface KiboApi {
   autosaveRead: () => Promise<AutosaveReadResult>
   exportSaveFile: (defaultName: string, contents: string, filters: ExtFilter[]) => Promise<SaveResult>
   importOpenJson: () => Promise<OpenResult>
+  notifyDirty: (dirty: boolean) => void
+  notifySaveThenCloseComplete: () => void
   onMenu: (channel: string, callback: () => void) => () => void
 }
 

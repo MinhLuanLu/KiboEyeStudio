@@ -8,10 +8,37 @@ export interface ToolbarActions {
   saveProjectAs: () => void
 }
 
+function SaveStatusLabel() {
+  const dirty = useStore((s) => s.dirty)
+  const filePath = useStore((s) => s.filePath)
+  const saveStatus = useStore((s) => s.saveStatus)
+
+  if (saveStatus === 'saving') {
+    return <span className="text-xs text-studio-muted">Saving…</span>
+  }
+  if (saveStatus === 'error') {
+    return <span className="text-xs text-red-400">⚠ Save failed</span>
+  }
+  if (dirty) {
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-studio-muted" title="Unsaved changes">
+        <span className="w-1.5 h-1.5 rounded-full bg-studio-warn" />
+        Unsaved changes
+      </span>
+    )
+  }
+  if (saveStatus === 'saved') {
+    return <span className="text-xs text-green-400">✓ Saved</span>
+  }
+  if (filePath) {
+    return <span className="text-xs text-studio-muted">All changes saved</span>
+  }
+  return <span className="text-xs text-studio-muted">Not saved yet</span>
+}
+
 export function Toolbar({ actions }: { actions: ToolbarActions }) {
   const projectName = useStore((s) => s.project.name)
   const renameProject = useStore((s) => s.renameProject)
-  const dirty = useStore((s) => s.dirty)
   const undo = useStore((s) => s.undo)
   const redo = useStore((s) => s.redo)
   const past = useStore((s) => s.past.length)
@@ -32,7 +59,7 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
         value={projectName}
         onChange={(e) => renameProject(e.target.value)}
       />
-      {dirty && <span className="w-1.5 h-1.5 rounded-full bg-studio-warn" title="Unsaved changes" />}
+      <SaveStatusLabel />
 
       <div className="flex items-center gap-1">
         <button className="studio-btn" onClick={actions.newProject}>

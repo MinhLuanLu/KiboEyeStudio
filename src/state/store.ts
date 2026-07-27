@@ -5,6 +5,7 @@ import type {
   Animation,
   DisplaySettings,
   EasingType,
+  EditorState,
   EyeColors,
   EyeParams,
   EyeSide,
@@ -50,10 +51,15 @@ export interface DevStats {
   timeMs: number
 }
 
+export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
+
 interface StoreState {
   project: Project
   filePath: string | null
   dirty: boolean
+  /** Purely a UI hint for the toolbar's saved-status readout — never persisted, and not
+   * itself the source of truth for whether a save happened (`dirty`/`filePath` are). */
+  saveStatus: SaveStatus
 
   activeAnimationId: string
   selectedKeyframeId: string | null
@@ -82,10 +88,11 @@ interface StoreState {
 
   // project management
   newProject: () => void
-  loadProject: (project: Project, filePath: string | null) => void
+  loadProject: (project: Project, editorState: EditorState, filePath: string | null) => void
   renameProject: (name: string) => void
   setFilePath: (path: string | null) => void
   markSaved: () => void
+  setSaveStatus: (status: SaveStatus) => void
   touch: () => void
 
   // design
@@ -159,6 +166,7 @@ export const useStore = create<StoreState>()(
     project: createDefaultProject(),
     filePath: null,
     dirty: false,
+    saveStatus: 'idle',
 
     activeAnimationId: '',
     selectedKeyframeId: null,
@@ -207,27 +215,31 @@ export const useStore = create<StoreState>()(
         s.project = createDefaultProject()
         s.filePath = null
         s.dirty = false
+        s.saveStatus = 'idle'
         s.past = []
         s.future = []
         s.activeAnimationId = s.project.animations[0]?.id ?? ''
         s.selectedKeyframeId = null
         s.selectedExpressionId = null
         s.eyeTarget = 'both'
+        s.mode = 'design'
         s.playbackState = 'stopped'
         s.playbackTimeMs = 0
       }),
 
-    loadProject: (project, filePath) =>
+    loadProject: (project, editorState, filePath) =>
       set((s) => {
         s.project = project
         s.filePath = filePath
         s.dirty = false
+        s.saveStatus = 'idle'
         s.past = []
         s.future = []
-        s.activeAnimationId = project.animations[0]?.id ?? ''
+        s.activeAnimationId = editorState.activeAnimationId || (project.animations[0]?.id ?? '')
         s.selectedKeyframeId = null
-        s.selectedExpressionId = null
-        s.eyeTarget = 'both'
+        s.selectedExpressionId = editorState.selectedExpressionId
+        s.eyeTarget = editorState.eyeTarget
+        s.mode = editorState.mode
         s.playbackState = 'stopped'
         s.playbackTimeMs = 0
       }),
@@ -239,7 +251,11 @@ export const useStore = create<StoreState>()(
       }),
 
     setFilePath: (path) => set((s) => void (s.filePath = path)),
-    markSaved: () => set((s) => void (s.dirty = false)),
+    markSaved: () =>
+      set((s) => {
+        s.dirty = false
+      }),
+    setSaveStatus: (status) => set((s) => void (s.saveStatus = status)),
     touch: () =>
       set((s) => {
         s.project.updatedAt = Date.now()

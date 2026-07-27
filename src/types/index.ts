@@ -74,9 +74,11 @@ export interface Animation {
   keyframes: Keyframe[]
 }
 
-/** Which eye(s) the Controls/Colors panels currently write to. Purely an editing-session
- * concept (not persisted itself) — the *result* of edits made under 'left'/'right' is what
- * gets saved, via the params/colors override fields below. */
+/** Which eye(s) the Controls/Colors panels currently write to. Editor/session state rather
+ * than project data — it lives outside `Project` (the *result* of edits made under
+ * 'left'/'right' is what gets saved, via the params/colors override fields below), but it
+ * IS persisted to disk alongside the project via `ProjectFile.editorState` so reopening a
+ * saved project resumes with the same Eye Target selected. */
 export type EyeSide = 'both' | 'left' | 'right'
 
 export interface Expression {
@@ -132,6 +134,38 @@ export interface Project {
 
 export type PlaybackMode = 'design' | 'animate' | 'idle'
 export type PlaybackState = 'playing' | 'paused' | 'stopped'
+
+// ---- Project file (save/load) ----------------------------------------------
+//
+// A saved `.kiboeyes` file is a versioned envelope around a `Project`, plus a small bit of
+// "which tab/expression/eye was open" editor state — kept separate from `Project` itself so
+// undo/redo (which snapshots `Project` only) doesn't also rewind which eye you're editing.
+// `formatVersion` lets a future release detect and migrate older files (see
+// migrateProjectFile in state/persistence.ts) rather than silently misreading them.
+
+export const PROJECT_FILE_VERSION = 1
+
+export interface EditorState {
+  eyeTarget: EyeSide
+  selectedExpressionId: string | null
+  activeAnimationId: string
+  mode: PlaybackMode
+}
+
+export function defaultEditorState(project: Project): EditorState {
+  return {
+    eyeTarget: 'both',
+    selectedExpressionId: null,
+    activeAnimationId: project.animations[0]?.id ?? '',
+    mode: 'design'
+  }
+}
+
+export interface ProjectFile {
+  formatVersion: number
+  project: Project
+  editorState: EditorState
+}
 
 export const DEFAULT_EYE_PARAMS: EyeParams = {
   width: 78,
