@@ -77,6 +77,7 @@ interface StoreState {
   devStats: DevStats
   exportDialogOpen: boolean
   referenceImportOpen: boolean
+  guideOpen: boolean
 
   past: Project[]
   future: Project[]
@@ -155,6 +156,7 @@ interface StoreState {
   setDevStats: (stats: DevStats) => void
   setExportDialogOpen: (open: boolean) => void
   setReferenceImportOpen: (open: boolean) => void
+  setGuideOpen: (open: boolean) => void
 }
 
 function activeAnimationOf(project: Project, id: string): Animation | undefined {
@@ -181,6 +183,7 @@ export const useStore = create<StoreState>()(
     devStats: { fps: 0, frame: 0, timeMs: 0 },
     exportDialogOpen: false,
     referenceImportOpen: false,
+    guideOpen: false,
 
     past: [],
     future: [],
@@ -622,7 +625,8 @@ export const useStore = create<StoreState>()(
     toggleDevMode: () => set((s) => void (s.devModeOpen = !s.devModeOpen)),
     setDevStats: (stats) => set((s) => void (s.devStats = stats)),
     setExportDialogOpen: (open) => set((s) => void (s.exportDialogOpen = open)),
-    setReferenceImportOpen: (open) => set((s) => void (s.referenceImportOpen = open))
+    setReferenceImportOpen: (open) => set((s) => void (s.referenceImportOpen = open)),
+    setGuideOpen: (open) => set((s) => void (s.guideOpen = open))
   }))
 )
 

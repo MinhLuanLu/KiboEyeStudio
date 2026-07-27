@@ -158,6 +158,10 @@ function buildMenu(): void {
         { label: 'Next Frame', accelerator: 'Right', click: () => send('menu:next-frame') },
         { label: 'Previous Frame', accelerator: 'Left', click: () => send('menu:prev-frame') }
       ]
+    },
+    {
+      label: 'Help',
+      submenu: [{ label: 'User Guide', accelerator: 'F1', click: () => send('menu:user-guide') }]
     }
   ]
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))

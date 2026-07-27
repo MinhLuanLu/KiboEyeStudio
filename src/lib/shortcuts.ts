@@ -16,6 +16,7 @@ export interface ShortcutActions {
   duplicateKeyframe: () => void
   deleteKeyframe: () => void
   toggleDevMode: () => void
+  openGuide: () => void
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -30,6 +31,12 @@ export function useKeyboardShortcuts(actions: ShortcutActions): void {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const mod = e.ctrlKey || e.metaKey
+
+      if (e.key === 'F1') {
+        e.preventDefault()
+        actions.openGuide()
+        return
+      }
 
       if (e.code === 'Space' && !isEditableTarget(e.target)) {
         e.preventDefault()

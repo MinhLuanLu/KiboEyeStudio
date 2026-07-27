@@ -49,6 +49,7 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
   const toggleBezel = useStore((s) => s.toggleBezel)
   const setExportDialogOpen = useStore((s) => s.setExportDialogOpen)
   const setReferenceImportOpen = useStore((s) => s.setReferenceImportOpen)
+  const setGuideOpen = useStore((s) => s.setGuideOpen)
 
   return (
     <div className="flex items-center gap-3 px-3 py-2 border-b border-studio-border bg-studio-panel">
@@ -101,6 +102,9 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
         </button>
         <button className={`studio-btn ${devModeOpen ? 'text-studio-accent' : ''}`} onClick={toggleDevMode} title="Toggle Developer Mode (Ctrl+.)">
           {'</>'}
+        </button>
+        <button className="studio-btn" onClick={() => setGuideOpen(true)} title="User Guide (F1)">
+          Help
         </button>
       </div>
     </div>

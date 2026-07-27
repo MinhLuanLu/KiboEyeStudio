@@ -4,9 +4,11 @@ import type { EditorState } from '@/types'
 import { AppShell } from '@/components/Layout/AppShell'
 import { useKeyboardShortcuts } from '@/lib/shortcuts'
 import { autosaveRead, autosaveWrite, openProjectDialog, saveProjectAs, saveProjectToPath } from '@/state/persistence'
+import { getShowGuideOnStartup } from '@/components/Guide/UserGuideModal'
 
 const AUTOSAVE_INTERVAL_MS = 20000
 const SAVE_STATUS_FLASH_MS = 2500
+const GUIDE_SEEN_KEY = 'kibo-eye-studio:guide-seen'
 
 function currentEditorState(): EditorState {
   const s = useStore.getState()
@@ -37,6 +39,7 @@ export default function App() {
   const prevFrame = useStore((s) => s.prevFrame)
   const toggleDevMode = useStore((s) => s.toggleDevMode)
   const setExportDialogOpen = useStore((s) => s.setExportDialogOpen)
+  const setGuideOpen = useStore((s) => s.setGuideOpen)
   const selectedKeyframeId = useStore((s) => s.selectedKeyframeId)
   const activeAnimationId = useStore((s) => s.activeAnimationId)
   const duplicateKeyframe = useStore((s) => s.duplicateKeyframe)
@@ -54,6 +57,21 @@ export default function App() {
       if (saved) loadProject(saved.project, saved.editorState, null)
     })
   }, [loadProject])
+
+  // Open the User Guide automatically the very first time the app ever launches (a
+  // lightweight first-run onboarding nudge), or on every launch if the user opted into
+  // "Show this guide on startup" from inside the guide itself.
+  useEffect(() => {
+    let shouldOpen = getShowGuideOnStartup()
+    try {
+      if (!shouldOpen && localStorage.getItem(GUIDE_SEEN_KEY) !== 'true') shouldOpen = true
+      localStorage.setItem(GUIDE_SEEN_KEY, 'true')
+    } catch {
+      // Ignore — worst case the guide just doesn't auto-open this session.
+    }
+    if (shouldOpen) setGuideOpen(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Periodic autosave-to-disk while there are unsaved changes.
   useEffect(() => {
@@ -186,7 +204,8 @@ export default function App() {
     prevFrame,
     duplicateKeyframe: duplicateSelectedKeyframe,
     deleteKeyframe: deleteSelectedKeyframe,
-    toggleDevMode
+    toggleDevMode,
+    openGuide: () => setGuideOpen(true)
   }
 
   useKeyboardShortcuts(actions)
@@ -210,6 +229,7 @@ export default function App() {
       window.kibo.onMenu('menu:restart', actions.restart),
       window.kibo.onMenu('menu:next-frame', actions.nextFrame),
       window.kibo.onMenu('menu:prev-frame', actions.prevFrame),
+      window.kibo.onMenu('menu:user-guide', actions.openGuide),
       // The main process asks for this when the user chooses "Save" from the unsaved-
       // changes dialog on window close — it only tells the window it's safe to actually
       // close once the save has genuinely succeeded (see handleSaveProject's return value).

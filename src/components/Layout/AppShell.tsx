@@ -12,6 +12,7 @@ import { DisplayPanel } from '@/components/Display/DisplayPanel'
 import { DevModePanel } from '@/components/DevMode/DevModePanel'
 import { ExportDialog } from '@/components/Export/ExportDialog'
 import { ReferenceImportDialog } from '@/components/Import/ReferenceImportDialog'
+import { UserGuideModal } from '@/components/Guide/UserGuideModal'
 
 function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'horizontal' }) {
   return (
@@ -115,6 +116,7 @@ export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions })
       </div>
       <ExportDialog />
       <ReferenceImportDialog />
+      <UserGuideModal />
     </div>
   )
 }
