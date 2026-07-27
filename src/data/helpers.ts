@@ -18,5 +18,5 @@ export function kfFrom(base: EyeParams, duration: number, easing: EasingType, ov
 }
 
 export function anim(name: string, loop: boolean, keyframes: Keyframe[]): Animation {
-  return { id: nanoid(8), name, loop, keyframes }
+  return { id: nanoid(8), name, loop, keyframes, stickers: [] }
 }

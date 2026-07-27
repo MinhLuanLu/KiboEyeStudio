@@ -14,6 +14,7 @@ import { DevModePanel } from '@/components/DevMode/DevModePanel'
 import { ExportDialog } from '@/components/Export/ExportDialog'
 import { UserGuideModal } from '@/components/Guide/UserGuideModal'
 import { VisualReferencePanel } from '@/components/VisualReference/VisualReferencePanel'
+import { StickerManagerPanel } from '@/components/Stickers/StickerManagerPanel'
 import { PanelTabs } from '@/components/ui/PanelTabs'
 
 const LEFT_TABS: { value: LeftTab; label: string }[] = [
@@ -26,7 +27,8 @@ const RIGHT_TABS: { value: RightTab; label: string }[] = [
   { value: 'colors', label: 'Colors' },
   { value: 'display', label: 'Display' },
   { value: 'personality', label: 'Personality' },
-  { value: 'visual-reference', label: 'Visual Reference' }
+  { value: 'visual-reference', label: 'Visual Reference' },
+  { value: 'stickers', label: 'Stickers' }
 ]
 
 function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'horizontal' }) {
@@ -90,6 +92,7 @@ export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions })
                 {rightTab === 'display' && <DisplayPanel />}
                 {rightTab === 'personality' && <PersonalityPanel />}
                 {rightTab === 'visual-reference' && <VisualReferencePanel />}
+                {rightTab === 'stickers' && <StickerManagerPanel />}
               </div>
             </div>
           </Panel>

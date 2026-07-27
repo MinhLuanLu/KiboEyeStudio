@@ -35,8 +35,18 @@ export function DevModePanel() {
       <Row label="Active Anim" value={anim?.name ?? '—'} />
       <div className="h-px bg-studio-border my-0.5" />
       <Row label="Keyframes (project)" value={String(size.keyframeCount)} />
+      <Row label="Stickers (project)" value={String(project.stickers.filter((s) => s.visible).length)} />
       <Row label="Est. Flash Usage" value={formatBytes(size.flashBytes)} />
       <Row label="Est. RAM Usage" value={formatBytes(size.ramBytes)} />
+      {size.stickerWarnings.length > 0 && (
+        <div className="flex flex-col gap-1 mt-1 pt-1.5 border-t border-studio-border">
+          {size.stickerWarnings.map((w, i) => (
+            <p key={i} className="text-[10px] leading-snug text-amber-400">
+              ⚠ {w}
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

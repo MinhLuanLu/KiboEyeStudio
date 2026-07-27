@@ -1,4 +1,16 @@
-import type { Animation, CustomPupilShape, EasingType, Expression, EyeColors, EyeParams, Project, PupilShapeId } from '@/types'
+import type {
+  Animation,
+  BuiltinStickerId,
+  CustomPupilShape,
+  EasingType,
+  Expression,
+  EyeColors,
+  EyeParams,
+  Project,
+  PupilShapeId,
+  StickerAsset,
+  StickerInstance
+} from '@/types'
 import {
   clampFps,
   expressionLeftParams,
@@ -256,6 +268,255 @@ function exportPupilShapes(project: Project): string {
     lines.push('const uint8_t PUPIL_CUSTOM_SHAPE_POINT_COUNTS[] = { 0 };')
   }
   lines.push(`const uint8_t PUPIL_CUSTOM_SHAPE_COUNT = ${customShapes.length};`)
+
+  return lines.join('\n')
+}
+
+// ---- Stickers -------------------------------------------------------------------------
+//
+// Scope for this pass: only Project.stickers (the project-wide, "always visible" scope)
+// exports to firmware — Expression.stickers/Animation.stickers stay studio-preview-only for
+// now (they're a real feature there, applied to the effective sticker list the same way).
+// Wiring per-expression/per-animation stickers into SetExpression()/PlayAnimation() would
+// mean tracking a *second* time base per active pose and cross-referencing it against
+// whichever expression/animation is currently live — a meaningfully separate chunk of player
+// state beyond what this pass covers. Flagging this here the same way SVG/sprite-sheet
+// import were flagged as deferred in the plan, rather than silently under-delivering it.
+//
+// Built-in procedural stickers: only 4 of the 14 (stars, hearts, rain, confetti) have a
+// hand-ported C++ drawer below (eyesDrawSticker_Stars/Hearts/Rain/Confetti) — chosen because
+// they cover the range of techniques the other 10 reuse (twinkling polygon particles, a
+// reused pupil-shape polygon, simple looping line particles, rotating polygon particles) and
+// because two of them reuse point tables already exported for pupil shapes (PUPIL_SHAPE_STAR/
+// HEART/DIAMOND), keeping the added code small. The rest are opaque, hand-authored particle
+// art. This is a real, scoped reduction from "all 14 export" — flagged rather than silently
+// dropped: selecting one of the other 10 as a project-level sticker draws nothing on real
+// hardware (still renders correctly in the studio preview) until a follow-up ports the rest.
+//
+// Raster (imported PNG/GIF) stickers export in full: each frame's already-capped (<=64x64,
+// see stickerImport.ts) RGBA data quantizes to RGB565 here, with a reserved magenta sentinel
+// marking below-threshold-alpha source pixels so the firmware draw loop simply skips them —
+// binary transparency, the same RGB565-has-no-alpha workaround this project has used
+// repeatedly (border/pupil opacity). Per-instance width/height scaling happens at *draw* time
+// in the firmware (nearest-neighbor, see eyesDrawStickerRaster in PLAYER_CODE) rather than
+// being pre-resized per instance at export time, so multiple instances of the same imported
+// asset at different sizes share one exported pixel table instead of duplicating it.
+//
+// Per-instance opacity (including the fade-in/out envelope and pulseOpacity) is a *visibility
+// threshold* in firmware, not a smooth per-pixel blend: for front-layer stickers, whatever's
+// underneath (already-drawn eyes) is arbitrary and unknown at sticker-draw time, so there's no
+// fixed color to alpha-blend against the way border/pupil opacity blend against a known
+// background/iris. The studio preview still shows the true smooth fade — this is a firmware-
+// only simplification, noted directly in the generated header. Per-instance tint is fully
+// respected for procedural stickers (their drawers already take a solid fill color, so tinting
+// is just passing a different one — no blending needed); raster stickers ignore tint in
+// firmware for the same "no known destination to blend against" reason and draw their
+// authored colors as-is.
+
+const STICKER_TRANSPARENT_RGB565 = 0xf81f // bright magenta — chosen as a sentinel because it's
+// extremely unlikely to occur in real sticker art; an opaque source pixel that happens to
+// quantize to exactly this value gets its LSB flipped (see rgbaFrameToRgb565Table below) so it
+// never gets mistaken for a transparent one.
+
+const STICKER_BUILTIN_ENUM_ORDER: BuiltinStickerId[] = [
+  'rain',
+  'snow',
+  'zzz',
+  'stars',
+  'hearts',
+  'sparkles',
+  'clouds',
+  'tears',
+  'fire',
+  'smoke',
+  'lightning',
+  'burstLines',
+  'expandingCircles',
+  'confetti'
+]
+
+function stickerBuiltinEnumName(id: BuiltinStickerId): string {
+  return `STICKER_BUILTIN_${id.replace(/([A-Z])/g, '_$1').toUpperCase()}`
+}
+
+// The 4 built-ins with a real C++ drawer below — everything else falls back to "draw nothing"
+// in eyesDrawStickerProcedural() (PLAYER_CODE) rather than something visually wrong.
+const STICKER_BUILTINS_WITH_FIRMWARE_DRAWER: ReadonlySet<BuiltinStickerId> = new Set(['stars', 'hearts', 'rain', 'confetti'])
+
+// RGBA (0-255 per channel) -> RGB565, with alpha < 128 mapped to the reserved transparent
+// sentinel instead of a real color — see STICKER_TRANSPARENT_RGB565's own comment.
+function rgbaFrameToRgb565Table(frame: { width: number; height: number; data: number[] }): number[] {
+  const out: number[] = []
+  const pixelCount = frame.width * frame.height
+  for (let i = 0; i < pixelCount; i++) {
+    const r = frame.data[i * 4] ?? 0
+    const g = frame.data[i * 4 + 1] ?? 0
+    const b = frame.data[i * 4 + 2] ?? 0
+    const a = frame.data[i * 4 + 3] ?? 0
+    if (a < 128) {
+      out.push(STICKER_TRANSPARENT_RGB565)
+      continue
+    }
+    let rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+    if (rgb565 === STICKER_TRANSPARENT_RGB565) rgb565 ^= 0x0001
+    out.push(rgb565)
+  }
+  return out
+}
+
+function stickerDefLiteral(s: StickerInstance, asset: StickerAsset | undefined, rasterIndexByAssetId: Map<string, number>): string {
+  const isRaster = asset?.kind === 'raster'
+  const kind = isRaster ? 'STICKER_KIND_RASTER' : 'STICKER_KIND_PROCEDURAL'
+  const assetIndex = isRaster
+    ? String(rasterIndexByAssetId.get(asset!.id) ?? 0)
+    : stickerBuiltinEnumName(asset?.builtinId ?? 'rain')
+  const anim = s.anim
+  const fields = [
+    kind,
+    assetIndex,
+    s.layer === 'front' ? 'STICKER_LAYER_FRONT' : 'STICKER_LAYER_BEHIND',
+    Math.round(s.x),
+    Math.round(s.y),
+    Math.max(0, Math.round(s.width)),
+    Math.max(0, Math.round(s.height)),
+    Math.max(0, Math.round(s.scale)),
+    Math.round(s.rotation),
+    Math.max(0, Math.min(100, Math.round(s.opacity))),
+    toRgb565Hex(s.tint ?? '#ffffff'),
+    s.flipH ? 'true' : 'false',
+    s.flipV ? 'true' : 'false',
+    Math.max(0, Math.round(anim.speed)),
+    anim.fps === null ? -1 : Math.round(anim.fps),
+    Math.max(0, Math.round(anim.startDelayMs)),
+    anim.loopMode === 'once' ? 'STICKER_LOOP_ONCE' : anim.loopMode === 'pingpong' ? 'STICKER_LOOP_PINGPONG' : 'STICKER_LOOP_LOOP',
+    anim.reverse ? 'true' : 'false',
+    Math.max(0, Math.round(anim.fadeInMs)),
+    Math.max(0, Math.round(anim.fadeOutMs)),
+    Math.max(0, Math.round(anim.startTimeMs)),
+    anim.endTimeMs === null ? -1 : Math.round(anim.endTimeMs),
+    Math.round(anim.driftX),
+    Math.round(anim.driftY),
+    Math.round(anim.spin),
+    Math.max(0, Math.min(100, Math.round(anim.pulseScale))),
+    Math.max(0, Math.min(100, Math.round(anim.pulseOpacity)))
+  ]
+  return `  { ${fields.join(', ')} }`
+}
+
+function exportStickers(project: Project): string {
+  const stickers = project.stickers.filter((s) => s.visible)
+  const assetsById = new Map(project.stickerAssets.map((a) => [a.id, a]))
+
+  const usedRasterAssets: StickerAsset[] = []
+  const rasterIndexByAssetId = new Map<string, number>()
+  for (const s of stickers) {
+    const asset = assetsById.get(s.assetId)
+    if (asset && asset.kind === 'raster' && asset.frameRgba && !rasterIndexByAssetId.has(asset.id)) {
+      rasterIndexByAssetId.set(asset.id, usedRasterAssets.length)
+      usedRasterAssets.push(asset)
+    }
+  }
+
+  const lines: string[] = [
+    `#define STICKER_TRANSPARENT_COLOR 0x${STICKER_TRANSPARENT_RGB565.toString(16).toUpperCase()}`,
+    '',
+    'enum StickerKind : uint8_t { STICKER_KIND_PROCEDURAL = 0, STICKER_KIND_RASTER };',
+    'enum StickerLayerId : uint8_t { STICKER_LAYER_BEHIND = 0, STICKER_LAYER_FRONT };',
+    'enum StickerLoopModeId : uint8_t { STICKER_LOOP_ONCE = 0, STICKER_LOOP_LOOP, STICKER_LOOP_PINGPONG };',
+    'enum StickerBuiltinId : uint8_t {',
+    STICKER_BUILTIN_ENUM_ORDER.map((id, i) => `  ${stickerBuiltinEnumName(id)}${i === 0 ? ' = 0' : ''}`).join(',\n'),
+    '};',
+    '',
+    '// One placed sticker (project-wide scope only — see the Stickers comment above).',
+    'struct StickerDef {',
+    '  uint8_t kind;        // StickerKind',
+    '  uint8_t assetIndex;  // StickerBuiltinId when kind==PROCEDURAL; index into STICKER_RASTER_ASSETS when kind==RASTER',
+    '  uint8_t layer;       // StickerLayerId',
+    '  int16_t x, y;',
+    '  uint16_t width, height;',
+    '  uint16_t scale;      // %',
+    '  int16_t rotation;    // degrees, base (before spin)',
+    '  uint8_t opacity;     // 0-100, base (before fade/pulse) — see the visibility-threshold comment above',
+    '  uint16_t tintColor;  // RGB565 — procedural only, see comment above',
+    '  bool flipH, flipV;',
+    '  uint16_t animSpeed;  // % raster frame-advance speed',
+    '  int16_t animFps;     // -1 = use the raster asset\'s own per-frame delays',
+    '  uint16_t startDelayMs;',
+    '  uint8_t loopMode;    // StickerLoopModeId',
+    '  bool reverse;',
+    '  uint16_t fadeInMs, fadeOutMs;',
+    '  uint32_t startTimeMs;',
+    '  int32_t endTimeMs;   // -1 = never ends',
+    '  int16_t driftX, driftY; // px/s',
+    '  int16_t spin;           // deg/s',
+    '  uint8_t pulseScale, pulseOpacity; // 0-100',
+    '};',
+    '',
+    '// One imported raster (PNG/GIF) sticker asset\'s pixel data — frames are RGB565 with',
+    '// STICKER_TRANSPARENT_COLOR marking skipped pixels, at the asset\'s own captured',
+    '// resolution (<=64x64); eyesDrawStickerRaster() below scales to each instance\'s actual',
+    '// width/height at draw time.',
+    'struct StickerRasterAsset {',
+    '  const uint16_t* const* frames;',
+    '  const uint16_t* frameDelaysMs;',
+    '  uint8_t frameCount;',
+    '  uint8_t width, height;',
+    '};',
+    ''
+  ]
+
+  if (usedRasterAssets.length > 0) {
+    usedRasterAssets.forEach((asset, i) => {
+      const ident = `StickerRaster_${i}`
+      const frames = asset.frameRgba ?? []
+      lines.push(`// "${asset.name}"`)
+      frames.forEach((frame, fi) => {
+        const pixels = rgbaFrameToRgb565Table(frame)
+        lines.push(`const uint16_t ${ident}_frame${fi}[] PROGMEM = { ${pixels.join(', ')} };`)
+      })
+      lines.push(`const uint16_t* const ${ident}_frames[] = { ${frames.map((_, fi) => `${ident}_frame${fi}`).join(', ')} };`)
+      const delays = asset.frameDelaysMs && asset.frameDelaysMs.length === frames.length ? asset.frameDelaysMs : frames.map(() => 100)
+      lines.push(`const uint16_t ${ident}_frameDelaysMs[] = { ${delays.map((d) => Math.max(1, Math.round(d))).join(', ')} };`)
+      lines.push('')
+    })
+    const rows = usedRasterAssets.map((asset, i) => {
+      const w = asset.frameRgba?.[0]?.width ?? 0
+      const h = asset.frameRgba?.[0]?.height ?? 0
+      const count = asset.frameRgba?.length ?? 0
+      return `  { StickerRaster_${i}_frames, StickerRaster_${i}_frameDelaysMs, ${count}, ${w}, ${h} }`
+    })
+    lines.push(`const StickerRasterAsset STICKER_RASTER_ASSETS[] = {\n${rows.join(',\n')}\n};`)
+  } else {
+    lines.push('// (no imported raster stickers used at the project scope in this project)')
+    lines.push('const StickerRasterAsset STICKER_RASTER_ASSETS[] = { { nullptr, nullptr, 0, 0, 0 } };')
+  }
+  lines.push(`const uint8_t STICKER_RASTER_ASSET_COUNT = ${usedRasterAssets.length};`)
+  lines.push('')
+
+  if (stickers.length > 0) {
+    lines.push('// kind, assetIndex, layer, x, y, width, height, scale, rotation, opacity, tintColor,')
+    lines.push('// flipH, flipV, animSpeed, animFps, startDelayMs, loopMode, reverse, fadeInMs, fadeOutMs,')
+    lines.push('// startTimeMs, endTimeMs, driftX, driftY, spin, pulseScale, pulseOpacity')
+    lines.push('const StickerDef PROJECT_STICKERS[] PROGMEM = {')
+    lines.push(stickers.map((s) => stickerDefLiteral(s, assetsById.get(s.assetId), rasterIndexByAssetId)).join(',\n'))
+    lines.push('};')
+  } else {
+    lines.push('// (this project has no project-scope stickers)')
+    lines.push('const StickerDef PROJECT_STICKERS[] = {};')
+  }
+  lines.push(`const uint8_t PROJECT_STICKER_COUNT = ${stickers.length};`)
+
+  const unported = stickers.filter((s) => {
+    const asset = assetsById.get(s.assetId)
+    return asset?.kind === 'procedural' && asset.builtinId && !STICKER_BUILTINS_WITH_FIRMWARE_DRAWER.has(asset.builtinId)
+  })
+  if (unported.length > 0) {
+    lines.push('')
+    lines.push('// NOTE: the following project stickers use a built-in that has no firmware drawer yet')
+    lines.push('// (see the Stickers comment above) and will draw nothing on real hardware, though they')
+    lines.push('// render correctly in the studio preview:')
+    for (const s of unported) lines.push(`//   "${s.name}"`)
+  }
 
   return lines.join('\n')
 }
@@ -749,6 +1010,317 @@ inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const Li
   eyesDrawEye(gfx, screenCx + half, screenCy, e, true, bgColor, rightColors);
 }
 
+// ---- Stickers — see the "Stickers" comment in the studio's cppExport.ts for the exported ----
+// scope/simplifications this player implements (project-wide only, 4 of 14 built-ins have a
+// firmware drawer, opacity is a visibility threshold not a smooth blend).
+
+// Deterministic pseudo-random in [0,1) — must match hash01() in the studio's
+// builtinStickers.ts exactly (same formula) so a particle sticker's layout in firmware matches
+// its studio preview.
+inline float eyesStickerHash01(float seed) {
+  float x = sinf(seed * 12.9898f) * 43758.5453f;
+  return x - floorf(x);
+}
+
+// Fills a polygon already given in absolute screen-space integer points — a simpler, unclipped
+// sibling of eyesFillPolygonInEye() above (stickers aren't confined to an eye's silhouette).
+// Standard even-odd scanline fill, exact for the simple non-self-intersecting shapes used here.
+template <typename T>
+inline void eyesFillPolygonScreen(T& gfx, const int16_t* xs, const int16_t* ys, uint8_t count, uint16_t color) {
+  if (count < 3) return;
+  int16_t minY = ys[0], maxY = ys[0];
+  for (uint8_t i = 1; i < count; i++) {
+    if (ys[i] < minY) minY = ys[i];
+    if (ys[i] > maxY) maxY = ys[i];
+  }
+  float cross[EYE_MAX_PUPIL_POLYGON_POINTS];
+  for (int16_t y = minY; y <= maxY; y++) {
+    float scanY = y + 0.5f;
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < count; i++) {
+      uint8_t j = (i + 1) % count;
+      float y1 = ys[i], y2 = ys[j];
+      if ((y1 <= scanY && y2 > scanY) || (y2 <= scanY && y1 > scanY)) {
+        float t = (scanY - y1) / (y2 - y1);
+        if (n < EYE_MAX_PUPIL_POLYGON_POINTS) cross[n++] = xs[i] + t * (xs[j] - xs[i]);
+      }
+    }
+    for (uint8_t i = 1; i < n; i++) {
+      float key = cross[i];
+      int16_t k = (int16_t)i - 1;
+      while (k >= 0 && cross[k] > key) { cross[k + 1] = cross[k]; k--; }
+      cross[k + 1] = key;
+    }
+    for (uint8_t i = 0; (uint16_t)i + 1 < n; i += 2) {
+      int16_t xLo = (int16_t)(cross[i] + 0.5f);
+      int16_t xHi = (int16_t)(cross[i + 1] + 0.5f);
+      if (xHi < xLo) continue;
+      gfx.drawFastHLine(xLo, y, xHi - xLo + 1, color);
+    }
+  }
+}
+
+// ---- 4 ported built-in procedural stickers — direct hand-ports of the matching drawer in ----
+// the studio's builtinStickers.ts (same formulas, same eyesStickerHash01()/hash01() seeds), so
+// firmware and studio preview lay out identically. cx/cy = sticker's live screen-space center,
+// rx/ry = live half-extents in px (negative to flip), rotationDeg = live total rotation.
+template <typename T>
+inline void eyesDrawSticker_Stars(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  for (uint8_t i = 0; i < 4; i++) {
+    float x = -0.7f + 1.4f * eyesStickerHash01(i * 9 + 1);
+    float y = -0.7f + 1.4f * eyesStickerHash01(i * 9 + 2);
+    float pr = 0.16f + 0.05f * eyesStickerHash01(i * 9 + 3);
+    int16_t wx[EYE_MAX_PUPIL_POLYGON_POINTS], wy[EYE_MAX_PUPIL_POLYGON_POINTS];
+    uint8_t count = PUPIL_SHAPE_STAR_COUNT;
+    for (uint8_t v = 0; v < count; v++) {
+      float vx = PUPIL_SHAPE_STAR[v][0] / 100.0f;
+      float vy = PUPIL_SHAPE_STAR[v][1] / 100.0f;
+      float lx = x + vx * pr;
+      float ly = y + vy * pr;
+      wx[v] = cx + (int16_t)roundf((lx * oc - ly * os) * rx);
+      wy[v] = cy + (int16_t)roundf((lx * os + ly * oc) * ry);
+    }
+    eyesFillPolygonScreen(gfx, wx, wy, count, color);
+  }
+}
+
+template <typename T>
+inline void eyesDrawSticker_Hearts(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  for (uint8_t i = 0; i < 2; i++) {
+    float xBase = -0.4f + 0.8f * i;
+    float bob = 0.06f * sinf(t * 2.0f + i * 3.0f);
+    float x = xBase, y = -0.1f + bob;
+    float pr = 0.32f;
+    int16_t wx[EYE_MAX_PUPIL_POLYGON_POINTS], wy[EYE_MAX_PUPIL_POLYGON_POINTS];
+    uint8_t count = PUPIL_SHAPE_HEART_COUNT;
+    for (uint8_t v = 0; v < count; v++) {
+      float vx = PUPIL_SHAPE_HEART[v][0] / 100.0f;
+      float vy = PUPIL_SHAPE_HEART[v][1] / 100.0f;
+      float lx = x + vx * pr;
+      float ly = y + vy * pr;
+      wx[v] = cx + (int16_t)roundf((lx * oc - ly * os) * rx);
+      wy[v] = cy + (int16_t)roundf((lx * os + ly * oc) * ry);
+    }
+    eyesFillPolygonScreen(gfx, wx, wy, count, color);
+  }
+}
+
+template <typename T>
+inline void eyesDrawSticker_Rain(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  for (uint8_t i = 0; i < 6; i++) {
+    float phase = eyesStickerHash01(i * 7 + 1);
+    float xBase = -0.8f + 1.6f * eyesStickerHash01(i * 3 + 2);
+    float speed = 0.9f;
+    float local = fmodf(t * speed + phase, 1.0f);
+    if (local < 0) local += 1.0f;
+    float y = local * 2.2f - 1.1f;
+    float x1 = xBase, y1 = y;
+    float x2 = xBase - 0.08f, y2 = y + 0.3f;
+    int16_t wx1 = cx + (int16_t)roundf((x1 * oc - y1 * os) * rx);
+    int16_t wy1 = cy + (int16_t)roundf((x1 * os + y1 * oc) * ry);
+    int16_t wx2 = cx + (int16_t)roundf((x2 * oc - y2 * os) * rx);
+    int16_t wy2 = cy + (int16_t)roundf((x2 * os + y2 * oc) * ry);
+    gfx.drawLine(wx1, wy1, wx2, wy2, color);
+  }
+}
+
+template <typename T>
+inline void eyesDrawSticker_Confetti(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  for (uint8_t i = 0; i < 7; i++) {
+    float phase = eyesStickerHash01(i * 53 + 1);
+    float xBase = -0.85f + 1.7f * eyesStickerHash01(i * 19 + 2);
+    float speed = 0.4f + 0.2f * eyesStickerHash01(i * 23 + 3);
+    float local = fmodf(t * speed + phase, 1.0f);
+    if (local < 0) local += 1.0f;
+    float y = local * 2.2f - 1.1f;
+    float x = xBase + 0.15f * sinf(t * 3.0f + i);
+    float spin = t * (2.0f + eyesStickerHash01(i * 29 + 4) * 3.0f) + i;
+    float pc = cosf(spin), ps = sinf(spin);
+    float pr = 0.08f;
+    uint16_t particleColor = (i % 2 == 0) ? color : (uint16_t)0xFFFF;
+    int16_t wx[4], wy[4];
+    for (uint8_t v = 0; v < 4; v++) {
+      float vx = PUPIL_SHAPE_DIAMOND[v][0] / 100.0f;
+      float vy = PUPIL_SHAPE_DIAMOND[v][1] / 100.0f;
+      float lx = x + (vx * pc - vy * ps) * pr;
+      float ly = y + (vx * ps + vy * pc) * pr;
+      wx[v] = cx + (int16_t)roundf((lx * oc - ly * os) * rx);
+      wy[v] = cy + (int16_t)roundf((lx * os + ly * oc) * ry);
+    }
+    eyesFillPolygonScreen(gfx, wx, wy, 4, particleColor);
+  }
+}
+
+// Dispatches to whichever of the 4 ported built-ins matches builtinId; anything else (the
+// remaining 10 — see the Stickers comment above) draws nothing, on purpose.
+template <typename T>
+inline void eyesDrawStickerProcedural(T& gfx, uint8_t builtinId, int16_t cx, int16_t cy, int16_t rx, int16_t ry,
+                                       float rotationDeg, uint16_t color, float t) {
+  switch (builtinId) {
+    case STICKER_BUILTIN_STARS: eyesDrawSticker_Stars(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_HEARTS: eyesDrawSticker_Hearts(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_RAIN: eyesDrawSticker_Rain(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_CONFETTI: eyesDrawSticker_Confetti(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    default: break;
+  }
+}
+
+// Blits one raster sticker frame, nearest-neighbor-scaled from the asset's own captured
+// resolution up/down to (w, h) and rotated about (cx, cy) — forward source-to-destination
+// mapping (iterate source pixels, compute where each lands), so it's exact at rotationDeg==0
+// and may leave small gaps between plotted pixels when scaling up a lot at a non-zero
+// rotation; stickers are small decorations at modest sizes, so this trade-off (simplicity and
+// speed over perfect coverage in that specific combination) is acceptable here. Pixels equal
+// to STICKER_TRANSPARENT_COLOR are skipped (binary transparency — see the comment above).
+template <typename T>
+inline void eyesDrawStickerRaster(T& gfx, const StickerRasterAsset& asset, uint8_t frameIndex,
+                                   int16_t cx, int16_t cy, int16_t w, int16_t h, float rotationDeg, bool flipH, bool flipV) {
+  if (frameIndex >= asset.frameCount || asset.width == 0 || asset.height == 0) return;
+  const uint16_t* pixels = asset.frames[frameIndex];
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float c = cosf(rad), s = sinf(rad);
+  float sx = ((float)w / (float)asset.width) * (flipH ? -1.0f : 1.0f);
+  float sy = ((float)h / (float)asset.height) * (flipV ? -1.0f : 1.0f);
+  for (uint8_t py = 0; py < asset.height; py++) {
+    for (uint8_t px = 0; px < asset.width; px++) {
+      uint16_t pixel = pixels[(uint16_t)py * asset.width + px];
+      if (pixel == STICKER_TRANSPARENT_COLOR) continue;
+      float lx = ((float)px - asset.width / 2.0f) * sx;
+      float ly = ((float)py - asset.height / 2.0f) * sy;
+      float wx = cx + lx * c - ly * s;
+      float wy = cy + lx * s + ly * c;
+      gfx.drawPixel((int16_t)roundf(wx), (int16_t)roundf(wy), pixel);
+    }
+  }
+}
+
+// A sticker's computed-for-this-frame transform/visibility, evaluated as a closed-form
+// function of elapsed time from StickerDef's parametric animation fields — see the "one
+// deliberate simplification" note in the studio's Stickers plan (no per-sticker keyframes).
+struct StickerLive {
+  bool visible;
+  int16_t cx, cy;
+  int16_t rx, ry;
+  float rotationDeg;
+};
+
+inline StickerLive eyesComputeStickerLive(const StickerDef& s, unsigned long elapsedMs) {
+  StickerLive live;
+  live.visible = false;
+  live.cx = live.cy = live.rx = live.ry = 0;
+  live.rotationDeg = 0;
+  if (elapsedMs < s.startDelayMs) return live;
+  unsigned long localMs = elapsedMs - s.startDelayMs;
+  if (localMs < (unsigned long)s.startTimeMs) return live;
+  if (s.endTimeMs >= 0 && localMs > (unsigned long)s.endTimeMs) return live;
+
+  float tSec = localMs / 1000.0f;
+  float opacity = s.opacity;
+  unsigned long sinceStart = localMs - (unsigned long)s.startTimeMs;
+  if (s.fadeInMs > 0 && sinceStart < (unsigned long)s.fadeInMs) {
+    opacity *= (float)sinceStart / (float)s.fadeInMs;
+  }
+  if (s.endTimeMs >= 0 && s.fadeOutMs > 0) {
+    unsigned long untilEnd = (unsigned long)s.endTimeMs > localMs ? (unsigned long)s.endTimeMs - localMs : 0;
+    if (untilEnd < (unsigned long)s.fadeOutMs) {
+      opacity *= (float)untilEnd / (float)s.fadeOutMs;
+    }
+  }
+  if (s.pulseOpacity > 0) {
+    float pulse = sinf(tSec * 2.0f * (float)PI);
+    opacity *= 1.0f - (s.pulseOpacity / 100.0f) * (0.5f - 0.5f * pulse);
+  }
+  // Below this, treated as fully invisible rather than partially blended — see the opacity
+  // comment in the studio's cppExport.ts (RGB565 has no alpha to blend a front-layer sticker
+  // against whatever's already drawn beneath it).
+  if (opacity < 35.0f) return live;
+
+  float scale = s.scale / 100.0f;
+  if (s.pulseScale > 0) {
+    float pulse = sinf(tSec * 2.0f * (float)PI);
+    scale *= 1.0f + (s.pulseScale / 100.0f) * 0.3f * pulse;
+  }
+  live.rx = (int16_t)roundf((s.width / 2.0f) * scale) * (s.flipH ? -1 : 1);
+  live.ry = (int16_t)roundf((s.height / 2.0f) * scale) * (s.flipV ? -1 : 1);
+  live.cx = s.x + (int16_t)roundf(s.driftX * tSec);
+  live.cy = s.y + (int16_t)roundf(s.driftY * tSec);
+  live.rotationDeg = s.rotation + s.spin * tSec;
+  live.visible = true;
+  return live;
+}
+
+// Picks the current raster frame from a sticker's live-elapsed time (unaffected by
+// startDelayMs, already subtracted by the caller), honoring animSpeed/animFps override/
+// loopMode/reverse — mirrors pickRasterFrame() in the studio's drawSticker.ts.
+inline uint8_t eyesPickStickerFrame(const StickerRasterAsset& asset, const StickerDef& s, unsigned long localMs) {
+  if (asset.frameCount <= 1) return 0;
+  unsigned long totalMs = 0;
+  for (uint8_t i = 0; i < asset.frameCount; i++) {
+    unsigned long d = s.animFps > 0 ? (unsigned long)(1000 / s.animFps) : asset.frameDelaysMs[i];
+    if (d == 0) d = 1;
+    totalMs += d;
+  }
+  if (totalMs == 0) return 0;
+
+  unsigned long scaledMs = (unsigned long)(localMs * (s.animSpeed / 100.0f));
+  unsigned long pos;
+  if (s.loopMode == STICKER_LOOP_PINGPONG) {
+    unsigned long cycle = totalMs * 2;
+    unsigned long m = scaledMs % cycle;
+    pos = m < totalMs ? m : (cycle - m);
+  } else if (s.loopMode == STICKER_LOOP_LOOP) {
+    pos = scaledMs % totalMs;
+  } else {
+    pos = scaledMs < totalMs ? scaledMs : totalMs - 1;
+  }
+  if (s.reverse) pos = totalMs - 1 - pos;
+
+  unsigned long acc = 0;
+  for (uint8_t i = 0; i < asset.frameCount; i++) {
+    unsigned long d = s.animFps > 0 ? (unsigned long)(1000 / s.animFps) : asset.frameDelaysMs[i];
+    if (d == 0) d = 1;
+    acc += d;
+    if (pos < acc) return i;
+  }
+  return asset.frameCount - 1;
+}
+
+// Draws every sticker on the given layer — call with STICKER_LAYER_BEHIND right after
+// fillScreen()/before eyesDrawEyePair(), and STICKER_LAYER_FRONT right after it, matching the
+// studio preview's background -> behind-stickers -> eyes -> front-stickers -> bezel order.
+// \`stickers\`/\`rasterAssets\` are always PROJECT_STICKERS/STICKER_RASTER_ASSETS from the
+// generated header; \`elapsedMs\` should be a free-running clock (e.g. millis() since boot, or
+// since a sticker-scene reset) — stickers animate independently of whatever expression/
+// animation the eyes are currently playing.
+template <typename T>
+inline void eyesDrawStickers(T& gfx, const StickerDef* stickers, uint8_t count,
+                              const StickerRasterAsset* rasterAssets, uint8_t rasterCount,
+                              uint8_t layer, unsigned long elapsedMs) {
+  for (uint8_t i = 0; i < count; i++) {
+    StickerDef s = stickers[i];
+    if (s.layer != layer) continue;
+    StickerLive live = eyesComputeStickerLive(s, elapsedMs);
+    if (!live.visible) continue;
+    unsigned long localMs = elapsedMs > s.startDelayMs ? elapsedMs - s.startDelayMs : 0;
+    if (s.kind == STICKER_KIND_PROCEDURAL) {
+      eyesDrawStickerProcedural(gfx, s.assetIndex, live.cx, live.cy, live.rx, live.ry, live.rotationDeg, s.tintColor, localMs / 1000.0f);
+    } else if (s.assetIndex < rasterCount) {
+      const StickerRasterAsset& asset = rasterAssets[s.assetIndex];
+      uint8_t frame = eyesPickStickerFrame(asset, s, localMs);
+      eyesDrawStickerRaster(gfx, asset, frame, live.cx, live.cy, (int16_t)(live.rx < 0 ? -live.rx : live.rx) * 2,
+                             (int16_t)(live.ry < 0 ? -live.ry : live.ry) * 2, live.rotationDeg, s.flipH, s.flipV);
+    }
+  }
+}
+
 // ---- Playback — call every loop() with the same (frames, count, loop, startMillis, ----
 // frameIndex) variables; advances state in-place and fills \`outLive\`. Returns true while
 // still playing, false once a non-looping animation has finished.
@@ -894,6 +1466,11 @@ public:
   // flash directly onto the screen for an instant before present() overwrites them with the
   // correct buffered frame. That was the flicker.
   void drawFastVLine(int16_t x, int16_t y, int16_t h, uint16_t color) { canvas->drawFastVLine(x, y, h, color); }
+  // Same reasoning as drawFastVLine above — eyesDrawStickerRaster()/eyesDrawSticker_Rain()
+  // (stickers) call drawPixel()/drawLine() directly, which would otherwise fall through to
+  // Adafruit_SPITFT's own unbuffered versions and flicker straight onto the live panel.
+  void drawPixel(int16_t x, int16_t y, uint16_t color) { canvas->drawPixel(x, y, color); }
+  void drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color) { canvas->drawLine(x0, y0, x1, y1, color); }
 
   // Blit the finished frame to the panel in a single windowed SPI burst.
   void present() { drawRGBBitmap(0, 0, canvas->getBuffer(), width(), height()); }
@@ -1027,6 +1604,8 @@ function exportDemo(project: Project): string {
   }
 
   lines.push('// ---- Main update loop ---------------------------------------------------------')
+  lines.push('unsigned long demoStickersStart = 0;')
+  lines.push('')
   lines.push('void setup() {')
   lines.push('  Serial.begin(115200);')
   lines.push('  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);')
@@ -1038,6 +1617,7 @@ function exportDemo(project: Project): string {
     lines.push(`  SetExpression(Expr_${toIdentifier(demoExpressions[0].name)});`)
   }
   if (hasExpressions) lines.push('  demoExprCycleStart = millis();')
+  lines.push('  demoStickersStart = millis();')
   lines.push('}')
   lines.push('')
   lines.push('void loop() {')
@@ -1046,8 +1626,15 @@ function exportDemo(project: Project): string {
     lines.push('')
   }
   lines.push('  LiveEye live = UpdateEyes();')
+  lines.push('  unsigned long stickersElapsed = millis() - demoStickersStart;')
   lines.push('  tft.fillScreen(EYE_COLOR_BACKGROUND);')
+  lines.push(
+    '  eyesDrawStickers(tft, PROJECT_STICKERS, PROJECT_STICKER_COUNT, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersElapsed);'
+  )
   lines.push('  eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND, EYE_COLORS_LEFT, EYE_COLORS_RIGHT);')
+  lines.push(
+    '  eyesDrawStickers(tft, PROJECT_STICKERS, PROJECT_STICKER_COUNT, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersElapsed);'
+  )
   lines.push('  tft.present();')
   lines.push('  delay(EYE_FRAME_DELAY_MS);')
   lines.push('}')
@@ -1242,6 +1829,16 @@ ${exportTiming(project.display)}
 // ---- Pupil Shapes -------------------------------------------------------
 
 ${exportPupilShapes(project)}
+
+// ---- Stickers -------------------------------------------------------------
+//
+// Project-wide stickers only (Expression/Animation-scoped stickers are studio-preview-only
+// for this release). Only 4 of the 14 built-ins (stars, hearts, rain, confetti) have a
+// firmware drawer yet; the rest are noted below if used. Call eyesDrawStickers() (see the
+// Player section) around eyesDrawEyePair() — STICKER_LAYER_BEHIND before it,
+// STICKER_LAYER_FRONT after — see the demo loop() below for a working example.
+
+${exportStickers(project)}
 
 // ---- Player (easing, interpolation, drawing, playback) -----------------------
 

@@ -15,13 +15,18 @@ import type {
   Personality,
   PlaybackMode,
   PlaybackState,
-  Project
+  Project,
+  StickerAsset,
+  StickerInstance,
+  StickerLayer,
+  StickerScope
 } from '@/types'
 import {
   DEFAULT_DISPLAY,
   DEFAULT_EYE_COLORS,
   DEFAULT_EYE_PARAMS,
   DEFAULT_PERSONALITY,
+  DEFAULT_STICKER_ANIM,
   DEFAULT_TIMING,
   STYLE_EYE_COLOR_FIELDS,
   STYLE_EYE_PARAM_FIELDS,
@@ -33,6 +38,8 @@ import {
 import { builtinAnimations } from '@/data/builtinAnimations'
 import { builtinExpressions } from '@/data/builtinExpressions'
 import { animationDuration } from '@/engine/interpolate'
+import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
+import { STICKER_PRESET_BUNDLES } from '@/data/stickerPresets'
 
 const HISTORY_LIMIT = 60
 const FRAME_STEP_MS = 1000 / 30
@@ -76,7 +83,9 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     animations,
     expressions,
     visualReference,
-    customPupilShapes: []
+    customPupilShapes: [],
+    stickerAssets: [...BUILTIN_STICKER_ASSETS],
+    stickers: []
   }
 }
 
@@ -89,7 +98,7 @@ export interface DevStats {
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
 export type LeftTab = 'animations' | 'expressions'
-export type RightTab = 'controls' | 'colors' | 'display' | 'personality' | 'visual-reference'
+export type RightTab = 'controls' | 'colors' | 'display' | 'personality' | 'visual-reference' | 'stickers'
 
 export interface ApplyVisualReferenceOptions {
   scope: 'all' | 'expressions' | 'animations' | 'selected'
@@ -228,10 +237,60 @@ interface StoreState {
   setLeftTab: (tab: LeftTab) => void
   setRightTab: (tab: RightTab) => void
   openReferenceImport: () => void
+
+  // stickers
+  /** Which sticker list add/edit actions below operate on — mirrors eyeTarget's "switching
+   * this alone never mutates the project" contract. 'expression'/'animation' with nothing
+   * selected/active just means there's nowhere to add a sticker yet (UI should disable Add). */
+  stickerScope: StickerScope
+  selectedStickerId: string | null
+  setStickerScope: (scope: StickerScope) => void
+  selectSticker: (id: string | null) => void
+  addSticker: (assetId: string, layer?: StickerLayer) => string | null
+  duplicateSticker: (id: string) => string | null
+  deleteSticker: (id: string) => void
+  updateSticker: (id: string, partial: Partial<StickerInstance>) => void
+  setStickerVisible: (id: string, visible: boolean) => void
+  setStickerLocked: (id: string, locked: boolean) => void
+  /** Swaps this sticker's `order` with its neighbor in the same direction, within its own
+   * layer only — matches the Sticker Manager's "reorder within the same layer" list. */
+  moveStickerOrder: (id: string, direction: 'up' | 'down') => void
+  applyStickerPreset: (presetId: string) => void
+  /** Appends a new imported (raster) sticker asset to the project's reusable library —
+   * same "asset, then place instances that reference it" split addCustomPupilShape()
+   * established for pupil shapes. Returns the new asset's id. */
+  addStickerAsset: (asset: Omit<StickerAsset, 'id' | 'kind'>) => string
+  deleteStickerAsset: (id: string) => void
 }
 
 function activeAnimationOf(project: Project, id: string): Animation | undefined {
   return project.animations.find((a) => a.id === id)
+}
+
+/** Resolves whichever sticker list `scope` currently points to. Called from inside a `set()`
+ * producer with `project` being the live Immer draft, so the returned array is a reference
+ * into that draft — mutating it (push/splice/etc.) mutates the project, same as every other
+ * store action here. `undefined` means "nothing to add/edit into" (e.g. scope 'expression'
+ * with no expression selected) — callers no-op in that case rather than throwing. */
+function resolveStickerList(project: Project, scope: StickerScope, selectedExpressionId: string | null, activeAnimationId: string): StickerInstance[] | undefined {
+  if (scope === 'project') return project.stickers
+  if (scope === 'expression') return project.expressions.find((e) => e.id === selectedExpressionId)?.stickers
+  return project.animations.find((a) => a.id === activeAnimationId)?.stickers
+}
+
+/** Finds a sticker by id across all three scopes (project + every expression + every
+ * animation) — used by edit actions that take just an id (duplicate/delete/update/visible/
+ * locked/reorder), so they work regardless of which scope is currently selected in the UI
+ * (e.g. clicking an item in the Sticker Manager's list, which shows the merged
+ * project+expression+animation set together). Returns the owning array (a draft reference,
+ * same mutation contract as resolveStickerList) and the sticker's index within it. */
+function findStickerOwner(project: Project, id: string): { list: StickerInstance[]; index: number } | null {
+  const lists: StickerInstance[][] = [project.stickers, ...project.expressions.map((e) => e.stickers), ...project.animations.map((a) => a.stickers)]
+  for (const list of lists) {
+    const index = list.findIndex((s) => s.id === id)
+    if (index >= 0) return { list, index }
+  }
+  return null
 }
 
 export const useStore = create<StoreState>()(
@@ -245,6 +304,9 @@ export const useStore = create<StoreState>()(
     selectedKeyframeId: null,
     selectedExpressionId: null,
     eyeTarget: 'both',
+
+    stickerScope: 'project',
+    selectedStickerId: null,
 
     mode: 'design',
     playbackState: 'stopped',
@@ -408,7 +470,8 @@ export const useStore = create<StoreState>()(
           rightParams: null,
           leftColors: null,
           rightColors: null,
-          styleOverrides: computeStyleOverrides(newParams, newColors, s.project.visualReference)
+          styleOverrides: computeStyleOverrides(newParams, newColors, s.project.visualReference),
+          stickers: []
         })
         s.selectedExpressionId = newId
         s.mode = 'design'
@@ -655,7 +718,8 @@ export const useStore = create<StoreState>()(
           keyframes: [
             { id: nanoid(10), duration: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, styleOverrides: overrides },
             { id: nanoid(10), duration: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, styleOverrides: overrides }
-          ]
+          ],
+          stickers: []
         })
         s.dirty = true
       })
@@ -821,7 +885,8 @@ export const useStore = create<StoreState>()(
           rightParams: s.project.eyeRightOverride ? { ...s.project.eyeRightOverride } : null,
           leftColors: s.project.colorsLeftOverride ? { ...s.project.colorsLeftOverride } : null,
           rightColors: s.project.colorsRightOverride ? { ...s.project.colorsRightOverride } : null,
-          styleOverrides: computeStyleOverrides(newParams, newColors, s.project.visualReference)
+          styleOverrides: computeStyleOverrides(newParams, newColors, s.project.visualReference),
+          stickers: []
         })
         s.selectedExpressionId = newId
         s.dirty = true
@@ -938,6 +1003,134 @@ export const useStore = create<StoreState>()(
       set((s) => {
         s.rightTab = 'visual-reference'
         s.referenceImportOpen = true
+      }),
+
+    setStickerScope: (scope) => set((s) => void (s.stickerScope = scope)),
+    selectSticker: (id) => set((s) => void (s.selectedStickerId = id)),
+
+    addSticker: (assetId, layer = 'behind') => {
+      const id = nanoid(8)
+      let added = false
+      set((s) => {
+        const list = resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
+        if (!list) return
+        const asset = s.project.stickerAssets.find((a) => a.id === assetId)
+        const order = list.filter((st) => st.layer === layer).length
+        list.push({
+          id,
+          assetId,
+          name: asset?.name ?? 'Sticker',
+          layer,
+          order,
+          x: 0,
+          y: 0,
+          width: 48,
+          height: 48,
+          scale: 100,
+          rotation: 0,
+          opacity: 100,
+          tint: null,
+          flipH: false,
+          flipV: false,
+          visible: true,
+          locked: false,
+          anim: { ...DEFAULT_STICKER_ANIM }
+        })
+        s.selectedStickerId = id
+        s.dirty = true
+        added = true
+      })
+      return added ? id : null
+    },
+
+    duplicateSticker: (id) => {
+      const newId = nanoid(8)
+      let added = false
+      set((s) => {
+        const owner = findStickerOwner(s.project, id)
+        if (!owner) return
+        const copy: StickerInstance = { ...JSON.parse(JSON.stringify(owner.list[owner.index])), id: newId }
+        copy.name = `${copy.name} Copy`
+        owner.list.push(copy)
+        s.selectedStickerId = newId
+        s.dirty = true
+        added = true
+      })
+      return added ? newId : null
+    },
+
+    deleteSticker: (id) =>
+      set((s) => {
+        const owner = findStickerOwner(s.project, id)
+        if (!owner) return
+        owner.list.splice(owner.index, 1)
+        if (s.selectedStickerId === id) s.selectedStickerId = null
+        s.dirty = true
+      }),
+
+    updateSticker: (id, partial) =>
+      set((s) => {
+        const owner = findStickerOwner(s.project, id)
+        if (!owner) return
+        Object.assign(owner.list[owner.index], partial)
+        s.dirty = true
+      }),
+
+    setStickerVisible: (id, visible) =>
+      set((s) => {
+        const owner = findStickerOwner(s.project, id)
+        if (owner) owner.list[owner.index].visible = visible
+        s.dirty = true
+      }),
+
+    setStickerLocked: (id, locked) =>
+      set((s) => {
+        const owner = findStickerOwner(s.project, id)
+        if (owner) owner.list[owner.index].locked = locked
+        s.dirty = true
+      }),
+
+    moveStickerOrder: (id, direction) =>
+      set((s) => {
+        const owner = findStickerOwner(s.project, id)
+        if (!owner) return
+        const sticker = owner.list[owner.index]
+        const sameLayer = owner.list.filter((st) => st.layer === sticker.layer).sort((a, b) => a.order - b.order)
+        const pos = sameLayer.findIndex((st) => st.id === id)
+        const swapPos = direction === 'up' ? pos - 1 : pos + 1
+        if (swapPos < 0 || swapPos >= sameLayer.length) return
+        const neighbor = sameLayer[swapPos]
+        const tmp = sticker.order
+        sticker.order = neighbor.order
+        neighbor.order = tmp
+        s.dirty = true
+      }),
+
+    applyStickerPreset: (presetId) =>
+      set((s) => {
+        const preset = STICKER_PRESET_BUNDLES.find((p) => p.id === presetId)
+        const list = resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
+        if (!preset || !list) return
+        for (const made of preset.make()) {
+          const order = list.filter((st) => st.layer === made.layer).length
+          list.push({ ...made, order })
+        }
+        s.dirty = true
+      }),
+
+    addStickerAsset: (asset) => {
+      const id = nanoid(8)
+      set((s) => {
+        s.project.stickerAssets.push({ ...asset, id, kind: 'raster' })
+        s.dirty = true
+      })
+      return id
+    },
+
+    deleteStickerAsset: (id) =>
+      set((s) => {
+        s.project.stickerAssets = s.project.stickerAssets.filter((a) => a.id !== id)
+        s.dirty = true
       })
   }))
 )

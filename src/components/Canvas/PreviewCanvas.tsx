@@ -5,6 +5,7 @@ import { sampleAnimation, animationDuration, wrapTime } from '@/engine/interpola
 import { IdleEngine } from '@/engine/idleEngine'
 import {
   clampFps,
+  effectiveStickers,
   leftEyeColors,
   leftEyeParams,
   leftVisualReferenceColors,
@@ -14,7 +15,7 @@ import {
   rightVisualReferenceColors,
   rightVisualReferenceParams
 } from '@/types'
-import type { EyeColors, EyeParams } from '@/types'
+import type { Animation, EyeColors, EyeParams, Expression, StickerInstance } from '@/types'
 
 const MAX_DT_MS = 100
 
@@ -30,6 +31,16 @@ export function PreviewCanvas() {
   // exactly like the exported firmware: eyesPlayAnimation() reads absolute millis(), so
   // throttling how often it's called doesn't change how fast an animation plays).
   const pendingDtRef = useRef(0)
+  // Stickers run on their own continuous real-time clock (drift/spin/pulse/GIF playback),
+  // deliberately decoupled from the eye animation's own scrubbable `timeMs` — a sticker's
+  // whole point is ambient decoration with its own independent speed/fps/loop controls, not
+  // something that pauses/scrubs/reverses along with the eye keyframe timeline.
+  const stickerElapsedRef = useRef(0)
+  // Latest effective sticker list, refreshed every drawn frame — read (not recomputed) by the
+  // pointer handlers below so canvas-drag hit-testing always matches what's actually on
+  // screen without duplicating the project/expression/animation resolution logic above.
+  const lastStickersRef = useRef<StickerInstance[]>([])
+  const dragRef = useRef<{ id: string; grabOffsetX: number; grabOffsetY: number } | null>(null)
 
   const display = useStore((s) => s.project.display)
 
@@ -77,6 +88,8 @@ export function PreviewCanvas() {
       let rightTheme: EyeColors = theme
       let frameIndex = 0
       let timeMs = state.playbackTimeMs
+      let activeExpression: Expression | null = null
+      let activeAnimation: Animation | null = null
 
       if (state.rightTab === 'visual-reference') {
         // While the right panel's Visual Reference tab is open, this canvas shows the VR's
@@ -101,8 +114,10 @@ export function PreviewCanvas() {
         theme = leftEyeColors(state.project)
         rightTheme = rightEyeColors(state.project)
         timeMs = 0
+        activeExpression = state.project.expressions.find((e) => e.id === state.selectedExpressionId) ?? null
       } else if (state.mode === 'animate') {
         const anim = getActiveAnimation()
+        activeAnimation = anim ?? null
         if (anim && anim.keyframes.length > 0) {
           let t = state.playbackTimeMs
           if (state.playbackState === 'playing') {
@@ -134,7 +149,19 @@ export function PreviewCanvas() {
         timeMs = 0
       }
 
-      renderFace(ctx!, params, { ...state.project.display, theme, rightParams, rightTheme, customShapes: state.project.customPupilShapes })
+      stickerElapsedRef.current += dt
+      const stickers = effectiveStickers(state.project, activeExpression, activeAnimation)
+      lastStickersRef.current = stickers
+      renderFace(ctx!, params, {
+        ...state.project.display,
+        theme,
+        rightParams,
+        rightTheme,
+        customShapes: state.project.customPupilShapes,
+        stickers,
+        stickerAssets: state.project.stickerAssets,
+        stickerElapsedMs: stickerElapsedRef.current
+      })
 
       const fpsAccum = fpsAccumRef.current
       fpsAccum.frames += 1
@@ -158,9 +185,69 @@ export function PreviewCanvas() {
 
   const borderRadius = display.shape === 'circle' ? '50%' : display.shape === 'rounded' ? `${display.cornerRadius}px` : '0px'
 
+  // Converts a pointer event's client coordinates into display-space coordinates relative to
+  // the display's own center — the same coordinate space StickerInstance.x/y are defined in
+  // (see faceRenderer.ts's drawLayer(), which translates to (cx, cy) before drawing stickers).
+  function toDisplayCoords(e: React.PointerEvent<HTMLCanvasElement>): { x: number; y: number } {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const scaleX = display.width / rect.width
+    const scaleY = display.height / rect.height
+    return {
+      x: (e.clientX - rect.left) * scaleX - display.width / 2,
+      y: (e.clientY - rect.top) * scaleY - display.height / 2
+    }
+  }
+
+  // Hit-tests against each sticker's *static* box (instance.x/y/width/height*scale, ignoring
+  // live drift/spin/pulse and rotation) — grabbing wherever a sticker is currently animated to
+  // would make the drag target visually "run away" as you try to grab it; editing the base
+  // position and watching the live preview separately is the more predictable interaction.
+  // Front-layer stickers are tested first so a front sticker is grabbed before whatever sits
+  // behind it at the same spot, matching the Sticker Manager's "front-layer-first" list order.
+  function hitTestSticker(x: number, y: number): StickerInstance | null {
+    const candidates = [...lastStickersRef.current].sort((a, b) => (a.layer === b.layer ? 0 : a.layer === 'front' ? -1 : 1))
+    for (const s of candidates) {
+      if (!s.visible || s.locked) continue
+      const hw = (s.width / 2) * (s.scale / 100)
+      const hh = (s.height / 2) * (s.scale / 100)
+      if (x >= s.x - hw && x <= s.x + hw && y >= s.y - hh && y <= s.y + hh) return s
+    }
+    return null
+  }
+
+  function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+    const { x, y } = toDisplayCoords(e)
+    const hit = hitTestSticker(x, y)
+    if (!hit) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    useStore.getState().checkpoint()
+    useStore.getState().selectSticker(hit.id)
+    dragRef.current = { id: hit.id, grabOffsetX: x - hit.x, grabOffsetY: y - hit.y }
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
+    const drag = dragRef.current
+    if (!drag) return
+    const { x, y } = toDisplayCoords(e)
+    useStore.getState().updateSticker(drag.id, { x: x - drag.grabOffsetX, y: y - drag.grabOffsetY })
+  }
+
+  function handlePointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (dragRef.current) e.currentTarget.releasePointerCapture(e.pointerId)
+    dragRef.current = null
+  }
+
   return (
     <div className="flex items-center justify-center w-full h-full">
-      <canvas ref={canvasRef} style={{ width: display.width, height: display.height, borderRadius }} className="shadow-floating" />
+      <canvas
+        ref={canvasRef}
+        style={{ width: display.width, height: display.height, borderRadius }}
+        className="shadow-floating"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+      />
     </div>
   )
 }

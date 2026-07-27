@@ -107,6 +107,8 @@ export interface Animation {
   name: string
   loop: boolean
   keyframes: Keyframe[]
+  /** Stickers visible only while this animation is playing — see StickerInstance below. */
+  stickers: StickerInstance[]
 }
 
 /** Which eye(s) the Controls/Colors panels currently write to. Editor/session state rather
@@ -134,6 +136,8 @@ export interface Expression {
    * any left/right divergence (leftParams/rightParams/leftColors/rightColors) rather than
    * tracked separately per eye, to keep the override model simple. */
   styleOverrides: string[]
+  /** Stickers visible only while this expression is applied — see StickerInstance below. */
+  stickers: StickerInstance[]
 }
 
 export interface Personality {
@@ -270,6 +274,154 @@ export function applyStyleToColors(target: EyeColors, vr: EyeColors, overrides: 
   }
 }
 
+// ---- Stickers -----------------------------------------------------------
+//
+// Stickers are decorations (rain, snow, "Zzz", hearts, a custom imported PNG/GIF, ...) placed
+// behind or in front of the eyes. Like pupil shapes, they split into a reusable *asset*
+// (StickerAsset — either a built-in procedural drawer or an imported raster image/GIF's
+// frames) and any number of placed *instances* (StickerInstance — position/size/rotation/
+// opacity/tint/animation for one placement of that asset), referenced by id so the same
+// asset can be placed many times with different settings.
+//
+// Instances attach at three levels — Project.stickers (always visible), Expression.stickers
+// (visible while that expression is applied), Animation.stickers (visible while that
+// animation plays) — the same "project vs. expression vs. animation" scoping this codebase
+// already uses elsewhere, just for a new kind of data. See effectiveStickers() below.
+
+export type StickerLayer = 'behind' | 'front'
+/** Which sticker list the Sticker Manager's add/edit actions currently target — editor/session
+ * state, same role EyeSide plays for eyeTarget (see state/store.ts's stickerScope). */
+export type StickerScope = 'project' | 'expression' | 'animation'
+export type StickerLoopMode = 'once' | 'loop' | 'pingpong'
+export type StickerAssetKind = 'procedural' | 'raster'
+
+/** Built-in procedural sticker ids — see src/renderer/builtinStickers.ts for their drawers. */
+export type BuiltinStickerId =
+  | 'rain'
+  | 'snow'
+  | 'zzz'
+  | 'stars'
+  | 'hearts'
+  | 'sparkles'
+  | 'clouds'
+  | 'tears'
+  | 'fire'
+  | 'smoke'
+  | 'lightning'
+  | 'burstLines'
+  | 'expandingCircles'
+  | 'confetti'
+
+/** A sticker's reusable *source* — either a built-in procedural drawer (kind 'procedural') or
+ * an imported image's frame(s) (kind 'raster', PNG = 1 frame, GIF = many). Shared across any
+ * number of StickerInstance placements, same asset/instance split as CustomPupilShape. */
+export interface StickerAsset {
+  id: string
+  name: string
+  kind: StickerAssetKind
+  /** Set when kind === 'procedural'. */
+  builtinId?: BuiltinStickerId
+  /** Set when kind === 'raster' — data URLs (already-decoded PNG/GIF frames), one per frame. */
+  frames?: string[]
+  /** Per-frame delay in ms, preserved from the source GIF's own timing. Same length as
+   * `frames`. A single-frame PNG asset still gets a 1-length array (delay is irrelevant but
+   * kept for a uniform shape). */
+  frameDelaysMs?: number[]
+  naturalWidth?: number
+  naturalHeight?: number
+  /** Raw RGBA pixel data per frame (capped at 64x64 — see stickerImport.ts), stored alongside
+   * `frames` specifically so the C++ export (cppExport.ts) can resize/quantize to RGB565 and
+   * bake PROGMEM pixel arrays *synchronously*, with no DOM/Image decoding at export time —
+   * `frames`'s data URLs need an async `<img>` load to get pixels back out, which the export
+   * pipeline can't do (it also has to run in a plain Node script, with no DOM at all, for
+   * this project's established arduino-cli compile-verification workflow). Same length as
+   * `frames`. Only present on 'raster' assets. */
+  frameRgba?: { width: number; height: number; data: number[] }[]
+}
+
+/** All per-sticker animation controls — evaluated as a closed-form function of elapsed time
+ * rather than authored as a second keyframe timeline (deliberate scope decision — see the
+ * Stickers plan). `speed`/`fps`/`reverse` govern raster GIF frame playback; the rest
+ * (drift/spin/pulse) are simple parametric motion layered on top of the base transform,
+ * applicable to procedural and raster stickers alike. */
+export interface StickerAnimSettings {
+  speed: number // % playback-speed multiplier for raster frame advance, default 100
+  fps: number | null // overrides the raster asset's natural per-frame delays; null = use them as-authored
+  startDelayMs: number
+  loopMode: StickerLoopMode
+  reverse: boolean
+  fadeInMs: number
+  fadeOutMs: number
+  /** Visibility window relative to the owning expression/animation's own start time.
+   * endTimeMs null = stays visible indefinitely once startTimeMs has elapsed. */
+  startTimeMs: number
+  endTimeMs: number | null
+  driftX: number // px/s
+  driftY: number // px/s
+  spin: number // deg/s
+  pulseScale: number // 0-100, sinusoidal amplitude on scale
+  pulseOpacity: number // 0-100, sinusoidal amplitude on opacity
+}
+
+/** One placed sticker. */
+export interface StickerInstance {
+  id: string
+  assetId: string
+  name: string
+  layer: StickerLayer
+  /** Manual sort key within its layer (drag-reorder in the Sticker Manager). Lower draws
+   * first (further back within that layer). */
+  order: number
+  x: number
+  y: number
+  width: number
+  height: number
+  /** % multiplier applied on top of width/height, default 100 — a separate control from
+   * width/height per the spec's explicit "width, height, scale" wording. */
+  scale: number
+  rotation: number
+  opacity: number
+  /** null = the asset's native colors/frames, unmodified. */
+  tint: string | null
+  flipH: boolean
+  flipV: boolean
+  visible: boolean
+  /** Blocks drag/edit only — a locked sticker still renders/animates normally. */
+  locked: boolean
+  anim: StickerAnimSettings
+}
+
+export const DEFAULT_STICKER_ANIM: StickerAnimSettings = {
+  speed: 100,
+  fps: null,
+  startDelayMs: 0,
+  loopMode: 'loop',
+  reverse: false,
+  fadeInMs: 0,
+  fadeOutMs: 0,
+  startTimeMs: 0,
+  endTimeMs: null,
+  driftX: 0,
+  driftY: 0,
+  spin: 0,
+  pulseScale: 0,
+  pulseOpacity: 0
+}
+
+/** Merges project/expression/animation stickers into the single list the renderer and C++
+ * export both draw from, sorted by layer then manual order — 'behind' stickers first (so
+ * eyesDrawEyePair()/renderFace() can draw them, then the eyes, then 'front' stickers) and,
+ * within a layer, by `order` ascending (lower draws first = further back). `activeExpression`/
+ * `activeAnimation` are optional since not every render (e.g. idle mode with no expression
+ * applied) has one. */
+export function effectiveStickers(project: Project, activeExpression: Expression | null, activeAnimation: Animation | null): StickerInstance[] {
+  const all = [...project.stickers, ...(activeExpression?.stickers ?? []), ...(activeAnimation?.stickers ?? [])]
+  return all.sort((a, b) => {
+    if (a.layer !== b.layer) return a.layer === 'behind' ? -1 : 1
+    return a.order - b.order
+  })
+}
+
 export interface Project {
   id: string
   name: string
@@ -292,6 +444,12 @@ export interface Project {
   visualReference: VisualReferenceStyle
   /** Reusable library of imported custom pupil shapes — see CustomPupilShape above. */
   customPupilShapes: CustomPupilShape[]
+  /** Reusable library of sticker assets (built-ins seeded once, plus custom imports) — see
+   * StickerAsset above. */
+  stickerAssets: StickerAsset[]
+  /** Stickers always visible regardless of active expression/animation — see StickerInstance
+   * and effectiveStickers() above. */
+  stickers: StickerInstance[]
 }
 
 export type PlaybackMode = 'design' | 'animate' | 'idle'

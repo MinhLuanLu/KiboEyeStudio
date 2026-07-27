@@ -1,15 +1,31 @@
 import { nanoid } from 'nanoid'
-import type { Animation, CustomPupilShape, EditorState, Expression, EyeColors, EyeParams, EyeSide, PlaybackMode, Project, ProjectFile, VisualReferenceStyle } from '@/types'
+import type {
+  Animation,
+  CustomPupilShape,
+  EditorState,
+  Expression,
+  EyeColors,
+  EyeParams,
+  EyeSide,
+  PlaybackMode,
+  Project,
+  ProjectFile,
+  StickerAsset,
+  StickerInstance,
+  VisualReferenceStyle
+} from '@/types'
 import {
   DEFAULT_DISPLAY,
   DEFAULT_EYE_COLORS,
   DEFAULT_EYE_PARAMS,
   DEFAULT_PERSONALITY,
+  DEFAULT_STICKER_ANIM,
   DEFAULT_TIMING,
   PROJECT_FILE_VERSION,
   computeStyleOverrides,
   defaultEditorState
 } from '@/types'
+import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
 
 const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
 const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
@@ -39,6 +55,53 @@ function normalizeEyeColorsOverride(colors: Partial<EyeColors> | null | undefine
 function normalizeStyleOverrides(raw: unknown): string[] | null {
   if (!Array.isArray(raw)) return null
   return raw.filter((f): f is string => typeof f === 'string')
+}
+
+/** Backfills one placed sticker with defaults for any missing/malformed fields — lenient
+ * (spread-merge, like normalizeEyeParams) rather than strict-reject, since StickerInstance has
+ * many fields and a saved file predating a newly-added one shouldn't lose the whole sticker.
+ * Drops entries missing `id`/`assetId` entirely (unusable — nothing to reference or select). */
+export function normalizeStickerInstances(raw: unknown): StickerInstance[] {
+  if (!Array.isArray(raw)) return []
+  const out: StickerInstance[] = []
+  for (const s of raw) {
+    if (!s || typeof s !== 'object') continue
+    const r = s as Partial<StickerInstance> & Record<string, unknown>
+    if (typeof r.id !== 'string' || typeof r.assetId !== 'string') continue
+    out.push({
+      id: r.id,
+      assetId: r.assetId,
+      name: typeof r.name === 'string' ? r.name : 'Sticker',
+      layer: r.layer === 'front' ? 'front' : 'behind',
+      order: typeof r.order === 'number' ? r.order : out.length,
+      x: typeof r.x === 'number' ? r.x : 0,
+      y: typeof r.y === 'number' ? r.y : 0,
+      width: typeof r.width === 'number' ? r.width : 48,
+      height: typeof r.height === 'number' ? r.height : 48,
+      scale: typeof r.scale === 'number' ? r.scale : 100,
+      rotation: typeof r.rotation === 'number' ? r.rotation : 0,
+      opacity: typeof r.opacity === 'number' ? r.opacity : 100,
+      tint: typeof r.tint === 'string' ? r.tint : null,
+      flipH: Boolean(r.flipH),
+      flipV: Boolean(r.flipV),
+      visible: r.visible !== false,
+      locked: Boolean(r.locked),
+      anim: { ...DEFAULT_STICKER_ANIM, ...(r.anim ?? {}) }
+    })
+  }
+  return out
+}
+
+/** Backfills project.stickerAssets: keeps every valid custom (raster) asset from the save
+ * file, then re-seeds the built-in procedural assets fresh from BUILTIN_STICKER_ASSETS every
+ * load (rather than trusting whatever was saved for them) — built-ins are code-defined, not
+ * user data, so this is the same "source of truth lives in code" treatment
+ * createDefaultProject() already gives builtinAnimations/builtinExpressions. */
+function normalizeStickerAssets(raw: unknown): StickerAsset[] {
+  const customFromDisk = Array.isArray(raw)
+    ? raw.filter((a): a is StickerAsset => !!a && typeof a === 'object' && typeof a.id === 'string' && a.kind === 'raster')
+    : []
+  return [...BUILTIN_STICKER_ASSETS, ...customFromDisk]
 }
 
 /** Backfills project.customPupilShapes for saves written before the pupil shape feature
@@ -93,7 +156,8 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
         params,
         styleOverrides: normalizeStyleOverrides(rawStyleOverrides) ?? computeStyleOverrides(params, null, visualReference)
       }
-    })
+    }),
+    stickers: normalizeStickerInstances((a as unknown as Record<string, unknown>).stickers)
   }))
   const expressions: Expression[] = (raw.expressions ?? []).map((e) => {
     const params = normalizeEyeParams(e.params)
@@ -106,7 +170,8 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
       rightParams: normalizeEyeParamsOverride(e.rightParams),
       leftColors: normalizeEyeColorsOverride(e.leftColors),
       rightColors: normalizeEyeColorsOverride(e.rightColors),
-      styleOverrides: normalizeStyleOverrides(e.styleOverrides) ?? computeStyleOverrides(params, exprColors, visualReference)
+      styleOverrides: normalizeStyleOverrides(e.styleOverrides) ?? computeStyleOverrides(params, exprColors, visualReference),
+      stickers: normalizeStickerInstances((e as unknown as Record<string, unknown>).stickers)
     }
   })
 
@@ -127,7 +192,9 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     animations,
     expressions,
     visualReference,
-    customPupilShapes: normalizeCustomPupilShapes(raw.customPupilShapes)
+    customPupilShapes: normalizeCustomPupilShapes(raw.customPupilShapes),
+    stickerAssets: normalizeStickerAssets((raw as unknown as Record<string, unknown>).stickerAssets),
+    stickers: normalizeStickerInstances((raw as unknown as Record<string, unknown>).stickers)
   }
 }
 

@@ -16,7 +16,8 @@ function expr(name: string, overrides: Parameters<typeof p>[0] = {}): Expression
     rightParams: null,
     leftColors: null,
     rightColors: null,
-    styleOverrides: []
+    styleOverrides: [],
+    stickers: []
   }
 }
 

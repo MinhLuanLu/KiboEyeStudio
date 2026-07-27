@@ -1,5 +1,6 @@
 import type { Animation, EyeParams, PupilShapeId } from '@/types'
 import { DEFAULT_EYE_PARAMS, EYE_PARAM_RANGES } from '@/types'
+import { normalizeStickerInstances } from '@/state/persistence'
 
 const PUPIL_SHAPE_IDS: PupilShapeId[] = ['circle', 'oval', 'heart', 'star', 'diamond', 'square', 'triangle', 'custom']
 
@@ -45,6 +46,11 @@ export function parseAnimationJson(json: string): Animation {
     id: typeof data.id === 'string' ? data.id : '',
     name: typeof data.name === 'string' ? data.name : 'Imported Animation',
     loop: Boolean(data.loop),
-    keyframes: data.keyframes.map((kf: Animation['keyframes'][number]) => ({ ...kf, params: normalizeImportedParams(kf.params) }))
+    keyframes: data.keyframes.map((kf: Animation['keyframes'][number]) => ({ ...kf, params: normalizeImportedParams(kf.params) })),
+    // Older exported/hand-authored animation JSON predates stickers entirely (or a
+    // hand-edited file's sticker entries are malformed) — normalizeStickerInstances()
+    // backfills/drops per-entry the same way it does for project load in persistence.ts,
+    // rather than rejecting the whole file or letting a malformed sticker reach the renderer.
+    stickers: normalizeStickerInstances(data.stickers)
   }
 }
