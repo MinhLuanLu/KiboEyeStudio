@@ -57,8 +57,8 @@ function eyeFrameLiteral(params: EyeParams, durationMs: number, easing: EasingTy
     Math.round(params.lowerEyelid),
     clampByte(params.upperEyelidTilt),
     clampByte(params.lowerEyelidTilt),
-    Math.round(params.upperEyelidCurvature),
-    Math.round(params.lowerEyelidCurvature),
+    clampByte(params.upperEyelidCurvature),
+    clampByte(params.lowerEyelidCurvature),
     clampByte(params.highlightX),
     clampByte(params.highlightY),
     Math.round(params.highlightSize),
@@ -365,18 +365,22 @@ inline void eyesFillEllipseInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t e
 }
 
 // Fills one eyelid: a background-colored region from the eye's own top/bottom edge down to
-// a cutoff line that combines a linear tilt (shear) and a symmetric curvature bulge —
+// a cutoff line that combines a linear tilt (shear) and a symmetric curvature offset —
 //   taper(x)  = (1 - (x/halfW)^2)^2      for |x| <= halfW, else 0
 //   yCutoff(x) = yBase + slope*x + curveOffset * taper(x)
-// The taper is a border-radius-style bump, not a plain parabola: at x=0 (lid center) it's 1
-// (full curveOffset bulge), and at x=±halfW (the eye's own flat-side edge) it reaches 0 WITH
-// zero slope, so the curve blends smoothly into the flat sides — and from there into the
-// eye's rounded corners — with no kink, at any eye width/height/radius. This is mathematically
-// identical to what the studio's preview draws: it samples this exact formula one point per
-// pixel column and connects the dots (see the comment above the eyelid block in drawEye.ts).
-// Filled column-by-column (drawFastVLine) since the cutoff is naturally a function of x, not
-// y, which also makes the curve inherently smooth — no per-pixel corner cases, so no sharp
-// edges regardless of how extreme the tilt/curvature values are.
+// curvaturePct ranges -100 (curved inward) to 100 (curved outward) through 0 (flat/neutral):
+// at x=0 (lid center) taper is 1, so a positive curveOffset bulges the center further into
+// the eye (more coverage there than at the flat sides) while a negative one pulls it back
+// toward less coverage instead. The taper is a border-radius-style bump, not a plain
+// parabola: at x=±halfW (the eye's own flat-side edge) it reaches 0 WITH zero slope, so the
+// curve blends smoothly into the flat sides — and from there into the eye's rounded corners
+// — with no kink, at any eye width/height/radius or curvature value.
+// This is mathematically identical to what the studio's preview draws: it samples this exact
+// formula one point per pixel column and connects the dots (see the comment above the eyelid
+// block in drawEye.ts). Filled column-by-column (drawFastVLine) since the cutoff is
+// naturally a function of x, not y, which also makes the curve inherently smooth — no
+// per-pixel corner cases, so no sharp edges regardless of how extreme the tilt/curvature
+// values are.
 template <typename T>
 inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, bool isUpper,
                             float coveragePct, float tiltDeg, float curvaturePct, uint16_t color) {
@@ -565,6 +569,183 @@ private:
 #endif // EYES_EYE_PLAYER_H
 `
 
+// Opt-in ready-to-flash setup()/loop(): plays the project's first animation as an "idle"
+// filler, then crossfades (eyesLerpFrame) through every expression that has one shared
+// left/right shape, holding each briefly, then loops back to idle — the same demo pattern
+// used to verify the studio's own test sketches. Guarded behind #ifdef EYES_ENABLE_DEMO so
+// it only compiles in (and only then needs the TFT_* pin macros) when the user actually
+// wants it; left off by default so it never collides with a hand-written setup()/loop().
+// All identifiers are prefixed eyesDemo* to avoid clashing with the user's own globals even
+// when both are compiled together.
+function exportDemo(project: Project): string {
+  const idleAnim = project.animations[0]
+  const idleIdent = idleAnim ? toIdentifier(idleAnim.name) : null
+  const hasIdle = idleIdent !== null
+
+  // Expressions with a diverged Eye Target: Left/Right shape export as two constants
+  // (Expr_X_L / Expr_X_R) instead of one — eyesDrawEyePair() needs a single shared LiveEye
+  // pose per frame, so those are left out of the auto-demo cycle (still fully usable by
+  // hand, just not auto-cycled here).
+  const demoExpressions = project.expressions.filter((e) => !expressionShapeDiverges(e))
+  const hasExpressions = demoExpressions.length > 0
+  const skippedDiverged = project.expressions.length - demoExpressions.length
+
+  const TRANSITION_MS = 400
+  const HOLD_MS = 2000
+  const IDLE_MS = 3000
+
+  if (!hasIdle && !hasExpressions) {
+    return [
+      '// ---- Demo (opt-in) ------------------------------------------------------',
+      '// This project has no animations and no single-shape expressions to demo (expressions',
+      "// with a diverged Eye Target: Left/Right shape aren't included — eyesDrawEyePair() needs",
+      '// one shared pose per frame). Add one in the studio and re-export to get a ready-to-',
+      '// flash EYES_ENABLE_DEMO setup()/loop().'
+    ].join('\n')
+  }
+
+  const lines: string[] = []
+  lines.push('// ---- Demo (opt-in) ------------------------------------------------------')
+  lines.push('// Define EYES_ENABLE_DEMO and the five TFT_* pin macros before #include "eyes.h" to get')
+  lines.push("// a ready-to-flash setup()/loop() below -- no other code needed in your .ino. Example:")
+  lines.push('//')
+  lines.push('//   #define EYES_ENABLE_DEMO')
+  lines.push('//   #define TFT_CS   2')
+  lines.push('//   #define TFT_DC   4')
+  lines.push('//   #define TFT_RST  5')
+  lines.push('//   #define TFT_SCLK 6')
+  lines.push('//   #define TFT_MOSI 7')
+  lines.push('//   #include <SPI.h>')
+  lines.push('//   #include <Adafruit_GC9A01A.h>')
+  lines.push('//   #include "eyes.h"')
+  lines.push('//')
+  lines.push("// Leave EYES_ENABLE_DEMO undefined and write your own setup()/loop() instead (see the")
+  lines.push('// "Minimal usage" comment above) if you want to drive the eyes yourself.')
+  if (skippedDiverged > 0) {
+    lines.push(
+      `// (${skippedDiverged} expression${skippedDiverged === 1 ? '' : 's'} with a diverged left/right shape ${skippedDiverged === 1 ? 'is' : 'are'} not included in this auto-cycle.)`
+    )
+  }
+  lines.push('#ifdef EYES_ENABLE_DEMO')
+  lines.push('EyesBufferedDisplay eyesDemoTft(TFT_CS, TFT_DC, TFT_RST);')
+
+  if (hasIdle) {
+    lines.push('unsigned long eyesDemoAnimStart = 0;')
+    lines.push('uint16_t eyesDemoFrameIndex = 0;')
+  }
+
+  if (hasExpressions) {
+    lines.push(`const EyeFrame* const eyesDemoExpressions[] = { ${demoExpressions.map((e) => `&Expr_${toIdentifier(e.name)}`).join(', ')} };`)
+    lines.push(`const char* const eyesDemoExpressionNames[] = { ${demoExpressions.map((e) => JSON.stringify(e.name)).join(', ')} };`)
+    lines.push(`const int eyesDemoExpressionCount = ${demoExpressions.length};`)
+  }
+
+  const usesPhaseMachine = hasExpressions
+  if (usesPhaseMachine) {
+    if (hasIdle) {
+      lines.push('enum EyesDemoPhase { EYES_DEMO_PHASE_IDLE, EYES_DEMO_PHASE_TRANSITION, EYES_DEMO_PHASE_HOLD };')
+    } else {
+      lines.push('enum EyesDemoPhase { EYES_DEMO_PHASE_TRANSITION, EYES_DEMO_PHASE_HOLD };')
+    }
+    lines.push(`EyesDemoPhase eyesDemoPhase = ${hasIdle ? 'EYES_DEMO_PHASE_IDLE' : 'EYES_DEMO_PHASE_TRANSITION'};`)
+    lines.push('unsigned long eyesDemoPhaseStart = 0;')
+    lines.push('int eyesDemoExprIndex = 0;')
+    lines.push('const EyeFrame* eyesDemoFromFrame = eyesDemoExpressions[0];')
+    lines.push('')
+    lines.push('void eyesDemoEnterPhase(EyesDemoPhase p) {')
+    lines.push('  eyesDemoPhase = p;')
+    lines.push('  eyesDemoPhaseStart = millis();')
+    lines.push('}')
+  }
+
+  lines.push('')
+  lines.push('void setup() {')
+  lines.push('  Serial.begin(115200);')
+  lines.push('  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);')
+  lines.push('  eyesDemoTft.begin();')
+  lines.push('  eyesDemoTft.setRotation(0);')
+  if (hasIdle) lines.push('  eyesDemoAnimStart = millis();')
+  if (usesPhaseMachine) lines.push(`  eyesDemoEnterPhase(${hasIdle ? 'EYES_DEMO_PHASE_IDLE' : 'EYES_DEMO_PHASE_TRANSITION'});`)
+  lines.push('}')
+  lines.push('')
+  lines.push('void loop() {')
+  if (usesPhaseMachine) lines.push('  unsigned long now = millis();')
+  lines.push('  LiveEye live;')
+  lines.push('')
+
+  if (hasIdle && hasExpressions) {
+    lines.push('  switch (eyesDemoPhase) {')
+    lines.push('    case EYES_DEMO_PHASE_IDLE:')
+    lines.push(`      eyesPlayAnimation(Anim_${idleIdent}, Anim_${idleIdent}_count, Anim_${idleIdent}_loop, eyesDemoAnimStart, eyesDemoFrameIndex, live);`)
+    lines.push(`      if (now - eyesDemoPhaseStart >= ${IDLE_MS}) {`)
+    lines.push('        eyesDemoExprIndex = 0;')
+    lines.push('        Serial.print("Expression: ");')
+    lines.push('        Serial.println(eyesDemoExpressionNames[eyesDemoExprIndex]);')
+    lines.push('        eyesDemoEnterPhase(EYES_DEMO_PHASE_TRANSITION);')
+    lines.push('      }')
+    lines.push('      break;')
+    lines.push('')
+    lines.push('    case EYES_DEMO_PHASE_TRANSITION: {')
+    lines.push(`      float t = (float)(now - eyesDemoPhaseStart) / ${TRANSITION_MS}.0f;`)
+    lines.push('      if (t >= 1.0f) t = 1.0f;')
+    lines.push('      live = eyesLerpFrame(*eyesDemoFromFrame, *eyesDemoExpressions[eyesDemoExprIndex], t);')
+    lines.push('      if (t >= 1.0f) eyesDemoEnterPhase(EYES_DEMO_PHASE_HOLD);')
+    lines.push('      break;')
+    lines.push('    }')
+    lines.push('')
+    lines.push('    case EYES_DEMO_PHASE_HOLD:')
+    lines.push('      live = eyesLerpFrame(*eyesDemoExpressions[eyesDemoExprIndex], *eyesDemoExpressions[eyesDemoExprIndex], 0);')
+    lines.push(`      if (now - eyesDemoPhaseStart >= ${HOLD_MS}) {`)
+    lines.push('        eyesDemoFromFrame = eyesDemoExpressions[eyesDemoExprIndex];')
+    lines.push('        eyesDemoExprIndex++;')
+    lines.push('        if (eyesDemoExprIndex >= eyesDemoExpressionCount) {')
+    lines.push('          eyesDemoAnimStart = millis();  // resync idle animation timing before resuming it')
+    lines.push('          eyesDemoEnterPhase(EYES_DEMO_PHASE_IDLE);')
+    lines.push('        } else {')
+    lines.push('          Serial.print("Expression: ");')
+    lines.push('          Serial.println(eyesDemoExpressionNames[eyesDemoExprIndex]);')
+    lines.push('          eyesDemoEnterPhase(EYES_DEMO_PHASE_TRANSITION);')
+    lines.push('        }')
+    lines.push('      }')
+    lines.push('      break;')
+    lines.push('  }')
+  } else if (hasIdle) {
+    lines.push(`  eyesPlayAnimation(Anim_${idleIdent}, Anim_${idleIdent}_count, Anim_${idleIdent}_loop, eyesDemoAnimStart, eyesDemoFrameIndex, live);`)
+  } else {
+    // hasExpressions only -- cycle forever, no idle phase
+    lines.push('  switch (eyesDemoPhase) {')
+    lines.push('    case EYES_DEMO_PHASE_TRANSITION: {')
+    lines.push(`      float t = (float)(now - eyesDemoPhaseStart) / ${TRANSITION_MS}.0f;`)
+    lines.push('      if (t >= 1.0f) t = 1.0f;')
+    lines.push('      live = eyesLerpFrame(*eyesDemoFromFrame, *eyesDemoExpressions[eyesDemoExprIndex], t);')
+    lines.push('      if (t >= 1.0f) eyesDemoEnterPhase(EYES_DEMO_PHASE_HOLD);')
+    lines.push('      break;')
+    lines.push('    }')
+    lines.push('')
+    lines.push('    case EYES_DEMO_PHASE_HOLD:')
+    lines.push('      live = eyesLerpFrame(*eyesDemoExpressions[eyesDemoExprIndex], *eyesDemoExpressions[eyesDemoExprIndex], 0);')
+    lines.push(`      if (now - eyesDemoPhaseStart >= ${HOLD_MS}) {`)
+    lines.push('        eyesDemoFromFrame = eyesDemoExpressions[eyesDemoExprIndex];')
+    lines.push('        eyesDemoExprIndex = (eyesDemoExprIndex + 1) % eyesDemoExpressionCount;')
+    lines.push('        Serial.print("Expression: ");')
+    lines.push('        Serial.println(eyesDemoExpressionNames[eyesDemoExprIndex]);')
+    lines.push('        eyesDemoEnterPhase(EYES_DEMO_PHASE_TRANSITION);')
+    lines.push('      }')
+    lines.push('      break;')
+    lines.push('  }')
+  }
+
+  lines.push('')
+  lines.push('  eyesDemoTft.fillScreen(EYE_COLOR_BACKGROUND);')
+  lines.push('  eyesDrawEyePair(eyesDemoTft, 120, 120, live, EYE_COLOR_BACKGROUND, EYE_COLORS_LEFT, EYE_COLORS_RIGHT);')
+  lines.push('  eyesDemoTft.present();')
+  lines.push('  delay(EYE_FRAME_DELAY_MS);')
+  lines.push('}')
+  lines.push('#endif // EYES_ENABLE_DEMO')
+
+  return lines.join('\n')
+}
+
 export function generateCppHeader(project: Project): string {
   const guard = `EYES_EYE_ANIMATIONS_${toIdentifier(project.name).toUpperCase() || 'PROJECT'}_H`
   const header = `/*
@@ -586,9 +767,11 @@ export function generateCppHeader(project: Project): string {
  * studio preview, which gets the same clipping for free from its canvas clip path.
  *
  * Eyelid Tilt (-45..45deg) shears each lid's covering edge independently of the other; Eyelid
- * Curvature (0-100) controls how pronounced its soft rounded edge is, from flat to highly
- * curved, blending smoothly into the eye's own rounded corners like a border-radius. The
- * curve is a closed-form quartic taper; eyesFillEyelid() below evaluates the exact same
+ * Curvature (-100..100) controls how pronounced its soft rounded edge is: 0 is flat/neutral,
+ * negative values curve the lid inward, positive values curve it outward, blending smoothly
+ * into the eye's own rounded corners like a border-radius either way. The curve is a
+ * closed-form quartic taper;
+ * eyesFillEyelid() below evaluates the exact same
  * yCutoff(x) formula the studio's preview draws, so the two always render identically.
  *
  * Eye colors are exported below as RGB565 #defines (sclera/iris/pupil/highlight/shadow/
@@ -601,7 +784,10 @@ export function generateCppHeader(project: Project): string {
  * frame is drawn/presented, i.e. the actual "frames per second" on the panel.
  *
  * This file is plug-and-play: it also bundles the "player" (easing, interpolation, and
- * drawing) as inline functions, so you don't need a separate companion file. Minimal usage:
+ * drawing) as inline functions, so you don't need a separate companion file. It also bundles
+ * a ready-to-flash demo setup()/loop() at the bottom (see "Demo (opt-in)" below) that cycles
+ * the idle animation and every expression -- define EYES_ENABLE_DEMO before including this
+ * header to use it as-is with no other code. Rolling your own instead? Minimal usage:
  *
  *   #include <Adafruit_GC9A01A.h>  // <- put this BEFORE the line below, in your .ino itself
  *   #include "eyes.h"              //    (Arduino's auto-library-discovery only scans your
@@ -673,7 +859,7 @@ struct EyeFrame {
   uint16_t pupilRotation; // degrees, 0-360
   uint8_t upperEyelid, lowerEyelid;
   int8_t upperEyelidTilt, lowerEyelidTilt; // degrees, -45..45
-  uint8_t upperEyelidCurvature, lowerEyelidCurvature; // 0 (flat) - 100 (highly curved)
+  int8_t upperEyelidCurvature, lowerEyelidCurvature; // -100 (inward) to 100 (outward), 0 = flat
   int8_t highlightX, highlightY;
   uint8_t highlightSize;
   uint16_t durationMs;
@@ -707,6 +893,8 @@ ${project.animations.map(exportAnimation).join('\n\n')}
 // ---- Expressions (static poses) -------------------------------------------
 
 ${project.expressions.map(exportExpression).join('\n\n')}
+
+${exportDemo(project)}
 
 #endif // ${guard}
 `

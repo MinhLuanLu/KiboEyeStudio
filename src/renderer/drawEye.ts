@@ -202,12 +202,15 @@ export function drawEye(
   // parabola:
   //   taper(x) = (1 - (x/halfW)^2)^2      for |x| <= halfW, else 0
   //   y(x)     = yBase + curveOffset * taper(x)
-  // At x=0 (lid center) taper=1, giving the full curveOffset bulge. At x=±halfW (the eye's
-  // own flat-side edge) taper AND its slope both reach exactly 0, so the curve blends into
-  // the flat sides — and from there into the eye's rounded corners — with no kink, at any
-  // eye width/height/radius. (A plain parabola (1-(x/halfW)^2) reaches 0 at the edge but with
-  // a nonzero slope, which is what produced a visible corner there; squaring the taper fixes
-  // that while keeping the same closed form.)
+  // At x=0 (lid center) taper=1, giving the full curveOffset offset. Curvature ranges -100
+  // (curved inward) to 100 (curved outward) through 0 (flat/neutral): a positive curveOffset
+  // bulges the lid center further into the eye (more coverage there than at the flat sides);
+  // a negative one pulls the center back toward less coverage instead. At x=±halfW (the
+  // eye's own flat-side edge) taper AND its slope both reach exactly 0 regardless of sign,
+  // so the curve blends into the flat sides — and from there into the eye's rounded corners
+  // — with no kink, at any eye width/height/radius or curvature value. (A plain parabola
+  // (1-(x/halfW)^2) reaches 0 at the edge but with a nonzero slope, which is what produced a
+  // visible corner there; squaring the taper fixes that while keeping the same closed form.)
   //
   // Canvas has no built-in primitive for a quartic curve, so the path is built by sampling
   // this exact formula at one point per device pixel column and connecting with lineTo — with
