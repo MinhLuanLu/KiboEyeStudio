@@ -68,16 +68,21 @@ function eyeFrameLiteral(params: EyeParams, durationMs: number, easing: EasingTy
   return `  { ${fields.join(', ')} }`
 }
 
+// Emits the raw keyframe array plus its count/loop flag (for anyone who wants direct/
+// low-level access) AND a single `EyeAnimation` wrapper bundling all three — that wrapper
+// is what PlayAnimation() below takes, so playing an animation is just `PlayAnimation(Anim_X)`
+// instead of threading three separate globals through eyesPlayAnimation() by hand.
 function exportAnimation(anim: Animation): string {
   const ident = toIdentifier(anim.name)
   const lines = anim.keyframes.map((k) => eyeFrameLiteral(k.params, k.duration, k.easing, k.customBezier))
   return [
     `// ${anim.name}${anim.loop ? ' (loops)' : ' (plays once)'}`,
-    `const EyeFrame Anim_${ident}[] PROGMEM = {`,
+    `const EyeFrame Anim_${ident}_frames[] PROGMEM = {`,
     lines.join(',\n'),
     `};`,
     `const uint16_t Anim_${ident}_count = ${anim.keyframes.length};`,
-    `const bool Anim_${ident}_loop = ${anim.loop ? 'true' : 'false'};`
+    `const bool Anim_${ident}_loop = ${anim.loop ? 'true' : 'false'};`,
+    `const EyeAnimation Anim_${ident} = { Anim_${ident}_frames, Anim_${ident}_count, Anim_${ident}_loop };`
   ].join('\n')
 }
 
@@ -101,6 +106,52 @@ function toRgb565Hex(hex: string): string {
   return `0x${hexToRgb565(hex).toString(16).toUpperCase().padStart(4, '0')}`
 }
 
+// Both arrays below pre-bake a *stepped* approximation of a studio effect that relies on
+// real alpha compositing and/or canvas blur — neither of which RGB565/Adafruit_GFX have —
+// into a small fixed set of flat colors, computed once here rather than blended per-pixel on
+// the device. Sizes are shared with the EyeColorSet struct/eyesFillShadowBand()/
+// eyesFillGlowRings() in the generated header, so they must stay in sync with those.
+const SHADOW_BAND_STEPS = 6
+const GLOW_RING_OFFSETS_PX = [11, 6, 2] // outermost to innermost
+
+// Matches the "Ambient shadow arc" in drawEye.ts: a linear gradient from theme.shadow (t=0,
+// top of eye) fading to fully transparent over the top 32% of the eye's height, with an
+// overall alpha of 0.15 + shadowIntensity/100*0.45 — i.e. shadowIntensity never fully hides
+// or fully solidifies the band, matching the preview's own floor/ceiling. Baked into
+// SHADOW_BAND_STEPS flat sclera<->shadow blends here; eyesFillShadowBand() in the header
+// picks the right one per scanline row from the *live* (animated) eye height at runtime.
+function shadowBandLiteral(colors: EyeColors): string {
+  if (colors.shadowIntensity <= 0) {
+    return `{ ${Array.from({ length: SHADOW_BAND_STEPS }, () => toRgb565Hex(colors.sclera)).join(', ')} }`
+  }
+  const overallAlpha = 0.15 + (colors.shadowIntensity / 100) * 0.45
+  const steps = Array.from({ length: SHADOW_BAND_STEPS }, (_, i) => {
+    const f = i / (SHADOW_BAND_STEPS - 1)
+    const alpha = (1 - f) * overallAlpha
+    return toRgb565Hex(mixColors(colors.sclera, colors.shadow, alpha))
+  })
+  return `{ ${steps.join(', ')} }`
+}
+
+// Matches the "Outer glow" in drawEye.ts: theme.glow filled at alpha 0.25 + glowIntensity/
+// 100*0.55 with a canvas blur (4 + glowIntensity/100*22 px) so the edges fade out smoothly.
+// Adafruit_GFX has no blur, so this bakes GLOW_RING_OFFSETS_PX.length concentric rounded-
+// rects here instead, each at a fixed pixel offset beyond the eye's own edge, with alpha
+// split evenly across rings (outermost faintest, innermost strongest) so eyesFillGlowRings()
+// drawing them outer-to-inner in the header reads as a soft halo rather than a hard-edged ring.
+function glowRingLiteral(colors: EyeColors, backgroundColor: string): string {
+  const n = GLOW_RING_OFFSETS_PX.length
+  if (colors.glowIntensity <= 0) {
+    return `{ ${Array.from({ length: n }, () => toRgb565Hex(backgroundColor)).join(', ')} }`
+  }
+  const baseAlpha = 0.25 + (colors.glowIntensity / 100) * 0.55
+  const rings = Array.from({ length: n }, (_, i) => {
+    const alpha = baseAlpha * ((i + 1) / n)
+    return toRgb565Hex(mixColors(backgroundColor, colors.glow, alpha))
+  })
+  return `{ ${rings.join(', ')} }`
+}
+
 // RGB565 has no alpha channel, so Border Opacity is pre-blended here into a single flat
 // color against the display background (matching the ring trick eyesDrawEye uses below):
 // 0% -> exactly the background color (invisible ring), 100% -> the pure border color.
@@ -116,7 +167,7 @@ function colorSetLiteral(colors: EyeColors, backgroundColor: string): string {
     toRgb565Hex(borderBlend),
     Math.round(colors.borderWidth)
   ]
-  return `{ ${fields.join(', ')} }`
+  return `{ ${fields.join(', ')}, ${shadowBandLiteral(colors)}, ${glowRingLiteral(colors, backgroundColor)} }`
 }
 
 // Eye Target (Left/Right editing) lets the two eyes' colors diverge — EYE_COLORS_LEFT and
@@ -132,7 +183,8 @@ function exportColors(project: Project): string {
     `#define EYE_COLOR_BACKGROUND ${toRgb565Hex(display.backgroundColor)} // RGB565 — Display panel's background color`,
     ``,
     `// sclera, iris, pupil, highlight, shadow, glow, border, borderWidth (border already has`,
-    `// Border Opacity pre-blended in — RGB565 has no alpha channel)`,
+    `// Border Opacity pre-blended in — RGB565 has no alpha channel), then the precomputed`,
+    `// shadowBand/glowRing arrays eyesFillShadowBand()/eyesFillGlowRings() below draw from.`,
     `const EyeColorSet EYE_COLORS_LEFT = ${colorSetLiteral(left, display.backgroundColor)};`
   ]
   if (same) {
@@ -236,6 +288,35 @@ inline float eyesLerpAngleDeg(float a, float b, float t) {
 }
 
 inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
+  LiveEye r;
+  r.width = a.width + (b.width - a.width) * t;
+  r.height = a.height + (b.height - a.height) * t;
+  r.radius = a.radius + (b.radius - a.radius) * t;
+  r.distance = a.distance + (b.distance - a.distance) * t;
+  r.irisWidth = a.irisWidth + (b.irisWidth - a.irisWidth) * t;
+  r.irisHeight = a.irisHeight + (b.irisHeight - a.irisHeight) * t;
+  r.pupilWidth = a.pupilWidth + (b.pupilWidth - a.pupilWidth) * t;
+  r.pupilHeight = a.pupilHeight + (b.pupilHeight - a.pupilHeight) * t;
+  r.pupilX = a.pupilX + (b.pupilX - a.pupilX) * t;
+  r.pupilY = a.pupilY + (b.pupilY - a.pupilY) * t;
+  r.pupilRotation = eyesLerpAngleDeg(a.pupilRotation, b.pupilRotation, t);
+  r.upperEyelid = a.upperEyelid + (b.upperEyelid - a.upperEyelid) * t;
+  r.lowerEyelid = a.lowerEyelid + (b.lowerEyelid - a.lowerEyelid) * t;
+  r.upperEyelidTilt = a.upperEyelidTilt + (b.upperEyelidTilt - a.upperEyelidTilt) * t;
+  r.lowerEyelidTilt = a.lowerEyelidTilt + (b.lowerEyelidTilt - a.lowerEyelidTilt) * t;
+  r.upperEyelidCurvature = a.upperEyelidCurvature + (b.upperEyelidCurvature - a.upperEyelidCurvature) * t;
+  r.lowerEyelidCurvature = a.lowerEyelidCurvature + (b.lowerEyelidCurvature - a.lowerEyelidCurvature) * t;
+  r.highlightX = a.highlightX + (b.highlightX - a.highlightX) * t;
+  r.highlightY = a.highlightY + (b.highlightY - a.highlightY) * t;
+  r.highlightSize = a.highlightSize + (b.highlightSize - a.highlightSize) * t;
+  return r;
+}
+
+// Same as eyesLerpFrame above, but both endpoints are already-interpolated LiveEye poses
+// rather than raw keyframes — used by SetExpression()'s crossfade below, which needs to
+// blend FROM whatever's currently on screen (which might itself be mid-animation, not a
+// single keyframe).
+inline LiveEye eyesLerpLive(const LiveEye& a, const LiveEye& b, float t) {
   LiveEye r;
   r.width = a.width + (b.width - a.width) * t;
   r.height = a.height + (b.height - a.height) * t;
@@ -410,8 +491,53 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
   }
 }
 
-// ---- Drawing — flat-color layered render: sclera -> iris -> pupil -> highlight -> ----
-// eyelids. \`T\` is a template (not \`Adafruit_GFX&\`) on purpose: fillRoundRect()/
+// Ambient shadow band under the (implied) upper lid crease — a stepped approximation of the
+// studio preview's smooth top-of-eye gradient (see the "Ambient shadow arc" comment in
+// drawEye.ts): RGB565/Adafruit_GFX have no per-pixel alpha, so colors.shadowBand was already
+// pre-baked into EYE_SHADOW_STEPS flat sclera/shadow blends at export time (see
+// shadowBandLiteral() in the studio's cppExport.ts) — this just picks the right one per
+// scanline row from the *live* (possibly mid-animation) eye height and paints it, clipped to
+// the eye's own rounded silhouette the same way eyesFillRoundedRect() is.
+template <typename T>
+inline void eyesFillShadowBand(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius, const uint16_t band[]) {
+  float hx = w / 2.0f;
+  float hy = h / 2.0f;
+  float rx = radius < hx ? (float)radius : hx;
+  float ry = radius < hy ? (float)radius : hy;
+  float shadowH = h * 0.32f;
+  if (shadowH < 0.5f) return;
+  int16_t bandPx = (int16_t)ceilf(shadowH);
+  for (int16_t dy = 0; dy <= bandPx; dy++) {
+    float f = (float)dy / shadowH;
+    if (f > 1.0f) f = 1.0f;
+    uint8_t step = (uint8_t)(f * (EYE_SHADOW_STEPS - 1) + 0.5f);
+    if (step >= EYE_SHADOW_STEPS) step = EYE_SHADOW_STEPS - 1;
+    float worldDy = -hy + dy;
+    float xExtent = eyesEyeHalfWidthAt(worldDy, hx, hy, rx, ry);
+    if (xExtent < 0) continue;
+    int16_t ix = (int16_t)xExtent;
+    gfx.drawFastHLine(cx - ix, cy + (int16_t)worldDy, ix * 2 + 1, band[step]);
+  }
+}
+
+// Outer glow halo — a stepped approximation of the studio preview's blurred glow (see the
+// "Outer glow" comment in drawEye.ts): Adafruit_GFX has no blur primitive, so
+// colors.glowRing was already pre-baked into EYE_GLOW_RINGS concentric background/glow
+// blends at export time (see glowRingLiteral() in the studio's cppExport.ts), each at a
+// fixed pixel offset beyond the eye's own edge. Drawn outermost (faintest) first so each
+// smaller, stronger ring after it paints over that ring's inner portion, reading as a soft
+// fade toward the eye rather than hard-edged rings.
+template <typename T>
+inline void eyesFillGlowRings(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius, const uint16_t rings[]) {
+  static const uint8_t offsets[EYE_GLOW_RINGS] = { 11, 6, 2 }; // px beyond the eye's own edge, outermost to innermost
+  for (uint8_t i = 0; i < EYE_GLOW_RINGS; i++) {
+    uint8_t off = offsets[i];
+    eyesFillRoundedRect(gfx, cx, cy, w + off * 2, h + off * 2, radius + off, rings[i]);
+  }
+}
+
+// ---- Drawing — flat-color layered render: glow -> border -> sclera -> shadow -> iris -> ----
+// pupil -> highlight -> eyelids. \`T\` is a template (not \`Adafruit_GFX&\`) on purpose: fillRoundRect()/
 // fillCircle() aren't virtual in Adafruit_GFX, so a buffered subclass like
 // EyesBufferedDisplay below only gets called correctly when the concrete type is known at
 // compile time. \`bgColor\` should match your Display panel's background so eyelids blend in.
@@ -421,6 +547,14 @@ template <typename T>
 inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor, const EyeColorSet& colors) {
   int16_t w = (int16_t)e.width, h = (int16_t)e.height;
   int16_t radius = (int16_t)e.radius;
+
+  // Outer glow halo — drawn first/outside everything else, same order as the studio preview.
+  // colors.glowRing's innermost ring equals bgColor exactly when Glow Intensity was 0 at
+  // export time (see glowRingLiteral()), so this skips the (otherwise harmless but wasted)
+  // draw calls entirely rather than painting background-colored rings no one would ever see.
+  if (colors.glowRing[EYE_GLOW_RINGS - 1] != bgColor) {
+    eyesFillGlowRings(gfx, cx, cy, w, h, radius, colors.glowRing);
+  }
 
   // Border — an outer stadium/oval shape colors.borderWidth larger on every side, in a color
   // already pre-blended toward the background by Border Opacity (see EYE_COLORS_LEFT/RIGHT
@@ -437,6 +571,14 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   }
 
   eyesFillRoundedRect(gfx, cx, cy, w, h, radius, colors.sclera);
+
+  // Ambient shadow band under the (implied) upper lid crease, same order as the studio
+  // preview (after the sclera fill, before iris/pupil so the shadow reads as being under
+  // them). colors.shadowBand's first step equals colors.sclera exactly when Shadow Intensity
+  // was 0 at export time (see shadowBandLiteral()), so this skips cleanly in that case.
+  if (colors.shadowBand[0] != colors.sclera) {
+    eyesFillShadowBand(gfx, cx, cy, w, h, radius, colors.shadowBand);
+  }
 
   int sign = mirror ? -1 : 1;
   int16_t px = cx + (int16_t)(sign * (e.pupilX / 100.0f) * (w / 2.0f));
@@ -522,6 +664,73 @@ inline bool eyesPlayAnimation(const EyeFrame frames[], uint16_t count, bool loop
   return false;
 }
 
+// Same as above, bundled into one EyeAnimation argument instead of three loose ones — what
+// PlayAnimation()/UpdateEyes() below use internally. Call this instead if you want manual
+// control (your own timing/state variables) without the SetExpression()/PlayAnimation()
+// convenience layer.
+inline bool eyesPlayAnimation(const EyeAnimation& anim, unsigned long& startMillis, uint16_t& frameIndex, LiveEye& outLive) {
+  return eyesPlayAnimation(anim.frames, anim.count, anim.loop, startMillis, frameIndex, outLive);
+}
+
+// ---- Easy player: SetExpression() / PlayAnimation() / UpdateEyes() -------------------
+// The simplest way to drive the eyes. Call SetExpression()/PlayAnimation() any time you
+// want to change what's showing — from a button press, sensor reading, timer, or serial
+// command — then call UpdateEyes() once per loop() to advance and get the pose to draw.
+// Switching expressions crossfades smoothly over EYES_BLEND_MS; switching (or restarting)
+// an animation cuts over immediately, since the animation's own first keyframe already
+// eases in on its own.
+const unsigned long EYES_BLEND_MS = 250;
+
+struct EyesPlayerState {
+  bool playingAnimation;
+  const EyeFrame* expression;
+  EyeAnimation animation;
+  unsigned long animStart;
+  uint16_t frameIndex;
+  LiveEye live;
+  LiveEye blendFrom;
+  unsigned long blendStart;
+  bool blending;
+};
+static EyesPlayerState eyesPlayer = { false, nullptr, { nullptr, 0, false }, 0, 0, {}, {}, 0, false };
+
+// Shows a static expression, crossfading smoothly from whatever's currently on screen —
+// call it with any Expr_* constant, e.g. SetExpression(Expr_Happy).
+inline void SetExpression(const EyeFrame& expression) {
+  eyesPlayer.blendFrom = eyesPlayer.live;
+  eyesPlayer.blendStart = millis();
+  eyesPlayer.blending = true;
+  eyesPlayer.playingAnimation = false;
+  eyesPlayer.expression = &expression;
+}
+
+// Plays (or restarts) an animation from its first keyframe — call it with any Anim_*
+// constant, e.g. PlayAnimation(Anim_Blink).
+inline void PlayAnimation(const EyeAnimation& animation) {
+  eyesPlayer.playingAnimation = true;
+  eyesPlayer.animation = animation;
+  eyesPlayer.animStart = millis();
+  eyesPlayer.frameIndex = 0;
+  eyesPlayer.blending = false;
+}
+
+// Advances whatever's currently playing and returns the pose to draw this frame. Call this
+// once per loop(), after at least one SetExpression()/PlayAnimation() call in setup() —
+// with neither ever called, there's nothing to show yet.
+inline LiveEye UpdateEyes() {
+  if (eyesPlayer.blending) {
+    float t = (float)(millis() - eyesPlayer.blendStart) / (float)EYES_BLEND_MS;
+    if (t >= 1.0f) { t = 1.0f; eyesPlayer.blending = false; }
+    LiveEye target = eyesLerpFrame(*eyesPlayer.expression, *eyesPlayer.expression, 0);
+    eyesPlayer.live = eyesLerpLive(eyesPlayer.blendFrom, target, t);
+  } else if (eyesPlayer.playingAnimation) {
+    eyesPlayAnimation(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live);
+  } else if (eyesPlayer.expression) {
+    eyesPlayer.live = eyesLerpFrame(*eyesPlayer.expression, *eyesPlayer.expression, 0);
+  }
+  return eyesPlayer.live;
+}
+
 // ---- Optional: flicker-free buffered display for Adafruit_GC9A01A. Only defined if ----
 // that library is actually installed (checked via __has_include), so this header never
 // forces the dependency on projects using TFT_eSPI/LovyanGFX/etc. — pass your own
@@ -569,45 +778,67 @@ private:
 #endif // EYES_EYE_PLAYER_H
 `
 
-// Opt-in ready-to-flash setup()/loop(): plays the project's first animation as an "idle"
-// filler, then crossfades (eyesLerpFrame) through every expression that has one shared
-// left/right shape, holding each briefly, then loops back to idle — the same demo pattern
-// used to verify the studio's own test sketches. Guarded behind #ifdef EYES_ENABLE_DEMO so
-// it only compiles in (and only then needs the TFT_* pin macros) when the user actually
-// wants it; left off by default so it never collides with a hand-written setup()/loop().
-// All identifiers are prefixed eyesDemo* to avoid clashing with the user's own globals even
-// when both are compiled together.
+// Lists every identifier SetExpression()/PlayAnimation() actually accept, so you don't have
+// to go hunting through the generated data below to find the right name.
+function exportQuickReference(project: Project): string {
+  const singleExpressions = project.expressions.filter((e) => !expressionShapeDiverges(e))
+  const divergedExpressions = project.expressions.filter((e) => expressionShapeDiverges(e))
+
+  const lines: string[] = []
+  lines.push('// ---- Quick Reference --------------------------------------------------------')
+  lines.push('// Everything you can pass to PlayAnimation(...) / SetExpression(...) below.')
+  lines.push('//')
+  if (project.animations.length > 0) {
+    lines.push('// Animations:')
+    for (const a of project.animations) lines.push(`//   PlayAnimation(Anim_${toIdentifier(a.name)});`)
+  } else {
+    lines.push('// Animations: (this project has none yet)')
+  }
+  lines.push('//')
+  if (singleExpressions.length > 0) {
+    lines.push('// Expressions:')
+    for (const e of singleExpressions) lines.push(`//   SetExpression(Expr_${toIdentifier(e.name)});`)
+  } else {
+    lines.push('// Expressions: (this project has none yet)')
+  }
+  if (divergedExpressions.length > 0) {
+    lines.push('//')
+    lines.push('// These expressions have different left/right eye shapes, so they export as a pair of')
+    lines.push('// constants instead of one — SetExpression() needs a single shared pose, so draw these')
+    lines.push('// two halves yourself with eyesDrawEye() instead:')
+    for (const e of divergedExpressions) {
+      const ident = toIdentifier(e.name)
+      lines.push(`//   Expr_${ident}_L, Expr_${ident}_R`)
+    }
+  }
+  return lines.join('\n')
+}
+
+// Opt-in ready-to-flash example: starts on the project's first animation, then cycles
+// through every expression that has one shared left/right shape a few seconds apart.
+// Guarded behind #ifdef EYES_ENABLE_DEMO so it only compiles in (and only then needs the
+// TFT_* pin macros) when you actually want it — left off by default so it never collides
+// with your own setup()/loop(). All that's specific to *this* project is which Anim_ and
+// Expr_ constants get called — SetExpression()/PlayAnimation()/UpdateEyes() do all the work,
+// so swapping in a different expression or animation is exactly one line, anywhere.
 function exportDemo(project: Project): string {
   const idleAnim = project.animations[0]
   const idleIdent = idleAnim ? toIdentifier(idleAnim.name) : null
   const hasIdle = idleIdent !== null
 
   // Expressions with a diverged Eye Target: Left/Right shape export as two constants
-  // (Expr_X_L / Expr_X_R) instead of one — eyesDrawEyePair() needs a single shared LiveEye
-  // pose per frame, so those are left out of the auto-demo cycle (still fully usable by
-  // hand, just not auto-cycled here).
+  // (Expr_X_L / Expr_X_R) instead of one — SetExpression() needs a single shared pose, so
+  // those are left out of the auto-cycle below (still fully usable by hand, via eyesDrawEye()
+  // directly — see the Quick Reference above).
   const demoExpressions = project.expressions.filter((e) => !expressionShapeDiverges(e))
   const hasExpressions = demoExpressions.length > 0
-  const skippedDiverged = project.expressions.length - demoExpressions.length
 
-  const TRANSITION_MS = 400
-  const HOLD_MS = 2000
-  const IDLE_MS = 3000
-
-  if (!hasIdle && !hasExpressions) {
-    return [
-      '// ---- Demo (opt-in) ------------------------------------------------------',
-      '// This project has no animations and no single-shape expressions to demo (expressions',
-      "// with a diverged Eye Target: Left/Right shape aren't included — eyesDrawEyePair() needs",
-      '// one shared pose per frame). Add one in the studio and re-export to get a ready-to-',
-      '// flash EYES_ENABLE_DEMO setup()/loop().'
-    ].join('\n')
-  }
+  const HOLD_MS = 2500
 
   const lines: string[] = []
-  lines.push('// ---- Demo (opt-in) ------------------------------------------------------')
+  lines.push('// ---- Example (opt-in) --------------------------------------------------------')
   lines.push('// Define EYES_ENABLE_DEMO and the five TFT_* pin macros before #include "eyes.h" to get')
-  lines.push("// a ready-to-flash setup()/loop() below -- no other code needed in your .ino. Example:")
+  lines.push('// a ready-to-flash sketch below — no other code needed. Example:')
   lines.push('//')
   lines.push('//   #define EYES_ENABLE_DEMO')
   lines.push('//   #define TFT_CS   2')
@@ -619,128 +850,80 @@ function exportDemo(project: Project): string {
   lines.push('//   #include <Adafruit_GC9A01A.h>')
   lines.push('//   #include "eyes.h"')
   lines.push('//')
-  lines.push("// Leave EYES_ENABLE_DEMO undefined and write your own setup()/loop() instead (see the")
-  lines.push('// "Minimal usage" comment above) if you want to drive the eyes yourself.')
-  if (skippedDiverged > 0) {
-    lines.push(
-      `// (${skippedDiverged} expression${skippedDiverged === 1 ? '' : 's'} with a diverged left/right shape ${skippedDiverged === 1 ? 'is' : 'are'} not included in this auto-cycle.)`
-    )
-  }
-  lines.push('#ifdef EYES_ENABLE_DEMO')
-  lines.push('EyesBufferedDisplay eyesDemoTft(TFT_CS, TFT_DC, TFT_RST);')
+  lines.push("// Leave EYES_ENABLE_DEMO undefined and write your own setup()/loop() instead — that's")
+  lines.push('// the whole point of SetExpression()/PlayAnimation()/UpdateEyes() above: your sketch only')
+  lines.push('// needs to be this short (see "Minimal usage" at the top of this file for the full copy-')
+  lines.push('// paste version).')
 
-  if (hasIdle) {
-    lines.push('unsigned long eyesDemoAnimStart = 0;')
-    lines.push('uint16_t eyesDemoFrameIndex = 0;')
+  if (!hasIdle && !hasExpressions) {
+    lines.push('//')
+    lines.push('// This project has no animations and no single-shape expressions to demo yet — add one')
+    lines.push('// in the studio and re-export to get a ready-to-flash EYES_ENABLE_DEMO sketch.')
+    return lines.join('\n')
   }
+
+  lines.push('#ifdef EYES_ENABLE_DEMO')
+  lines.push('')
+  lines.push('// ---- Initialization -----------------------------------------------------------')
+  lines.push('EyesBufferedDisplay tft(TFT_CS, TFT_DC, TFT_RST);')
+  lines.push('')
 
   if (hasExpressions) {
-    lines.push(`const EyeFrame* const eyesDemoExpressions[] = { ${demoExpressions.map((e) => `&Expr_${toIdentifier(e.name)}`).join(', ')} };`)
-    lines.push(`const char* const eyesDemoExpressionNames[] = { ${demoExpressions.map((e) => JSON.stringify(e.name)).join(', ')} };`)
-    lines.push(`const int eyesDemoExpressionCount = ${demoExpressions.length};`)
-  }
-
-  const usesPhaseMachine = hasExpressions
-  if (usesPhaseMachine) {
-    if (hasIdle) {
-      lines.push('enum EyesDemoPhase { EYES_DEMO_PHASE_IDLE, EYES_DEMO_PHASE_TRANSITION, EYES_DEMO_PHASE_HOLD };')
-    } else {
-      lines.push('enum EyesDemoPhase { EYES_DEMO_PHASE_TRANSITION, EYES_DEMO_PHASE_HOLD };')
-    }
-    lines.push(`EyesDemoPhase eyesDemoPhase = ${hasIdle ? 'EYES_DEMO_PHASE_IDLE' : 'EYES_DEMO_PHASE_TRANSITION'};`)
-    lines.push('unsigned long eyesDemoPhaseStart = 0;')
-    lines.push('int eyesDemoExprIndex = 0;')
-    lines.push('const EyeFrame* eyesDemoFromFrame = eyesDemoExpressions[0];')
+    lines.push('// ---- Expression control ---------------------------------------------------------')
+    lines.push('// Cycles through every expression a few seconds apart, purely to show them off.')
+    lines.push('// Replace this timer with your own trigger — a button, a sensor, a serial command,')
+    lines.push('// anything — that calls SetExpression() whenever you actually want the eyes to change.')
+    lines.push(`const EyeFrame* const demoExpressions[] = { ${demoExpressions.map((e) => `&Expr_${toIdentifier(e.name)}`).join(', ')} };`)
+    lines.push(`const char* const demoExpressionNames[] = { ${demoExpressions.map((e) => JSON.stringify(e.name)).join(', ')} };`)
+    lines.push(`const int demoExpressionCount = ${demoExpressions.length};`)
+    lines.push('int demoExprIndex = -1;')
+    lines.push('unsigned long demoExprCycleStart = 0;')
     lines.push('')
-    lines.push('void eyesDemoEnterPhase(EyesDemoPhase p) {')
-    lines.push('  eyesDemoPhase = p;')
-    lines.push('  eyesDemoPhaseStart = millis();')
+    lines.push('void demoCycleExpressions() {')
+    lines.push(`  if (millis() - demoExprCycleStart < ${HOLD_MS}) return;`)
+    lines.push('  demoExprCycleStart = millis();')
+    lines.push('  demoExprIndex = (demoExprIndex + 1) % demoExpressionCount;')
+    lines.push('  Serial.print("Expression: ");')
+    lines.push('  Serial.println(demoExpressionNames[demoExprIndex]);')
+    lines.push('  SetExpression(*demoExpressions[demoExprIndex]);')
     lines.push('}')
+    lines.push('')
   }
 
-  lines.push('')
+  if (hasIdle) {
+    lines.push('// ---- Animation control ---------------------------------------------------------')
+    lines.push(`// Starts the eyes off playing "${idleAnim!.name}" as an idle filler below. Call`)
+    lines.push('// PlayAnimation(Anim_Whatever) any time you want to switch to a different animation —')
+    lines.push('// see the Quick Reference above for every name this project exports.')
+    lines.push('')
+  }
+
+  lines.push('// ---- Main update loop ---------------------------------------------------------')
   lines.push('void setup() {')
   lines.push('  Serial.begin(115200);')
   lines.push('  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);')
-  lines.push('  eyesDemoTft.begin();')
-  lines.push('  eyesDemoTft.setRotation(0);')
-  if (hasIdle) lines.push('  eyesDemoAnimStart = millis();')
-  if (usesPhaseMachine) lines.push(`  eyesDemoEnterPhase(${hasIdle ? 'EYES_DEMO_PHASE_IDLE' : 'EYES_DEMO_PHASE_TRANSITION'});`)
+  lines.push('  tft.begin();')
+  lines.push('  tft.setRotation(0);')
+  if (hasIdle) {
+    lines.push(`  PlayAnimation(Anim_${idleIdent});`)
+  } else {
+    lines.push(`  SetExpression(Expr_${toIdentifier(demoExpressions[0].name)});`)
+  }
+  if (hasExpressions) lines.push('  demoExprCycleStart = millis();')
   lines.push('}')
   lines.push('')
   lines.push('void loop() {')
-  if (usesPhaseMachine) lines.push('  unsigned long now = millis();')
-  lines.push('  LiveEye live;')
-  lines.push('')
-
-  if (hasIdle && hasExpressions) {
-    lines.push('  switch (eyesDemoPhase) {')
-    lines.push('    case EYES_DEMO_PHASE_IDLE:')
-    lines.push(`      eyesPlayAnimation(Anim_${idleIdent}, Anim_${idleIdent}_count, Anim_${idleIdent}_loop, eyesDemoAnimStart, eyesDemoFrameIndex, live);`)
-    lines.push(`      if (now - eyesDemoPhaseStart >= ${IDLE_MS}) {`)
-    lines.push('        eyesDemoExprIndex = 0;')
-    lines.push('        Serial.print("Expression: ");')
-    lines.push('        Serial.println(eyesDemoExpressionNames[eyesDemoExprIndex]);')
-    lines.push('        eyesDemoEnterPhase(EYES_DEMO_PHASE_TRANSITION);')
-    lines.push('      }')
-    lines.push('      break;')
+  if (hasExpressions) {
+    lines.push('  demoCycleExpressions();')
     lines.push('')
-    lines.push('    case EYES_DEMO_PHASE_TRANSITION: {')
-    lines.push(`      float t = (float)(now - eyesDemoPhaseStart) / ${TRANSITION_MS}.0f;`)
-    lines.push('      if (t >= 1.0f) t = 1.0f;')
-    lines.push('      live = eyesLerpFrame(*eyesDemoFromFrame, *eyesDemoExpressions[eyesDemoExprIndex], t);')
-    lines.push('      if (t >= 1.0f) eyesDemoEnterPhase(EYES_DEMO_PHASE_HOLD);')
-    lines.push('      break;')
-    lines.push('    }')
-    lines.push('')
-    lines.push('    case EYES_DEMO_PHASE_HOLD:')
-    lines.push('      live = eyesLerpFrame(*eyesDemoExpressions[eyesDemoExprIndex], *eyesDemoExpressions[eyesDemoExprIndex], 0);')
-    lines.push(`      if (now - eyesDemoPhaseStart >= ${HOLD_MS}) {`)
-    lines.push('        eyesDemoFromFrame = eyesDemoExpressions[eyesDemoExprIndex];')
-    lines.push('        eyesDemoExprIndex++;')
-    lines.push('        if (eyesDemoExprIndex >= eyesDemoExpressionCount) {')
-    lines.push('          eyesDemoAnimStart = millis();  // resync idle animation timing before resuming it')
-    lines.push('          eyesDemoEnterPhase(EYES_DEMO_PHASE_IDLE);')
-    lines.push('        } else {')
-    lines.push('          Serial.print("Expression: ");')
-    lines.push('          Serial.println(eyesDemoExpressionNames[eyesDemoExprIndex]);')
-    lines.push('          eyesDemoEnterPhase(EYES_DEMO_PHASE_TRANSITION);')
-    lines.push('        }')
-    lines.push('      }')
-    lines.push('      break;')
-    lines.push('  }')
-  } else if (hasIdle) {
-    lines.push(`  eyesPlayAnimation(Anim_${idleIdent}, Anim_${idleIdent}_count, Anim_${idleIdent}_loop, eyesDemoAnimStart, eyesDemoFrameIndex, live);`)
-  } else {
-    // hasExpressions only -- cycle forever, no idle phase
-    lines.push('  switch (eyesDemoPhase) {')
-    lines.push('    case EYES_DEMO_PHASE_TRANSITION: {')
-    lines.push(`      float t = (float)(now - eyesDemoPhaseStart) / ${TRANSITION_MS}.0f;`)
-    lines.push('      if (t >= 1.0f) t = 1.0f;')
-    lines.push('      live = eyesLerpFrame(*eyesDemoFromFrame, *eyesDemoExpressions[eyesDemoExprIndex], t);')
-    lines.push('      if (t >= 1.0f) eyesDemoEnterPhase(EYES_DEMO_PHASE_HOLD);')
-    lines.push('      break;')
-    lines.push('    }')
-    lines.push('')
-    lines.push('    case EYES_DEMO_PHASE_HOLD:')
-    lines.push('      live = eyesLerpFrame(*eyesDemoExpressions[eyesDemoExprIndex], *eyesDemoExpressions[eyesDemoExprIndex], 0);')
-    lines.push(`      if (now - eyesDemoPhaseStart >= ${HOLD_MS}) {`)
-    lines.push('        eyesDemoFromFrame = eyesDemoExpressions[eyesDemoExprIndex];')
-    lines.push('        eyesDemoExprIndex = (eyesDemoExprIndex + 1) % eyesDemoExpressionCount;')
-    lines.push('        Serial.print("Expression: ");')
-    lines.push('        Serial.println(eyesDemoExpressionNames[eyesDemoExprIndex]);')
-    lines.push('        eyesDemoEnterPhase(EYES_DEMO_PHASE_TRANSITION);')
-    lines.push('      }')
-    lines.push('      break;')
-    lines.push('  }')
   }
-
-  lines.push('')
-  lines.push('  eyesDemoTft.fillScreen(EYE_COLOR_BACKGROUND);')
-  lines.push('  eyesDrawEyePair(eyesDemoTft, 120, 120, live, EYE_COLOR_BACKGROUND, EYE_COLORS_LEFT, EYE_COLORS_RIGHT);')
-  lines.push('  eyesDemoTft.present();')
+  lines.push('  LiveEye live = UpdateEyes();')
+  lines.push('  tft.fillScreen(EYE_COLOR_BACKGROUND);')
+  lines.push('  eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND, EYE_COLORS_LEFT, EYE_COLORS_RIGHT);')
+  lines.push('  tft.present();')
   lines.push('  delay(EYE_FRAME_DELAY_MS);')
   lines.push('}')
+  lines.push('')
   lines.push('#endif // EYES_ENABLE_DEMO')
 
   return lines.join('\n')
@@ -784,44 +967,67 @@ export function generateCppHeader(project: Project): string {
  * frame is drawn/presented, i.e. the actual "frames per second" on the panel.
  *
  * This file is plug-and-play: it also bundles the "player" (easing, interpolation, and
- * drawing) as inline functions, so you don't need a separate companion file. It also bundles
- * a ready-to-flash demo setup()/loop() at the bottom (see "Demo (opt-in)" below) that cycles
- * the idle animation and every expression -- define EYES_ENABLE_DEMO before including this
- * header to use it as-is with no other code. Rolling your own instead? Minimal usage:
+ * drawing) as inline functions, so you don't need a separate companion file — including a
+ * high-level SetExpression()/PlayAnimation()/UpdateEyes() API, so changing what's on screen
+ * is exactly one line of code, from anywhere in your own sketch. Minimal usage:
  *
- *   #include <Adafruit_GC9A01A.h>  // <- put this BEFORE the line below, in your .ino itself
- *   #include "eyes.h"              //    (Arduino's auto-library-discovery only scans your
- *                                  //     .ino's own #include lines, not ones nested inside
- *                                  //     a conditional #if in an included header — so this
- *                                  //     explicit line is what makes EyesBufferedDisplay
- *                                  //     below actually get defined; omit it and it's
- *                                  //     silently skipped instead of failing to compile)
+ *   #include <SPI.h>
+ *   #include <Adafruit_GC9A01A.h>  // <- put both of these BEFORE the line below, in your
+ *   #include "eyes.h"              //    .ino itself (Arduino's auto-library-discovery only
+ *                                  //     scans your .ino's own #include lines, not ones
+ *                                  //     nested inside a conditional #if in an included
+ *                                  //     header — so these explicit lines are what make
+ *                                  //     EyesBufferedDisplay below actually get defined;
+ *                                  //     omit them and it's silently skipped instead of
+ *                                  //     failing to compile)
+ *
+ *   #define TFT_CS   2   // <- your own wiring
+ *   #define TFT_DC   4
+ *   #define TFT_RST  5
+ *   #define TFT_SCLK 6
+ *   #define TFT_MOSI 7
  *
  *   EyesBufferedDisplay tft(TFT_CS, TFT_DC, TFT_RST);  // flicker-free buffered display
- *   unsigned long animStart = 0;
- *   uint16_t frameIndex = 0;
  *
  *   void setup() {
+ *     SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);  // required on boards with no fixed
+ *                                                  // default SPI pins (e.g. ESP32-C6) —
+ *                                                  // harmless to include even if yours does
  *     tft.begin();
  *     tft.setRotation(0);
- *     animStart = millis();
+ *     PlayAnimation(Anim_Idle);        // or: SetExpression(Expr_Neutral); — substitute
+ *                                      // whichever of your own Anim_ or Expr_ names actually
+ *                                      // exist; see "Quick Reference" further down
  *   }
  *
  *   void loop() {
- *     LiveEye live;
- *     eyesPlayAnimation(Anim_Idle, Anim_Idle_count, Anim_Idle_loop, animStart, frameIndex, live);
+ *     LiveEye live = UpdateEyes();
  *     tft.fillScreen(EYE_COLOR_BACKGROUND);
  *     eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND, EYE_COLORS_LEFT, EYE_COLORS_RIGHT);
  *     tft.present();
  *     delay(EYE_FRAME_DELAY_MS);  // paces drawing to EYE_TARGET_FPS
  *   }
  *
+ * That's the whole sketch — change what's showing from anywhere else in your code (a button
+ * handler, a sensor reading, a serial command) with one line:
+ *
+ *   SetExpression(Expr_Happy);
+ *   PlayAnimation(Anim_Blink);
+ *
+ * See "Quick Reference" further down for every Expr_ and Anim_ name this project exports,
+ * and "Example (opt-in)" at the very bottom for a complete ready-to-flash sketch using them.
+ *
  * EYE_COLORS_LEFT/EYE_COLORS_RIGHT are always both defined -- pass both to eyesDrawEyePair()
  * every time. When the studio's two eyes have identical colors, EYE_COLORS_RIGHT is just a
  * reference to EYE_COLORS_LEFT (no duplicate data); when Eye Target: Left/Right editing gave
  * them different colors, both are real, distinct structs. Static poses saved with a
  * left/right shape divergence export as two constants instead of one, e.g. Expr_Blink_L /
- * Expr_Blink_R rather than a plain Expr_Blink.
+ * Expr_Blink_R rather than a plain Expr_Blink — SetExpression() needs a single shared pose,
+ * so those two aren't included in it; draw them yourself with eyesDrawEye() per eye instead.
+ *
+ * Want lower-level control? eyesPlayAnimation(Anim_X, ...) and eyesLerpFrame(Expr_X, ...)
+ * are both still here and work exactly as before — SetExpression()/PlayAnimation()/
+ * UpdateEyes() are a convenience layer built on top of them, not a replacement.
  *
  * Using TFT_eSPI/LovyanGFX instead of Adafruit_GC9A01A? Skip that #include — pass your own
  * sprite/canvas object as the template type to eyesDrawEyePair()/eyesDrawEye() instead;
@@ -867,6 +1073,9 @@ struct EyeFrame {
   int8_t bezierX1, bezierY1, bezierX2, bezierY2;
 };
 
+#define EYE_SHADOW_STEPS 6
+#define EYE_GLOW_RINGS 3
+
 // One eye's full color palette (RGB565) plus its border thickness — the studio's Eye
 // Target: Left/Right editing lets the two eyes end up with different palettes (and
 // different border widths, via Visual Reference per-eye overrides), so this is a value
@@ -874,6 +1083,22 @@ struct EyeFrame {
 struct EyeColorSet {
   uint16_t sclera, iris, pupil, highlight, shadow, glow, border;
   uint8_t borderWidth; // ring thickness in pixels
+  // Studio's Shadow/Glow effects rely on real alpha blending and canvas blur that RGB565/
+  // Adafruit_GFX don't have — these are that effect pre-baked into a small stepped
+  // approximation at export time (see shadowBandLiteral()/glowRingLiteral() in the studio's
+  // cppExport.ts). All-sclera / all-background respectively means the effect is off
+  // (Shadow/Glow Intensity was 0) — eyesFillShadowBand()/eyesFillGlowRings() below skip
+  // drawing entirely in that case.
+  uint16_t shadowBand[EYE_SHADOW_STEPS]; // top-of-eye gradient, step 0 = strongest (top) .. last = pure sclera
+  uint16_t glowRing[EYE_GLOW_RINGS]; // outer halo, ring 0 = outermost/faintest .. last = innermost/strongest
+};
+
+// One playable animation, bundled into a single value so PlayAnimation() below only needs
+// one argument instead of the three (frames, count, loop) eyesPlayAnimation() itself needs.
+struct EyeAnimation {
+  const EyeFrame* frames;
+  uint16_t count;
+  bool loop;
 };
 
 // ---- Colors -----------------------------------------------------------
@@ -895,6 +1120,8 @@ ${project.animations.map(exportAnimation).join('\n\n')}
 // ---- Expressions (static poses) -------------------------------------------
 
 ${project.expressions.map(exportExpression).join('\n\n')}
+
+${exportQuickReference(project)}
 
 ${exportDemo(project)}
 
