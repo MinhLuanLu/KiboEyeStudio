@@ -1,4 +1,4 @@
-import type { EyeParams } from '@/types'
+import type { CustomPupilShape, EyeParams } from '@/types'
 import { applyDisplayMask, drawBezel, type DisplayMaskOptions } from './displayMask'
 import { drawEye, DEFAULT_EYE_THEME, type EyeTheme } from './drawEye'
 
@@ -10,6 +10,10 @@ export interface FaceRenderOptions extends DisplayMaskOptions {
   rightParams?: EyeParams
   /** Right eye's theme, when it differs from `theme`. Omit to mirror `theme`. */
   rightTheme?: EyeTheme
+  /** project.customPupilShapes — resolved by pupilCustomShapeId when either eye's pupilShape
+   * is 'custom'. Omit (defaults to []) wherever a custom pupil shape can't apply — drawEye
+   * falls back to a circle for 'custom' with no match, so this is safe to leave out. */
+  customShapes?: CustomPupilShape[]
 }
 
 /** Renders the full display face onto a `width`x`height` canvas: background fill, shape
@@ -19,7 +23,7 @@ export interface FaceRenderOptions extends DisplayMaskOptions {
  * per-eye divergence (animations, idle, reference-image preview) can ignore the right*
  * options entirely and get the old symmetric-pair behavior unchanged. */
 export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, options: FaceRenderOptions): void {
-  const { width, height, theme = DEFAULT_EYE_THEME, backgroundColor, rightParams = params, rightTheme = theme } = options
+  const { width, height, theme = DEFAULT_EYE_THEME, backgroundColor, rightParams = params, rightTheme = theme, customShapes = [] } = options
   applyDisplayMask(ctx, options)
 
   const cx = width / 2
@@ -29,12 +33,12 @@ export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, opt
 
   ctx.save()
   ctx.translate(cx - halfLeft, cy)
-  drawEye(ctx, params, theme, false, backgroundColor)
+  drawEye(ctx, params, theme, false, backgroundColor, customShapes)
   ctx.restore()
 
   ctx.save()
   ctx.translate(cx + halfRight, cy)
-  drawEye(ctx, rightParams, rightTheme, true, backgroundColor)
+  drawEye(ctx, rightParams, rightTheme, true, backgroundColor, customShapes)
   ctx.restore()
 
   ctx.restore() // lift the shape clip from applyDisplayMask

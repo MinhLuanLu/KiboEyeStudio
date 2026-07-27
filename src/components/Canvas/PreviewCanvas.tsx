@@ -134,7 +134,7 @@ export function PreviewCanvas() {
         timeMs = 0
       }
 
-      renderFace(ctx!, params, { ...state.project.display, theme, rightParams, rightTheme })
+      renderFace(ctx!, params, { ...state.project.display, theme, rightParams, rightTheme, customShapes: state.project.customPupilShapes })
 
       const fpsAccum = fpsAccumRef.current
       fpsAccum.frames += 1

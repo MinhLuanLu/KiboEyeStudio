@@ -10,6 +10,7 @@ const THUMB_BOX = 48
 function ExpressionThumb({ expr }: { expr: Expression }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const display = useStore((s) => s.project.display)
+  const customShapes = useStore((s) => s.project.customPupilShapes)
   const fitted = fitDisplayToBox(display, THUMB_BOX)
   const leftParams = expressionLeftParams(expr)
   const rightParams = expressionRightParams(expr)
@@ -18,8 +19,8 @@ function ExpressionThumb({ expr }: { expr: Expression }) {
   useEffect(() => {
     const ctx = ref.current?.getContext('2d')
     if (!ctx) return
-    renderFace(ctx, leftParams, { ...fitted, theme: leftColors, rightParams, rightTheme: rightColors })
-  }, [leftParams, rightParams, leftColors, rightColors, fitted])
+    renderFace(ctx, leftParams, { ...fitted, theme: leftColors, rightParams, rightTheme: rightColors, customShapes })
+  }, [leftParams, rightParams, leftColors, rightColors, fitted, customShapes])
   const borderRadius = fitted.shape === 'circle' ? '50%' : fitted.shape === 'rounded' ? `${fitted.cornerRadius}px` : '0px'
   return (
     <canvas

@@ -75,7 +75,8 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     timing: { ...DEFAULT_TIMING },
     animations,
     expressions,
-    visualReference
+    visualReference,
+    customPupilShapes: []
   }
 }
 
@@ -158,6 +159,13 @@ interface StoreState {
   // colors
   setColor: <K extends keyof EyeColors>(key: K, value: EyeColors[K]) => void
   applyGeneratedEye: (params: Partial<EyeParams>, colors: EyeColors, expressionName: string) => void
+
+  // pupil shapes
+  /** Appends a new custom pupil shape (already-normalized [-1,1] points — see
+   * normalizePoints() in pupilShapes.ts) to the project's reusable library and returns its
+   * id, so the caller can immediately select it via setEyeParam('pupilCustomShapeId', id). */
+  addCustomPupilShape: (name: string, points: [number, number][]) => string
+  deleteCustomPupilShape: (id: string) => void
 
   // visual reference (shared style inheritance — see types/index.ts)
   setVisualReferenceParam: <K extends keyof EyeParams>(key: K, value: EyeParams[K]) => void
@@ -407,6 +415,21 @@ export const useStore = create<StoreState>()(
         s.dirty = true
       }),
 
+    addCustomPupilShape: (name, points) => {
+      const id = nanoid(8)
+      set((s) => {
+        s.project.customPupilShapes.push({ id, name, points })
+        s.dirty = true
+      })
+      return id
+    },
+
+    deleteCustomPupilShape: (id) =>
+      set((s) => {
+        s.project.customPupilShapes = s.project.customPupilShapes.filter((shape) => shape.id !== id)
+        s.dirty = true
+      }),
+
     setVisualReferenceParam: (key, value) =>
       set((s) => {
         const vr = s.project.visualReference
@@ -556,10 +579,15 @@ export const useStore = create<StoreState>()(
           if (!expr) return
           expr.styleOverrides = expr.styleOverrides.filter((f) => f !== field)
           if (isParamField) {
-            const f = field as keyof EyeParams
-            expr.params[f] = vr.params[f]
-            if (expr.leftParams) expr.leftParams[f] = (vr.paramsLeftOverride ?? vr.params)[f]
-            if (expr.rightParams) expr.rightParams[f] = (vr.paramsRightOverride ?? vr.params)[f]
+            // EyeParams mixes number and string/string|null (pupilShape/pupilCustomShapeId)
+            // fields, so a generic keyof-indexed assignment needs a loosened view here — same
+            // reasoning as the EyeColors cast just below.
+            const baseValue = (vr.params as unknown as Record<string, number | string | null>)[field]
+            const leftValue = ((vr.paramsLeftOverride ?? vr.params) as unknown as Record<string, number | string | null>)[field]
+            const rightValue = ((vr.paramsRightOverride ?? vr.params) as unknown as Record<string, number | string | null>)[field]
+            ;(expr.params as unknown as Record<string, number | string | null>)[field] = baseValue
+            if (expr.leftParams) (expr.leftParams as unknown as Record<string, number | string | null>)[field] = leftValue
+            if (expr.rightParams) (expr.rightParams as unknown as Record<string, number | string | null>)[field] = rightValue
           } else if (isColorField) {
             // EyeColors mixes string (hex colors) and number (intensities/opacity/width)
             // fields, so a generic keyof-indexed assignment needs a loosened view here —
@@ -577,7 +605,8 @@ export const useStore = create<StoreState>()(
           if (!kf) return
           kf.styleOverrides = kf.styleOverrides.filter((f) => f !== field)
           if (isParamField) {
-            kf.params[field as keyof EyeParams] = vr.params[field as keyof EyeParams]
+            ;(kf.params as unknown as Record<string, number | string | null>)[field] =
+              (vr.params as unknown as Record<string, number | string | null>)[field]
           }
         }
         s.dirty = true

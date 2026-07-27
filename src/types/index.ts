@@ -12,6 +12,15 @@ export interface EyeParams {
   pupilY: number
   /** Pupil's own tilt, independent of the eye's rotation — 0-360°. */
   pupilRotation: number
+  /** Which outline the pupil renders as. 'circle'/'oval' both draw via the same ellipse path
+   * (identical rendering) — 'circle' is purely a UI convenience that snaps pupilWidth/Height
+   * equal when selected; the renderer never distinguishes them. Every other value draws a
+   * shared normalized polygon from src/renderer/pupilShapes.ts, scaled/rotated/positioned by
+   * pupilWidth/Height/X/Y/Rotation exactly like the ellipse is today. Not numerically
+   * interpolatable — see lerpParams()'s explicit step-at-midpoint handling in interpolate.ts. */
+  pupilShape: PupilShapeId
+  /** Id into Project.customPupilShapes — only meaningful when pupilShape === 'custom'. */
+  pupilCustomShapeId: string | null
   upperEyelid: number
   lowerEyelid: number
   /** Tilts each lid's covering edge independently, -45..45°. */
@@ -25,6 +34,21 @@ export interface EyeParams {
   highlightSize: number
 }
 
+/** Built-in pupil outlines plus 'custom' (an imported SVG shape, referenced by
+ * EyeParams.pupilCustomShapeId). 'circle' and 'oval' render identically (see
+ * EyeParams.pupilShape) — kept as separate ids only so the shape picker can offer both. */
+export type PupilShapeId = 'circle' | 'oval' | 'heart' | 'star' | 'diamond' | 'square' | 'triangle' | 'custom'
+
+/** A user-imported pupil shape, normalized to a [-1,1]-centered bounding box — the same space
+ * every built-in polygon shape in src/renderer/pupilShapes.ts uses, so the renderer and C++
+ * export need exactly one "draw a polygon pupil" code path regardless of built-in vs. custom.
+ * Reusable across any number of expressions/keyframes (referenced by id, not copied). */
+export interface CustomPupilShape {
+  id: string
+  name: string
+  points: [number, number][]
+}
+
 export interface EyeColors {
   sclera: string
   iris: string
@@ -36,6 +60,9 @@ export interface EyeColors {
   shadowIntensity: number
   glowIntensity: number
   borderOpacity: number
+  /** RGB565 has no alpha channel — pre-blended against the iris at export time into a single
+   * flat color, same pattern as borderOpacity (see colorSetLiteral() in cppExport.ts). */
+  pupilOpacity: number
   /** Ring thickness in device pixels. Was a fixed constant (3px, matched between preview and
    * export) until the Visual Reference system made it an adjustable, shared style property. */
   borderWidth: number
@@ -156,6 +183,8 @@ export const STYLE_EYE_PARAM_FIELDS: (keyof EyeParams)[] = [
   'irisHeight',
   'pupilWidth',
   'pupilHeight',
+  'pupilShape',
+  'pupilCustomShapeId',
   'upperEyelidCurvature',
   'lowerEyelidCurvature',
   'highlightX',
@@ -179,7 +208,8 @@ export const STYLE_EYE_COLOR_FIELDS: (keyof EyeColors)[] = [
   'shadowIntensity',
   'glowIntensity',
   'borderOpacity',
-  'borderWidth'
+  'borderWidth',
+  'pupilOpacity'
 ]
 
 export interface VisualReferenceStyle {
@@ -221,10 +251,11 @@ export function computeStyleOverrides(params: EyeParams, colors: EyeColors | nul
 }
 
 /** Copies every Visual-Reference-eligible EyeParams field from `vr` into `target` EXCEPT
- * fields listed in `overrides` — mutates `target` in place (called from Immer producers). */
+ * fields listed in `overrides` — mutates `target` in place (called from Immer producers).
+ * Mostly-numeric fields, plus pupilShape/pupilCustomShapeId (string/string|null). */
 export function applyStyleToParams(target: EyeParams, vr: EyeParams, overrides: string[]): void {
-  const t = target as unknown as Record<string, number>
-  const v = vr as unknown as Record<string, number>
+  const t = target as unknown as Record<string, number | string | null>
+  const v = vr as unknown as Record<string, number | string | null>
   for (const f of STYLE_EYE_PARAM_FIELDS) {
     if (!overrides.includes(f)) t[f] = v[f]
   }
@@ -259,6 +290,8 @@ export interface Project {
   expressions: Expression[]
   /** The project's single shared default appearance — see VisualReferenceStyle below. */
   visualReference: VisualReferenceStyle
+  /** Reusable library of imported custom pupil shapes — see CustomPupilShape above. */
+  customPupilShapes: CustomPupilShape[]
 }
 
 export type PlaybackMode = 'design' | 'animate' | 'idle'
@@ -309,6 +342,8 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   pupilX: 0,
   pupilY: 0,
   pupilRotation: 0,
+  pupilShape: 'circle',
+  pupilCustomShapeId: null,
   upperEyelid: 0,
   lowerEyelid: 0,
   upperEyelidTilt: 0,
@@ -331,14 +366,16 @@ export const DEFAULT_EYE_COLORS: EyeColors = {
   shadowIntensity: 30,
   glowIntensity: 25,
   borderOpacity: 5,
-  borderWidth: 3
+  borderWidth: 3,
+  pupilOpacity: 100
 }
 
 export const EYE_COLOR_RANGES = {
   shadowIntensity: [0, 100] as [number, number],
   glowIntensity: [0, 100] as [number, number],
   borderOpacity: [0, 100] as [number, number],
-  borderWidth: [0, 12] as [number, number]
+  borderWidth: [0, 12] as [number, number],
+  pupilOpacity: [0, 100] as [number, number]
 }
 
 export function defaultVisualReference(): VisualReferenceStyle {
@@ -395,7 +432,10 @@ export const DEFAULT_TIMING: GlobalTiming = {
   breathingAmount: 20
 }
 
-export const EYE_PARAM_RANGES: Record<keyof EyeParams, [number, number]> = {
+// pupilShape/pupilCustomShapeId are deliberately excluded — they're not numeric-range fields
+// (see EyeParams.pupilShape's doc comment). The shape picker UI and jsonImport.ts's
+// isEyeParams() both branch around these two fields explicitly instead of reading a range.
+export const EYE_PARAM_RANGES: Record<Exclude<keyof EyeParams, 'pupilShape' | 'pupilCustomShapeId'>, [number, number]> = {
   width: [20, 130],
   height: [20, 130],
   radius: [0, 130],

@@ -1,4 +1,4 @@
-import type { Animation, EasingType, Expression, EyeColors, EyeParams, Project } from '@/types'
+import type { Animation, CustomPupilShape, EasingType, Expression, EyeColors, EyeParams, Project, PupilShapeId } from '@/types'
 import {
   clampFps,
   expressionLeftParams,
@@ -8,6 +8,7 @@ import {
   rightEyeColors
 } from '@/types'
 import { hexToRgb565, mixColors } from '@/lib/color'
+import { PUPIL_SHAPE_POLYGONS } from '@/renderer/pupilShapes'
 
 const EASING_ENUM: Record<EasingType, string> = {
   linear: 'EYE_EASE_LINEAR',
@@ -34,7 +35,41 @@ function clampDegrees(v: number): number {
   return Math.round(((v % 360) + 360) % 360)
 }
 
-function eyeFrameLiteral(params: EyeParams, durationMs: number, easing: EasingType, bezier?: [number, number, number, number]): string {
+// 'circle'/'oval' both map to EYE_PUPIL_SHAPE_ELLIPSE — see EyeParams.pupilShape's doc
+// comment in types/index.ts: they render identically, so the firmware only needs one enum
+// value between them.
+const PUPIL_SHAPE_ENUM: Record<PupilShapeId, string> = {
+  circle: 'EYE_PUPIL_SHAPE_ELLIPSE',
+  oval: 'EYE_PUPIL_SHAPE_ELLIPSE',
+  heart: 'EYE_PUPIL_SHAPE_HEART',
+  star: 'EYE_PUPIL_SHAPE_STAR',
+  diamond: 'EYE_PUPIL_SHAPE_DIAMOND',
+  square: 'EYE_PUPIL_SHAPE_SQUARE',
+  triangle: 'EYE_PUPIL_SHAPE_TRIANGLE',
+  custom: 'EYE_PUPIL_SHAPE_CUSTOM'
+}
+
+// Resolves pupilCustomShapeId to its position in project.customPupilShapes (exported as the
+// PUPIL_CUSTOM_SHAPES/PUPIL_CUSTOM_SHAPE_POINT_COUNTS tables — see exportPupilShapes()) so
+// eyesFillPupilShape() can index straight into them at runtime. 0 for a null/unmatched id is
+// safe even when it happens to collide with a real shape 0, because that field is only ever
+// read when pupilShape is actually 'custom' — eyeFrameLiteral() emits the correct
+// EYE_PUPIL_SHAPE_CUSTOM enum value alongside it in that case, and unmatched ids (e.g. a
+// custom shape deleted after being selected) are guarded at draw time exactly like the
+// studio preview's own fallback-to-ellipse in drawEye.ts.
+function resolveCustomShapeIndex(id: string | null, customShapes: CustomPupilShape[]): number {
+  if (!id) return 0
+  const index = customShapes.findIndex((s) => s.id === id)
+  return index >= 0 ? index : 0
+}
+
+function eyeFrameLiteral(
+  params: EyeParams,
+  durationMs: number,
+  easing: EasingType,
+  customShapes: CustomPupilShape[],
+  bezier?: [number, number, number, number]
+): string {
   const [bx1, by1, bx2, by2] = bezier ?? [42, 0, 58, 100]
   const fields = [
     Math.round(params.width),
@@ -63,7 +98,9 @@ function eyeFrameLiteral(params: EyeParams, durationMs: number, easing: EasingTy
     Math.round(bx1),
     Math.round(by1),
     Math.round(bx2),
-    Math.round(by2)
+    Math.round(by2),
+    PUPIL_SHAPE_ENUM[params.pupilShape],
+    resolveCustomShapeIndex(params.pupilCustomShapeId, customShapes)
   ]
   return `  { ${fields.join(', ')} }`
 }
@@ -72,9 +109,9 @@ function eyeFrameLiteral(params: EyeParams, durationMs: number, easing: EasingTy
 // low-level access) AND a single `EyeAnimation` wrapper bundling all three — that wrapper
 // is what PlayAnimation() below takes, so playing an animation is just `PlayAnimation(Anim_X)`
 // instead of threading three separate globals through eyesPlayAnimation() by hand.
-function exportAnimation(anim: Animation): string {
+function exportAnimation(anim: Animation, customShapes: CustomPupilShape[]): string {
   const ident = toIdentifier(anim.name)
-  const lines = anim.keyframes.map((k) => eyeFrameLiteral(k.params, k.duration, k.easing, k.customBezier))
+  const lines = anim.keyframes.map((k) => eyeFrameLiteral(k.params, k.duration, k.easing, customShapes, k.customBezier))
   return [
     `// ${anim.name}${anim.loop ? ' (loops)' : ' (plays once)'}`,
     `const EyeFrame Anim_${ident}_frames[] PROGMEM = {`,
@@ -90,15 +127,15 @@ function exportAnimation(anim: Animation): string {
 // Target: Left/Right editing at Save time) — otherwise a single shared constant is emitted,
 // exactly as before this feature existed, so existing (non-diverged) expressions export
 // identically to how they always have.
-function exportExpression(expr: Expression): string {
+function exportExpression(expr: Expression, customShapes: CustomPupilShape[]): string {
   const ident = toIdentifier(expr.name)
   if (!expressionShapeDiverges(expr)) {
-    return `const EyeFrame Expr_${ident} PROGMEM = \n${eyeFrameLiteral(expr.params, 0, 'linear')};`
+    return `const EyeFrame Expr_${ident} PROGMEM = \n${eyeFrameLiteral(expr.params, 0, 'linear', customShapes)};`
   }
   return [
     `// "${expr.name}" has different left/right eye shapes`,
-    `const EyeFrame Expr_${ident}_L PROGMEM = \n${eyeFrameLiteral(expressionLeftParams(expr), 0, 'linear')};`,
-    `const EyeFrame Expr_${ident}_R PROGMEM = \n${eyeFrameLiteral(expressionRightParams(expr), 0, 'linear')};`
+    `const EyeFrame Expr_${ident}_L PROGMEM = \n${eyeFrameLiteral(expressionLeftParams(expr), 0, 'linear', customShapes)};`,
+    `const EyeFrame Expr_${ident}_R PROGMEM = \n${eyeFrameLiteral(expressionRightParams(expr), 0, 'linear', customShapes)};`
   ].join('\n')
 }
 
@@ -106,15 +143,19 @@ function toRgb565Hex(hex: string): string {
   return `0x${hexToRgb565(hex).toString(16).toUpperCase().padStart(4, '0')}`
 }
 
-// RGB565 has no alpha channel, so Border Opacity is pre-blended here into a single flat
-// color against the display background (matching the ring trick eyesDrawEye uses below):
-// 0% -> exactly the background color (invisible ring), 100% -> the pure border color.
+// RGB565 has no alpha channel, so Border Opacity and Pupil Opacity are both pre-blended here
+// into single flat colors: border against the display background (matching the ring trick
+// eyesDrawEye uses below) — 0% -> exactly the background color (invisible ring), 100% -> the
+// pure border color; pupil against the iris (what it visually sits on top of) — 0% -> the
+// pupil becomes invisible against the iris, 100% -> the pure pupil color, same idea Highlight
+// uses in the studio preview (drawn at a fixed 92% alpha over whatever's beneath it).
 function colorSetLiteral(colors: EyeColors, backgroundColor: string): string {
   const borderBlend = mixColors(backgroundColor, colors.border, colors.borderOpacity / 100)
+  const pupilBlend = mixColors(colors.iris, colors.pupil, colors.pupilOpacity / 100)
   const fields = [
     toRgb565Hex(colors.sclera),
     toRgb565Hex(colors.iris),
-    toRgb565Hex(colors.pupil),
+    toRgb565Hex(pupilBlend),
     toRgb565Hex(colors.highlight),
     toRgb565Hex(colors.shadow),
     toRgb565Hex(colors.glow),
@@ -136,8 +177,8 @@ function exportColors(project: Project): string {
   const lines = [
     `#define EYE_COLOR_BACKGROUND ${toRgb565Hex(display.backgroundColor)} // RGB565 — Display panel's background color`,
     ``,
-    `// sclera, iris, pupil, highlight, shadow, glow, border, borderWidth (border already has`,
-    `// Border Opacity pre-blended in — RGB565 has no alpha channel).`,
+    `// sclera, iris, pupil, highlight, shadow, glow, border, borderWidth (border and pupil`,
+    `// already have Border/Pupil Opacity pre-blended in — RGB565 has no alpha channel).`,
     `const EyeColorSet EYE_COLORS_LEFT = ${colorSetLiteral(left, display.backgroundColor)};`
   ]
   if (same) {
@@ -145,6 +186,77 @@ function exportColors(project: Project): string {
   } else {
     lines.push(`const EyeColorSet EYE_COLORS_RIGHT = ${colorSetLiteral(right, display.backgroundColor)};`)
   }
+  return lines.join('\n')
+}
+
+// Must be >= the largest point count any pupil polygon can have: the built-in shapes in
+// pupilShapes.ts top out at HEART_SAMPLES (40), and custom SVG imports are always exactly
+// SAMPLE_COUNT (48) points (see svgShapeImport.ts) — 48 covers both with room to spare. Sized
+// once here rather than per-shape so eyesFillPolygonInEye()'s fixed-size scratch buffers
+// (PLAYER_CODE) have one constant to agree with.
+const MAX_PUPIL_POLYGON_POINTS = 48
+
+// Built-in polygon shapes (everything in PUPIL_SHAPE_POLYGONS except the null entries —
+// circle/oval draw via the existing ellipse path, and custom shapes come from the project's
+// own library instead), keyed by the identifier suffix used in both the enum and table names.
+const BUILTIN_POLYGON_SHAPES: { key: string; polygon: readonly (readonly [number, number])[] }[] = (
+  ['heart', 'star', 'diamond', 'square', 'triangle'] as const
+).map((key) => ({ key, polygon: PUPIL_SHAPE_POLYGONS[key]! }))
+
+// Normalized [-1,1] points scaled ×100 into int8_t range (matching the byte-oriented
+// convention already used for pupilX/pupilY etc.) — every point in every shape here is
+// guaranteed within that range by construction (normalizePoints() caps the largest half-
+// extent at exactly 1), so clampByte() below never actually needs to clamp, just round.
+function pupilShapeTableLiteral(name: string, points: readonly (readonly [number, number])[]): string {
+  const rows = points.map(([x, y]) => `  { ${clampByte(x * 100)}, ${clampByte(y * 100)} }`)
+  return [`const int8_t ${name}[][2] PROGMEM = {`, rows.join(',\n'), `};`, `const uint8_t ${name}_COUNT = ${points.length};`].join('\n')
+}
+
+// Every non-ellipse pupil shape (built-in and custom) as a fixed-size int8_t point table,
+// plus the enum eyeFrameLiteral() emits into EyeFrame.pupilShape. Placed before PLAYER_CODE
+// in the generated header (see generateCppHeader()) since eyesFillPupilShape() there
+// references these tables directly — C++ needs them declared first, same as every struct/
+// #define PLAYER_CODE already depends on.
+function exportPupilShapes(project: Project): string {
+  const customShapes = project.customPupilShapes
+  const lines: string[] = [
+    'enum EyePupilShape : uint8_t {',
+    '  EYE_PUPIL_SHAPE_ELLIPSE = 0,',
+    '  EYE_PUPIL_SHAPE_HEART,',
+    '  EYE_PUPIL_SHAPE_STAR,',
+    '  EYE_PUPIL_SHAPE_DIAMOND,',
+    '  EYE_PUPIL_SHAPE_SQUARE,',
+    '  EYE_PUPIL_SHAPE_TRIANGLE,',
+    '  EYE_PUPIL_SHAPE_CUSTOM',
+    '};',
+    '',
+    `#define EYE_MAX_PUPIL_POLYGON_POINTS ${MAX_PUPIL_POLYGON_POINTS}`,
+    ''
+  ]
+  for (const { key, polygon } of BUILTIN_POLYGON_SHAPES) {
+    lines.push(`// ${key[0].toUpperCase()}${key.slice(1)} pupil shape`)
+    lines.push(pupilShapeTableLiteral(`PUPIL_SHAPE_${key.toUpperCase()}`, polygon))
+    lines.push('')
+  }
+
+  lines.push('// Custom pupil shapes imported in the studio (Pupil Shape picker -> Import SVG).')
+  if (customShapes.length > 0) {
+    customShapes.forEach((s, i) => {
+      lines.push(`// "${s.name}"`)
+      lines.push(pupilShapeTableLiteral(`PUPIL_CUSTOM_SHAPE_${i}`, s.points))
+    })
+    lines.push(`const int8_t (* const PUPIL_CUSTOM_SHAPES[])[2] = { ${customShapes.map((_, i) => `PUPIL_CUSTOM_SHAPE_${i}`).join(', ')} };`)
+    lines.push(
+      `const uint8_t PUPIL_CUSTOM_SHAPE_POINT_COUNTS[] = { ${customShapes.map((_, i) => `PUPIL_CUSTOM_SHAPE_${i}_COUNT`).join(', ')} };`
+    )
+  } else {
+    lines.push('// (none in this project — these stay empty/unused; eyesFillPupilShape() never')
+    lines.push('// indexes into them unless EyeFrame.pupilCustomShapeIndex < PUPIL_CUSTOM_SHAPE_COUNT.)')
+    lines.push('const int8_t (* const PUPIL_CUSTOM_SHAPES[])[2] = { nullptr };')
+    lines.push('const uint8_t PUPIL_CUSTOM_SHAPE_POINT_COUNTS[] = { 0 };')
+  }
+  lines.push(`const uint8_t PUPIL_CUSTOM_SHAPE_COUNT = ${customShapes.length};`)
+
   return lines.join('\n')
 }
 
@@ -225,6 +337,10 @@ struct LiveEye {
   float upperEyelidTilt, lowerEyelidTilt;
   float upperEyelidCurvature, lowerEyelidCurvature;
   float highlightX, highlightY, highlightSize;
+  // Not numeric, so not lerped like the fields above — eyesLerpFrame()/eyesLerpLive() step
+  // these at t=0.5 instead (see the studio's lerpParams() in interpolate.ts, same rule).
+  uint8_t pupilShape;
+  uint8_t pupilCustomShapeIndex;
 };
 
 // Shortest-path interpolation between two angles in degrees, wrapping through 0/360 rather
@@ -262,6 +378,8 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   r.highlightX = a.highlightX + (b.highlightX - a.highlightX) * t;
   r.highlightY = a.highlightY + (b.highlightY - a.highlightY) * t;
   r.highlightSize = a.highlightSize + (b.highlightSize - a.highlightSize) * t;
+  r.pupilShape = t < 0.5f ? a.pupilShape : b.pupilShape;
+  r.pupilCustomShapeIndex = t < 0.5f ? a.pupilCustomShapeIndex : b.pupilCustomShapeIndex;
   return r;
 }
 
@@ -291,6 +409,8 @@ inline LiveEye eyesLerpLive(const LiveEye& a, const LiveEye& b, float t) {
   r.highlightX = a.highlightX + (b.highlightX - a.highlightX) * t;
   r.highlightY = a.highlightY + (b.highlightY - a.highlightY) * t;
   r.highlightSize = a.highlightSize + (b.highlightSize - a.highlightSize) * t;
+  r.pupilShape = t < 0.5f ? a.pupilShape : b.pupilShape;
+  r.pupilCustomShapeIndex = t < 0.5f ? a.pupilCustomShapeIndex : b.pupilCustomShapeIndex;
   return r;
 }
 
@@ -394,6 +514,119 @@ inline void eyesFillEllipseInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t e
   }
 }
 
+// Fills a normalized [-1,1]-space polygon (int8_t points scaled x100 — see
+// pupilShapeTableLiteral() in the studio's cppExport.ts) transformed by rotationDeg/rx/ry/
+// ecx/ecy and clipped to the enclosing eye's own silhouette — the non-ellipse-shape
+// counterpart to eyesFillEllipseInEye() above, used for every pupil shape except the
+// circle/oval ellipse. Every shape here (built-in or a custom SVG import) is a simple,
+// non-self-intersecting closed polygon, so a standard even-odd scanline fill is exact: each
+// row's edge crossings are found, sorted, and filled pairwise, with each resulting span
+// additionally clipped to the eye's own boundary exactly like eyesFillEllipseInEye() does.
+// Vertices are transformed (rotate in normalized space, then scale by rx/ry, then translate
+// to ecx/ecy) once up front into fixed-size stack buffers — matches tracePolygonPath() in the
+// studio's drawEye.ts exactly, so preview and firmware always agree on where a rotated
+// non-uniform (rx != ry) polygon's corners land.
+template <typename T>
+inline void eyesFillPolygonInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eyeW, int16_t eyeH, int16_t eyeRadius,
+                                  int16_t ecx, int16_t ecy, int16_t rx, int16_t ry, float rotationDeg,
+                                  const int8_t points[][2], uint8_t count, uint16_t color) {
+  if (count < 3 || rx <= 0 || ry <= 0) return;
+  if (count > EYE_MAX_PUPIL_POLYGON_POINTS) count = EYE_MAX_PUPIL_POLYGON_POINTS;
+
+  float eyeHx = eyeW / 2.0f, eyeHy = eyeH / 2.0f;
+  float eyeRx = eyeRadius < eyeHx ? (float)eyeRadius : eyeHx;
+  float eyeRy = eyeRadius < eyeHy ? (float)eyeRadius : eyeHy;
+
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float c = cosf(rad), s = sinf(rad);
+
+  float wx[EYE_MAX_PUPIL_POLYGON_POINTS];
+  float wy[EYE_MAX_PUPIL_POLYGON_POINTS];
+  float minY = 1e9f, maxY = -1e9f;
+  for (uint8_t i = 0; i < count; i++) {
+    float nx = points[i][0] / 100.0f;
+    float ny = points[i][1] / 100.0f;
+    float rxp = nx * c - ny * s;
+    float ryp = nx * s + ny * c;
+    wx[i] = ecx + rxp * rx;
+    wy[i] = ecy + ryp * ry;
+    if (wy[i] < minY) minY = wy[i];
+    if (wy[i] > maxY) maxY = wy[i];
+  }
+
+  int16_t yStart = (int16_t)floorf(minY);
+  int16_t yEnd = (int16_t)ceilf(maxY);
+  float xs[EYE_MAX_PUPIL_POLYGON_POINTS];
+  for (int16_t y = yStart; y <= yEnd; y++) {
+    float scanY = y + 0.5f;
+    uint8_t xCount = 0;
+    for (uint8_t i = 0; i < count; i++) {
+      uint8_t j = (i + 1) % count;
+      float y1 = wy[i], y2 = wy[j];
+      if ((y1 <= scanY && y2 > scanY) || (y2 <= scanY && y1 > scanY)) {
+        float t = (scanY - y1) / (y2 - y1);
+        xs[xCount++] = wx[i] + t * (wx[j] - wx[i]);
+      }
+    }
+    // Insertion sort — xCount is always small (at most one crossing per edge).
+    for (uint8_t i = 1; i < xCount; i++) {
+      float key = xs[i];
+      int16_t k = (int16_t)i - 1;
+      while (k >= 0 && xs[k] > key) { xs[k + 1] = xs[k]; k--; }
+      xs[k + 1] = key;
+    }
+
+    float eyeHalfW = eyesEyeHalfWidthAt((float)(y - eyeCy), eyeHx, eyeHy, eyeRx, eyeRy);
+    if (eyeHalfW < 0) continue;
+
+    for (uint8_t i = 0; (uint16_t)i + 1 < xCount; i += 2) {
+      float xLo = max(xs[i], (float)eyeCx - eyeHalfW);
+      float xHi = min(xs[i + 1], (float)eyeCx + eyeHalfW);
+      if (xHi < xLo) continue;
+      int16_t ixLo = (int16_t)(xLo + 0.5f);
+      int16_t ixHi = (int16_t)(xHi + 0.5f);
+      if (ixHi < ixLo) continue;
+      gfx.drawFastHLine(ixLo, y, ixHi - ixLo + 1, color);
+    }
+  }
+}
+
+// Dispatches to the right pupil fill for a given EyePupilShape — ellipse (circle/oval) keeps
+// the analytic eyesFillEllipseInEye() path unchanged; every other shape looks up its point
+// table (built-in, or the project's own PUPIL_CUSTOM_SHAPES library for EYE_PUPIL_SHAPE_CUSTOM)
+// and fills it via eyesFillPolygonInEye() above. A custom shape whose index no longer exists
+// (e.g. deleted in the studio after this pose was saved) falls back to the ellipse rather than
+// skip drawing the pupil entirely — same fallback the studio preview's drawEye.ts uses.
+template <typename T>
+inline void eyesFillPupilShape(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eyeW, int16_t eyeH, int16_t eyeRadius,
+                                int16_t ecx, int16_t ecy, int16_t rx, int16_t ry, float rotationDeg,
+                                uint8_t shape, uint8_t customIndex, uint16_t color) {
+  if (shape == EYE_PUPIL_SHAPE_ELLIPSE) {
+    eyesFillEllipseInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, color);
+    return;
+  }
+  const int8_t (*points)[2] = nullptr;
+  uint8_t count = 0;
+  switch (shape) {
+    case EYE_PUPIL_SHAPE_HEART: points = PUPIL_SHAPE_HEART; count = PUPIL_SHAPE_HEART_COUNT; break;
+    case EYE_PUPIL_SHAPE_STAR: points = PUPIL_SHAPE_STAR; count = PUPIL_SHAPE_STAR_COUNT; break;
+    case EYE_PUPIL_SHAPE_DIAMOND: points = PUPIL_SHAPE_DIAMOND; count = PUPIL_SHAPE_DIAMOND_COUNT; break;
+    case EYE_PUPIL_SHAPE_SQUARE: points = PUPIL_SHAPE_SQUARE; count = PUPIL_SHAPE_SQUARE_COUNT; break;
+    case EYE_PUPIL_SHAPE_TRIANGLE: points = PUPIL_SHAPE_TRIANGLE; count = PUPIL_SHAPE_TRIANGLE_COUNT; break;
+    case EYE_PUPIL_SHAPE_CUSTOM:
+      if (customIndex < PUPIL_CUSTOM_SHAPE_COUNT) {
+        points = PUPIL_CUSTOM_SHAPES[customIndex];
+        count = PUPIL_CUSTOM_SHAPE_POINT_COUNTS[customIndex];
+      }
+      break;
+  }
+  if (points) {
+    eyesFillPolygonInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, points, count, color);
+  } else {
+    eyesFillEllipseInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, color);
+  }
+}
+
 // Fills one eyelid: a background-colored region from the eye's own top/bottom edge down to
 // a cutoff line that combines a linear tilt (shear) and a symmetric curvature offset —
 //   taper(x)  = (1 - (x/halfW)^2)^2      for |x| <= halfW, else 0
@@ -483,9 +716,12 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
 
   // Both clipped to the eye's own silhouette (see eyesFillEllipseInEye) since Pupil X/Y can
   // now push the shared iris/pupil center out toward the eye's edge. The iris never rotates
-  // (0deg); the pupil uses its own independent Pupil Rotation.
+  // (0deg) and stays a plain ellipse; the pupil uses its own independent Pupil Rotation and
+  // whatever shape e.pupilShape selects — see eyesFillPupilShape() above.
   if (irisRX > 0 && irisRY > 0) eyesFillEllipseInEye(gfx, cx, cy, w, h, radius, px, py, irisRX, irisRY, 0.0f, colors.iris);
-  if (pupilRX > 0 && pupilRY > 0) eyesFillEllipseInEye(gfx, cx, cy, w, h, radius, px, py, pupilRX, pupilRY, e.pupilRotation, colors.pupil);
+  if (pupilRX > 0 && pupilRY > 0) {
+    eyesFillPupilShape(gfx, cx, cy, w, h, radius, px, py, pupilRX, pupilRY, e.pupilRotation, e.pupilShape, e.pupilCustomShapeIndex, colors.pupil);
+  }
 
   float hlBaseX = pupilRX > 0 ? pupilRX : irisRX;
   float hlBaseY = pupilRY > 0 ? pupilRY : irisRY;
@@ -832,14 +1068,24 @@ export function generateCppHeader(project: Project): string {
  *   width, height, radius, rotation, distance, irisWidth, irisHeight, pupilWidth,
  *   pupilHeight, pupilX, pupilY, pupilRotation, upperEyelid, lowerEyelid, upperEyelidTilt,
  *   lowerEyelidTilt, upperEyelidCurvature, lowerEyelidCurvature, highlightX, highlightY,
- *   highlightSize, durationMs, easing, bezierX1, bezierY1, bezierX2, bezierY2
+ *   highlightSize, durationMs, easing, bezierX1, bezierY1, bezierX2, bezierY2, pupilShape,
+ *   pupilCustomShapeIndex
  * (bezier fields only matter when easing == EYE_EASE_BEZIER, scaled 0-100)
  *
  * Pupil X/Y can reach +-100 (the pupil's center can travel all the way to the eye's own
- * edge) and Pupil Rotation spins the pupil ellipse 0-360deg independent of the eye's own
- * rotation. Both are clipped to the eye's silhouette in eyesFillEllipseInEye() below, so the
- * pupil never paints outside the eye no matter how far it's pushed or rotated — matching the
- * studio preview, which gets the same clipping for free from its canvas clip path.
+ * edge) and Pupil Rotation spins the pupil 0-360deg independent of the eye's own rotation.
+ * Both are clipped to the eye's silhouette (eyesFillEllipseInEye()/eyesFillPolygonInEye()
+ * below), so the pupil never paints outside the eye no matter how far it's pushed or
+ * rotated — matching the studio preview, which gets the same clipping for free from its
+ * canvas clip path.
+ *
+ * Pupil Shape (EyePupilShape, see "Pupil Shapes" further down) picks what outline the pupil
+ * draws as: an ellipse (circle/oval — the default) or one of heart/star/diamond/square/
+ * triangle/a custom SVG import, each a fixed point table filled via eyesFillPolygonInEye().
+ * It isn't numerically interpolatable, so a keyframe transition between two different shapes
+ * snaps at the transition's midpoint rather than blending (see eyesLerpFrame()/eyesLerpLive()
+ * below) — everything else about the pupil (size, position, rotation) keeps animating
+ * smoothly through that snap exactly as it always has.
  *
  * Eyelid Tilt (-45..45deg) shears each lid's covering edge independently of the other; Eyelid
  * Curvature (-100..100) controls how pronounced its soft rounded edge is: 0 is flat/neutral,
@@ -851,7 +1097,8 @@ export function generateCppHeader(project: Project): string {
  *
  * Eye colors are exported below as RGB565 #defines (sclera/iris/pupil/highlight/shadow/
  * glow/border) matching the studio's Color panel. EYE_COLOR_BORDER already has Border
- * Opacity pre-blended into it (RGB565 has no alpha channel) — see eyesDrawEye() below.
+ * Opacity pre-blended into it, and the pupil color already has Pupil Opacity pre-blended
+ * against the iris (RGB565 has no alpha channel) — see eyesDrawEye() below.
  *
  * EYE_TARGET_FPS / EYE_FRAME_DELAY_MS match the Display FPS set in the studio's Display
  * panel. eyesPlayAnimation() itself is time-based (millis()-driven), so it always plays at
@@ -963,6 +1210,8 @@ struct EyeFrame {
   uint16_t durationMs;
   uint8_t easing;
   int8_t bezierX1, bezierY1, bezierX2, bezierY2;
+  uint8_t pupilShape; // an EyePupilShape value — see the enum + shape tables below
+  uint8_t pupilCustomShapeIndex; // index into PUPIL_CUSTOM_SHAPES, only meaningful when pupilShape == EYE_PUPIL_SHAPE_CUSTOM
 };
 
 // One eye's full color palette (RGB565) plus its border thickness — the studio's Eye
@@ -990,17 +1239,21 @@ ${exportColors(project)}
 
 ${exportTiming(project.display)}
 
+// ---- Pupil Shapes -------------------------------------------------------
+
+${exportPupilShapes(project)}
+
 // ---- Player (easing, interpolation, drawing, playback) -----------------------
 
 ${PLAYER_CODE}
 
 // ---- Animations -----------------------------------------------------------
 
-${project.animations.map(exportAnimation).join('\n\n')}
+${project.animations.map((a) => exportAnimation(a, project.customPupilShapes)).join('\n\n')}
 
 // ---- Expressions (static poses) -------------------------------------------
 
-${project.expressions.map(exportExpression).join('\n\n')}
+${project.expressions.map((e) => exportExpression(e, project.customPupilShapes)).join('\n\n')}
 
 ${exportQuickReference(project)}
 

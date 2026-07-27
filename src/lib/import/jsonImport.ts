@@ -1,9 +1,30 @@
-import type { Animation, EyeParams } from '@/types'
-import { EYE_PARAM_RANGES } from '@/types'
+import type { Animation, EyeParams, PupilShapeId } from '@/types'
+import { DEFAULT_EYE_PARAMS, EYE_PARAM_RANGES } from '@/types'
 
+const PUPIL_SHAPE_IDS: PupilShapeId[] = ['circle', 'oval', 'heart', 'star', 'diamond', 'square', 'triangle', 'custom']
+
+// EYE_PARAM_RANGES only covers the numeric EyeParams fields (pupilShape/pupilCustomShapeId
+// are deliberately excluded — see its definition in types/index.ts), so this only checks
+// those; pupilShape/pupilCustomShapeId are validated and defaulted separately below in
+// normalizeImportedParams(), same reasoning persistence.ts's normalizeEyeParams() already
+// applies to project save/load.
 function isEyeParams(value: unknown): value is EyeParams {
   if (typeof value !== 'object' || value === null) return false
   return Object.keys(EYE_PARAM_RANGES).every((key) => typeof (value as Record<string, unknown>)[key] === 'number')
+}
+
+/** Fills in pupilShape/pupilCustomShapeId (added after this JSON export format already
+ * existed, so older exported/hand-authored animation files won't have them) and validates
+ * pupilShape against the known set — a garbage/foreign value here would otherwise reach
+ * cppExport.ts's PUPIL_SHAPE_ENUM lookup and silently emit `undefined` into the generated
+ * C++ literal instead of a valid enum identifier. */
+function normalizeImportedParams(params: EyeParams): EyeParams {
+  const shape = params.pupilShape
+  return {
+    ...params,
+    pupilShape: PUPIL_SHAPE_IDS.includes(shape) ? shape : DEFAULT_EYE_PARAMS.pupilShape,
+    pupilCustomShapeId: typeof params.pupilCustomShapeId === 'string' ? params.pupilCustomShapeId : null
+  }
 }
 
 /** Validates that a parsed JSON blob looks like an `Animation` (from our own export or a
@@ -24,6 +45,6 @@ export function parseAnimationJson(json: string): Animation {
     id: typeof data.id === 'string' ? data.id : '',
     name: typeof data.name === 'string' ? data.name : 'Imported Animation',
     loop: Boolean(data.loop),
-    keyframes: data.keyframes
+    keyframes: data.keyframes.map((kf: Animation['keyframes'][number]) => ({ ...kf, params: normalizeImportedParams(kf.params) }))
   }
 }

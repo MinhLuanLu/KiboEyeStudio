@@ -41,6 +41,13 @@ export function lerpParams(a: EyeParams, b: EyeParams, t: number): EyeParams {
   for (const key of EYE_PARAM_KEYS) {
     out[key] = key === 'pupilRotation' ? lerpAngleDeg(a[key], b[key], t) : a[key] + (b[key] - a[key]) * t
   }
+  // pupilShape/pupilCustomShapeId aren't numeric, so they can't lerp — step at the midpoint
+  // instead (matches eyesLerpFrame()/eyesLerpLive() in cppExport.ts, so a keyframe transition
+  // between two different pupil shapes snaps at the same instant in the studio preview and
+  // the exported firmware). Everything else (size/position/rotation) keeps animating smoothly
+  // through the snap exactly as before.
+  out.pupilShape = t < 0.5 ? a.pupilShape : b.pupilShape
+  out.pupilCustomShapeId = t < 0.5 ? a.pupilCustomShapeId : b.pupilCustomShapeId
   return out
 }
 

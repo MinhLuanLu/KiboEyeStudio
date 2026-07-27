@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid'
-import type { Animation, EditorState, Expression, EyeColors, EyeParams, EyeSide, PlaybackMode, Project, ProjectFile, VisualReferenceStyle } from '@/types'
+import type { Animation, CustomPupilShape, EditorState, Expression, EyeColors, EyeParams, EyeSide, PlaybackMode, Project, ProjectFile, VisualReferenceStyle } from '@/types'
 import {
   DEFAULT_DISPLAY,
   DEFAULT_EYE_COLORS,
@@ -39,6 +39,24 @@ function normalizeEyeColorsOverride(colors: Partial<EyeColors> | null | undefine
 function normalizeStyleOverrides(raw: unknown): string[] | null {
   if (!Array.isArray(raw)) return null
   return raw.filter((f): f is string => typeof f === 'string')
+}
+
+/** Backfills project.customPupilShapes for saves written before the pupil shape feature
+ * existed (Array.isArray guard covers `undefined` the same way the other normalize* helpers
+ * do) and drops any malformed entries rather than letting a hand-edited file crash the
+ * renderer/export with a shape missing `points`. */
+function normalizeCustomPupilShapes(raw: unknown): CustomPupilShape[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter((s): s is CustomPupilShape => {
+    return (
+      !!s &&
+      typeof s === 'object' &&
+      typeof s.id === 'string' &&
+      typeof s.name === 'string' &&
+      Array.isArray(s.points) &&
+      s.points.every((p: unknown) => Array.isArray(p) && p.length === 2 && typeof p[0] === 'number' && typeof p[1] === 'number')
+    )
+  })
 }
 
 /** Backfills fields added after a project/autosave was written (e.g. the old scalar
@@ -108,7 +126,8 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     timing: { ...DEFAULT_TIMING, ...(raw.timing ?? {}) },
     animations,
     expressions,
-    visualReference
+    visualReference,
+    customPupilShapes: normalizeCustomPupilShapes(raw.customPupilShapes)
   }
 }
 

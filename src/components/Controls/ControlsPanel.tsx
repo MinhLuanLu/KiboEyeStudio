@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { useStore, getActiveAnimation } from '@/state/store'
-import { effectiveEyeParams, effectiveVisualReferenceParams, EYE_PARAM_RANGES } from '@/types'
-import type { EyeParams } from '@/types'
+import { effectiveEyeParams, effectiveVisualReferenceParams, EYE_PARAM_RANGES, DEFAULT_EYE_PARAMS } from '@/types'
+import type { EyeParams, PupilShapeId } from '@/types'
 import { Slider } from '@/components/ui/Slider'
 import { EyeTargetSelector } from '@/components/ui/EyeTargetSelector'
 import { StyleFieldRow } from '@/components/ui/StyleFieldRow'
 import { PanelTabs } from '@/components/ui/PanelTabs'
+import { PupilShapePicker } from './PupilShapePicker'
 
 type ControlsTab = 'shape' | 'iris-pupil' | 'eyelids' | 'timing'
 
@@ -73,6 +74,26 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
     else setEyeParam(key, value)
   }
 
+  // 'circle' additionally snaps pupilWidth/pupilHeight equal (average of the current values) —
+  // a one-time UI convenience, not a locked/linked state: dragging Width or Height afterward
+  // moves independently exactly like it always has. Every other shape only ever touches
+  // pupilShape/pupilCustomShapeId.
+  const selectPupilShape = (shape: PupilShapeId, customShapeId: string | null) => {
+    setParam('pupilShape', shape)
+    setParam('pupilCustomShapeId', customShapeId)
+    if (shape === 'circle') {
+      const avg = Math.round((target.pupilWidth + target.pupilHeight) / 2)
+      setParam('pupilWidth', avg)
+      setParam('pupilHeight', avg)
+    }
+  }
+  const resetPupilShape = () => {
+    checkpoint()
+    selectPupilShape('circle', null)
+    setParam('pupilWidth', DEFAULT_EYE_PARAMS.pupilWidth)
+    setParam('pupilHeight', DEFAULT_EYE_PARAMS.pupilHeight)
+  }
+
   // Inherited/Custom indicators compare `target` against the current Visual Reference —
   // always shown for live editing (keyframe, expression, AND the plain base pose with
   // nothing selected) so it's never ambiguous whether the base pose is actually in sync with
@@ -91,6 +112,16 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
   const resetStyleField = (field: keyof EyeParams) => {
     checkpoint()
     setParam(field, vrReference[field])
+  }
+  // pupilShape/pupilCustomShapeId only mean something as a pair (a 'custom' shape id is
+  // meaningless without knowing it's 'custom', and two different custom ids both count as
+  // "diverged" even when pupilShape itself matches) — treated as one combined override/reset
+  // unit rather than two independent StyleFieldRow fields.
+  const pupilShapeOverridden = target.pupilShape !== vrReference.pupilShape || target.pupilCustomShapeId !== vrReference.pupilCustomShapeId
+  const resetPupilShapeStyle = () => {
+    checkpoint()
+    setParam('pupilShape', vrReference.pupilShape)
+    setParam('pupilCustomShapeId', vrReference.pupilCustomShapeId)
   }
 
   return (
@@ -149,6 +180,16 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
               <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('irisHeight')} onReset={() => resetStyleField('irisHeight')}>
                 <Slider label="Iris Height" value={target.irisHeight} min={EYE_PARAM_RANGES.irisHeight[0]} max={EYE_PARAM_RANGES.irisHeight[1]} onCommitStart={checkpoint} onChange={(v) => setParam('irisHeight', v)} />
               </StyleFieldRow>
+
+              <StyleFieldRow active={!!editingContext} overridden={pupilShapeOverridden} onReset={resetPupilShapeStyle}>
+                <div className="flex flex-col gap-2">
+                  <PupilShapePicker shape={target.pupilShape} customShapeId={target.pupilCustomShapeId} onSelectShape={selectPupilShape} />
+                  <button className="studio-btn self-start text-xs" onClick={resetPupilShape}>
+                    Reset to Default (Circle)
+                  </button>
+                </div>
+              </StyleFieldRow>
+
               <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('pupilWidth')} onReset={() => resetStyleField('pupilWidth')}>
                 <Slider label="Pupil Width" value={target.pupilWidth} min={EYE_PARAM_RANGES.pupilWidth[0]} max={EYE_PARAM_RANGES.pupilWidth[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilWidth', v)} />
               </StyleFieldRow>

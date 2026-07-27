@@ -1,6 +1,7 @@
-import type { EyeColors, EyeParams } from '@/types'
+import type { CustomPupilShape, EyeColors, EyeParams } from '@/types'
 import { DEFAULT_EYE_COLORS } from '@/types'
 import { mixColors, shadeColor } from '@/lib/color'
+import { PUPIL_SHAPE_POLYGONS, type PupilPolygon } from './pupilShapes'
 
 export type EyeTheme = EyeColors
 
@@ -41,6 +42,31 @@ function roundedRectPath(ctx: CanvasRenderingContext2D, w: number, h: number, ra
 }
 
 /**
+ * Traces a normalized [-1,1]-space polygon (see pupilShapes.ts) into the current path via a
+ * scale+rotate+translate transform — the same set of steps the pupil ellipse below already
+ * applies via ctx.scale()/ctx.arc(), just for a fixed point list instead of a unit circle, so
+ * a polygon pupil respects pupilWidth/Height/X/Y/Rotation exactly like the ellipse does.
+ */
+function tracePolygonPath(ctx: CanvasRenderingContext2D, polygon: PupilPolygon, cx: number, cy: number, rx: number, ry: number, rotationDeg: number): void {
+  const rad = (rotationDeg * Math.PI) / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  ctx.beginPath()
+  polygon.forEach(([px, py], i) => {
+    // Rotate in normalized space first, then scale by rx/ry — matches how the exported
+    // firmware's eyesFillPolygonInEye() transforms each vertex, so preview and export always
+    // agree on where a rotated non-uniform (rx != ry) polygon's corners land.
+    const rxp = px * cos - py * sin
+    const ryp = px * sin + py * cos
+    const x = cx + rxp * rx
+    const y = cy + ryp * ry
+    if (i === 0) ctx.moveTo(x, y)
+    else ctx.lineTo(x, y)
+  })
+  ctx.closePath()
+}
+
+/**
  * Draws a single eye centered at the current canvas origin (caller translates first).
  * `mirrorX` flips rotation/pupil/highlight horizontally so a left/right eye pair reads as
  * looking in the same world direction rather than toward/away from each other.
@@ -50,7 +76,8 @@ export function drawEye(
   params: EyeParams,
   theme: EyeTheme = DEFAULT_EYE_THEME,
   mirrorX = false,
-  backgroundColor = '#000000'
+  backgroundColor = '#000000',
+  customShapes: CustomPupilShape[] = []
 ): void {
   const {
     width,
@@ -64,6 +91,8 @@ export function drawEye(
     pupilX,
     pupilY,
     pupilRotation,
+    pupilShape,
+    pupilCustomShapeId,
     upperEyelid,
     lowerEyelid,
     upperEyelidTilt,
@@ -162,12 +191,25 @@ export function drawEye(
 
   // Pupil — rotates around its own center independent of the eye's own `rotation`. Like the
   // eye clip above, this is automatically confined inside the eye shape by the ctx.clip()
-  // already in effect, however far Pupil X/Y push it toward (or past) the edge.
+  // already in effect, however far Pupil X/Y push it toward (or past) the edge. 'circle' and
+  // 'oval' both keep the original ellipse path (RGB565 firmware has no alpha, so opacity is
+  // pre-blended into a flat color here too, matching the highlight's alpha look below and the
+  // border/glow "pre-blend at render/export time" pattern used throughout this renderer).
   if (pupilRX > 0.1 && pupilRY > 0.1) {
-    ctx.beginPath()
-    ctx.fillStyle = theme.pupil
-    ctx.ellipse(pcx, pcy, pupilRX, pupilRY, (pupilRotation * Math.PI) / 180, 0, Math.PI * 2)
-    ctx.fill()
+    const pupilFill = mixColors(theme.iris, theme.pupil, theme.pupilOpacity / 100)
+    const polygon =
+      pupilShape === 'custom'
+        ? (customShapes.find((s) => s.id === pupilCustomShapeId)?.points ?? null)
+        : PUPIL_SHAPE_POLYGONS[pupilShape]
+    ctx.fillStyle = pupilFill
+    if (polygon) {
+      tracePolygonPath(ctx, polygon, pcx, pcy, pupilRX, pupilRY, pupilRotation)
+      ctx.fill()
+    } else {
+      ctx.beginPath()
+      ctx.ellipse(pcx, pcy, pupilRX, pupilRY, (pupilRotation * Math.PI) / 180, 0, Math.PI * 2)
+      ctx.fill()
+    }
   }
 
   // Highlight glint, positioned relative to the pupil (or iris if the pupil is hidden) —

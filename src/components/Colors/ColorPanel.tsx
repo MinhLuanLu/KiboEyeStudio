@@ -80,6 +80,17 @@ export function ColorPanel({ editTarget = 'live' }: { editTarget?: 'live' | 'vis
             <StyleFieldRow active={editingContext} overridden={isStyleOverridden('pupil')} onReset={() => resetStyleField('pupil')}>
               <ColorField label="Pupil" value={colors.pupil} onCommitStart={checkpoint} onChange={(v) => setColor('pupil', v)} />
             </StyleFieldRow>
+            <StyleFieldRow active={editingContext} overridden={isStyleOverridden('pupilOpacity')} onReset={() => resetStyleField('pupilOpacity')}>
+              <Slider
+                label="Pupil Opacity"
+                value={colors.pupilOpacity}
+                min={EYE_COLOR_RANGES.pupilOpacity[0]}
+                max={EYE_COLOR_RANGES.pupilOpacity[1]}
+                suffix="%"
+                onCommitStart={checkpoint}
+                onChange={(v) => setColor('pupilOpacity', v)}
+              />
+            </StyleFieldRow>
             <StyleFieldRow active={editingContext} overridden={isStyleOverridden('highlight')} onReset={() => resetStyleField('highlight')}>
               <ColorField label="Highlight" value={colors.highlight} onCommitStart={checkpoint} onChange={(v) => setColor('highlight', v)} />
             </StyleFieldRow>
