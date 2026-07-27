@@ -87,7 +87,8 @@ export interface DevStats {
 
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
-export type LeftTab = 'animations' | 'expressions' | 'visual-reference'
+export type LeftTab = 'animations' | 'expressions'
+export type RightTab = 'controls' | 'colors' | 'display' | 'personality' | 'visual-reference'
 
 export interface ApplyVisualReferenceOptions {
   scope: 'all' | 'expressions' | 'animations' | 'selected'
@@ -127,6 +128,10 @@ interface StoreState {
    * component state) so actions like the toolbar's "Import Reference..." button can drive
    * navigation into it directly. */
   leftTab: LeftTab
+  /** Which top-level section the right editor panel shows — same reasoning as leftTab: the
+   * toolbar's "Import Reference..." button needs to be able to jump straight to the Visual
+   * Reference tab here. */
+  rightTab: RightTab
 
   past: Project[]
   future: Project[]
@@ -213,6 +218,7 @@ interface StoreState {
   setReferenceImportOpen: (open: boolean) => void
   setGuideOpen: (open: boolean) => void
   setLeftTab: (tab: LeftTab) => void
+  setRightTab: (tab: RightTab) => void
   openReferenceImport: () => void
 }
 
@@ -242,6 +248,7 @@ export const useStore = create<StoreState>()(
     referenceImportOpen: false,
     guideOpen: false,
     leftTab: 'animations',
+    rightTab: 'controls',
 
     past: [],
     future: [],
@@ -402,13 +409,35 @@ export const useStore = create<StoreState>()(
 
     setVisualReferenceParam: (key, value) =>
       set((s) => {
-        s.project.visualReference.params[key] = value
+        const vr = s.project.visualReference
+        if (s.eyeTarget === 'both') {
+          vr.params[key] = value
+          vr.paramsLeftOverride = null
+          vr.paramsRightOverride = null
+        } else if (s.eyeTarget === 'left') {
+          if (!vr.paramsLeftOverride) vr.paramsLeftOverride = { ...vr.params }
+          vr.paramsLeftOverride[key] = value
+        } else {
+          if (!vr.paramsRightOverride) vr.paramsRightOverride = { ...vr.params }
+          vr.paramsRightOverride[key] = value
+        }
         s.dirty = true
       }),
 
     setVisualReferenceColor: (key, value) =>
       set((s) => {
-        s.project.visualReference.colors[key] = value
+        const vr = s.project.visualReference
+        if (s.eyeTarget === 'both') {
+          vr.colors[key] = value
+          vr.colorsLeftOverride = null
+          vr.colorsRightOverride = null
+        } else if (s.eyeTarget === 'left') {
+          if (!vr.colorsLeftOverride) vr.colorsLeftOverride = { ...vr.colors }
+          vr.colorsLeftOverride[key] = value
+        } else {
+          if (!vr.colorsRightOverride) vr.colorsRightOverride = { ...vr.colors }
+          vr.colorsRightOverride[key] = value
+        }
         s.dirty = true
       }),
 
@@ -420,6 +449,16 @@ export const useStore = create<StoreState>()(
     applyVisualReference: (options) =>
       set((s) => {
         const vr = s.project.visualReference
+        // Resolves whichever of the VR's own params/colors is effective for a given eye —
+        // the shared base for 'base', or that eye's VR override if one was authored (see
+        // VisualReferenceStyle.paramsLeftOverride/paramsRightOverride/colorsLeftOverride/
+        // colorsRightOverride in types/index.ts). Lets Apply carry the VR's own per-eye
+        // divergence (if any) into the matching per-eye target instead of flattening
+        // everything to the shared base.
+        const vrParamsFor = (side: 'base' | 'left' | 'right'): EyeParams =>
+          side === 'left' ? (vr.paramsLeftOverride ?? vr.params) : side === 'right' ? (vr.paramsRightOverride ?? vr.params) : vr.params
+        const vrColorsFor = (side: 'base' | 'left' | 'right'): EyeColors =>
+          side === 'left' ? (vr.colorsLeftOverride ?? vr.colors) : side === 'right' ? (vr.colorsRightOverride ?? vr.colors) : vr.colors
 
         // The shared base pose has no protected identity of its own to worry about — UNLESS
         // it's currently mirroring a selected Expression (applyExpression copies the
@@ -438,44 +477,44 @@ export const useStore = create<StoreState>()(
         const baseOverrides = options.overrideMode === 'replace' ? [] : liveExpr ? liveExpr.styleOverrides : []
 
         if (options.eyeTarget === 'both') {
-          applyStyleToParams(s.project.eyeBase, vr.params, baseOverrides)
-          applyStyleToColors(s.project.colors, vr.colors, baseOverrides)
-          if (s.project.eyeLeftOverride) applyStyleToParams(s.project.eyeLeftOverride, vr.params, baseOverrides)
-          if (s.project.eyeRightOverride) applyStyleToParams(s.project.eyeRightOverride, vr.params, baseOverrides)
-          if (s.project.colorsLeftOverride) applyStyleToColors(s.project.colorsLeftOverride, vr.colors, baseOverrides)
-          if (s.project.colorsRightOverride) applyStyleToColors(s.project.colorsRightOverride, vr.colors, baseOverrides)
+          applyStyleToParams(s.project.eyeBase, vrParamsFor('base'), baseOverrides)
+          applyStyleToColors(s.project.colors, vrColorsFor('base'), baseOverrides)
+          if (s.project.eyeLeftOverride) applyStyleToParams(s.project.eyeLeftOverride, vrParamsFor('left'), baseOverrides)
+          if (s.project.eyeRightOverride) applyStyleToParams(s.project.eyeRightOverride, vrParamsFor('right'), baseOverrides)
+          if (s.project.colorsLeftOverride) applyStyleToColors(s.project.colorsLeftOverride, vrColorsFor('left'), baseOverrides)
+          if (s.project.colorsRightOverride) applyStyleToColors(s.project.colorsRightOverride, vrColorsFor('right'), baseOverrides)
         } else if (options.eyeTarget === 'left') {
           if (!s.project.eyeLeftOverride) s.project.eyeLeftOverride = { ...s.project.eyeBase }
           if (!s.project.colorsLeftOverride) s.project.colorsLeftOverride = { ...s.project.colors }
-          applyStyleToParams(s.project.eyeLeftOverride, vr.params, baseOverrides)
-          applyStyleToColors(s.project.colorsLeftOverride, vr.colors, baseOverrides)
+          applyStyleToParams(s.project.eyeLeftOverride, vrParamsFor('left'), baseOverrides)
+          applyStyleToColors(s.project.colorsLeftOverride, vrColorsFor('left'), baseOverrides)
         } else {
           if (!s.project.eyeRightOverride) s.project.eyeRightOverride = { ...s.project.eyeBase }
           if (!s.project.colorsRightOverride) s.project.colorsRightOverride = { ...s.project.colors }
-          applyStyleToParams(s.project.eyeRightOverride, vr.params, baseOverrides)
-          applyStyleToColors(s.project.colorsRightOverride, vr.colors, baseOverrides)
+          applyStyleToParams(s.project.eyeRightOverride, vrParamsFor('right'), baseOverrides)
+          applyStyleToColors(s.project.colorsRightOverride, vrColorsFor('right'), baseOverrides)
         }
 
         const applyToExpression = (expr: Expression) => {
           if (options.overrideMode === 'replace') expr.styleOverrides = []
           const overrides = expr.styleOverrides
           if (options.eyeTarget === 'both') {
-            applyStyleToParams(expr.params, vr.params, overrides)
-            applyStyleToColors(expr.colors, vr.colors, overrides)
-            if (expr.leftParams) applyStyleToParams(expr.leftParams, vr.params, overrides)
-            if (expr.rightParams) applyStyleToParams(expr.rightParams, vr.params, overrides)
-            if (expr.leftColors) applyStyleToColors(expr.leftColors, vr.colors, overrides)
-            if (expr.rightColors) applyStyleToColors(expr.rightColors, vr.colors, overrides)
+            applyStyleToParams(expr.params, vrParamsFor('base'), overrides)
+            applyStyleToColors(expr.colors, vrColorsFor('base'), overrides)
+            if (expr.leftParams) applyStyleToParams(expr.leftParams, vrParamsFor('left'), overrides)
+            if (expr.rightParams) applyStyleToParams(expr.rightParams, vrParamsFor('right'), overrides)
+            if (expr.leftColors) applyStyleToColors(expr.leftColors, vrColorsFor('left'), overrides)
+            if (expr.rightColors) applyStyleToColors(expr.rightColors, vrColorsFor('right'), overrides)
           } else if (options.eyeTarget === 'left') {
             if (!expr.leftParams) expr.leftParams = { ...expr.params }
             if (!expr.leftColors) expr.leftColors = { ...expr.colors }
-            applyStyleToParams(expr.leftParams, vr.params, overrides)
-            applyStyleToColors(expr.leftColors, vr.colors, overrides)
+            applyStyleToParams(expr.leftParams, vrParamsFor('left'), overrides)
+            applyStyleToColors(expr.leftColors, vrColorsFor('left'), overrides)
           } else {
             if (!expr.rightParams) expr.rightParams = { ...expr.params }
             if (!expr.rightColors) expr.rightColors = { ...expr.colors }
-            applyStyleToParams(expr.rightParams, vr.params, overrides)
-            applyStyleToColors(expr.rightColors, vr.colors, overrides)
+            applyStyleToParams(expr.rightParams, vrParamsFor('right'), overrides)
+            applyStyleToColors(expr.rightColors, vrColorsFor('right'), overrides)
           }
         }
 
@@ -486,7 +525,7 @@ export const useStore = create<StoreState>()(
         const applyToAnimation = (anim: Animation) => {
           for (const kf of anim.keyframes) {
             if (options.overrideMode === 'replace') kf.styleOverrides = []
-            applyStyleToParams(kf.params, vr.params, kf.styleOverrides)
+            applyStyleToParams(kf.params, vrParamsFor('base'), kf.styleOverrides)
           }
         }
 
@@ -517,18 +556,20 @@ export const useStore = create<StoreState>()(
           if (!expr) return
           expr.styleOverrides = expr.styleOverrides.filter((f) => f !== field)
           if (isParamField) {
-            const value = vr.params[field as keyof EyeParams]
-            expr.params[field as keyof EyeParams] = value
-            if (expr.leftParams) expr.leftParams[field as keyof EyeParams] = value
-            if (expr.rightParams) expr.rightParams[field as keyof EyeParams] = value
+            const f = field as keyof EyeParams
+            expr.params[f] = vr.params[f]
+            if (expr.leftParams) expr.leftParams[f] = (vr.paramsLeftOverride ?? vr.params)[f]
+            if (expr.rightParams) expr.rightParams[f] = (vr.paramsRightOverride ?? vr.params)[f]
           } else if (isColorField) {
             // EyeColors mixes string (hex colors) and number (intensities/opacity/width)
             // fields, so a generic keyof-indexed assignment needs a loosened view here —
             // same reasoning as applyStyleToColors in types/index.ts.
-            const value = (vr.colors as unknown as Record<string, string | number>)[field]
-            ;(expr.colors as unknown as Record<string, string | number>)[field] = value
-            if (expr.leftColors) (expr.leftColors as unknown as Record<string, string | number>)[field] = value
-            if (expr.rightColors) (expr.rightColors as unknown as Record<string, string | number>)[field] = value
+            const baseValue = (vr.colors as unknown as Record<string, string | number>)[field]
+            const leftValue = ((vr.colorsLeftOverride ?? vr.colors) as unknown as Record<string, string | number>)[field]
+            const rightValue = ((vr.colorsRightOverride ?? vr.colors) as unknown as Record<string, string | number>)[field]
+            ;(expr.colors as unknown as Record<string, string | number>)[field] = baseValue
+            if (expr.leftColors) (expr.leftColors as unknown as Record<string, string | number>)[field] = leftValue
+            if (expr.rightColors) (expr.rightColors as unknown as Record<string, string | number>)[field] = rightValue
           }
         } else {
           const a = activeAnimationOf(s.project, s.activeAnimationId)
@@ -863,9 +904,10 @@ export const useStore = create<StoreState>()(
     setReferenceImportOpen: (open) => set((s) => void (s.referenceImportOpen = open)),
     setGuideOpen: (open) => set((s) => void (s.guideOpen = open)),
     setLeftTab: (tab) => set((s) => void (s.leftTab = tab)),
+    setRightTab: (tab) => set((s) => void (s.rightTab = tab)),
     openReferenceImport: () =>
       set((s) => {
-        s.leftTab = 'visual-reference'
+        s.rightTab = 'visual-reference'
         s.referenceImportOpen = true
       })
   }))

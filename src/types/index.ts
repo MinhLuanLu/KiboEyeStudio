@@ -185,6 +185,14 @@ export const STYLE_EYE_COLOR_FIELDS: (keyof EyeColors)[] = [
 export interface VisualReferenceStyle {
   params: EyeParams
   colors: EyeColors
+  /** Optional per-eye overrides for the Visual Reference's own authored style — same
+   * null-means-follow-shared convention as Project.eyeLeftOverride/eyeRightOverride below.
+   * Most projects never touch these (Visual Reference is normally authored once for both
+   * eyes); Apply Visual Reference reads whichever is effective for the eye(s) it targets. */
+  paramsLeftOverride: EyeParams | null
+  paramsRightOverride: EyeParams | null
+  colorsLeftOverride: EyeColors | null
+  colorsRightOverride: EyeColors | null
 }
 
 /** A field is "overridden" (pinned/custom) if it's listed by name in a styleOverrides array;
@@ -334,7 +342,14 @@ export const EYE_COLOR_RANGES = {
 }
 
 export function defaultVisualReference(): VisualReferenceStyle {
-  return { params: { ...DEFAULT_EYE_PARAMS }, colors: { ...DEFAULT_EYE_COLORS } }
+  return {
+    params: { ...DEFAULT_EYE_PARAMS },
+    colors: { ...DEFAULT_EYE_COLORS },
+    paramsLeftOverride: null,
+    paramsRightOverride: null,
+    colorsLeftOverride: null,
+    colorsRightOverride: null
+  }
 }
 
 export const DEFAULT_DISPLAY: DisplaySettings = {
@@ -438,6 +453,33 @@ export function effectiveEyeColors(project: Project, target: EyeSide): EyeColors
   if (target === 'left') return leftEyeColors(project)
   if (target === 'right') return rightEyeColors(project)
   return project.colors
+}
+
+export function leftVisualReferenceParams(vr: VisualReferenceStyle): EyeParams {
+  return vr.paramsLeftOverride ?? vr.params
+}
+export function rightVisualReferenceParams(vr: VisualReferenceStyle): EyeParams {
+  return vr.paramsRightOverride ?? vr.params
+}
+export function leftVisualReferenceColors(vr: VisualReferenceStyle): EyeColors {
+  return vr.colorsLeftOverride ?? vr.colors
+}
+export function rightVisualReferenceColors(vr: VisualReferenceStyle): EyeColors {
+  return vr.colorsRightOverride ?? vr.colors
+}
+
+/** The params/colors the Controls/Colors panels should display and edit for the Visual
+ * Reference itself, given the selected Eye Target — same resolution rule as
+ * effectiveEyeParams/effectiveEyeColors above. */
+export function effectiveVisualReferenceParams(vr: VisualReferenceStyle, target: EyeSide): EyeParams {
+  if (target === 'left') return leftVisualReferenceParams(vr)
+  if (target === 'right') return rightVisualReferenceParams(vr)
+  return vr.params
+}
+export function effectiveVisualReferenceColors(vr: VisualReferenceStyle, target: EyeSide): EyeColors {
+  if (target === 'left') return leftVisualReferenceColors(vr)
+  if (target === 'right') return rightVisualReferenceColors(vr)
+  return vr.colors
 }
 
 export function expressionLeftParams(e: Expression): EyeParams {

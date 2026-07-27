@@ -3,7 +3,17 @@ import { useStore, getActiveAnimation } from '@/state/store'
 import { renderFace } from '@/renderer/faceRenderer'
 import { sampleAnimation, animationDuration, wrapTime } from '@/engine/interpolate'
 import { IdleEngine } from '@/engine/idleEngine'
-import { clampFps, leftEyeColors, leftEyeParams, rightEyeColors, rightEyeParams } from '@/types'
+import {
+  clampFps,
+  leftEyeColors,
+  leftEyeParams,
+  leftVisualReferenceColors,
+  leftVisualReferenceParams,
+  rightEyeColors,
+  rightEyeParams,
+  rightVisualReferenceColors,
+  rightVisualReferenceParams
+} from '@/types'
 import type { EyeColors, EyeParams } from '@/types'
 
 const MAX_DT_MS = 100
@@ -68,7 +78,20 @@ export function PreviewCanvas() {
       let frameIndex = 0
       let timeMs = state.playbackTimeMs
 
-      if (state.mode === 'design') {
+      if (state.rightTab === 'visual-reference') {
+        // While the right panel's Visual Reference tab is open, this canvas shows the VR's
+        // own pose/theme instead of the live design/animate/idle state — same full-size,
+        // bezel-and-all render everything else gets. Read-only: this never writes into
+        // eyeBase/colors, so switching away always resumes exactly whatever Design/Animate/
+        // Idle was showing before, undisturbed.
+        idleEngineRef.current.reset()
+        const vr = state.project.visualReference
+        params = leftVisualReferenceParams(vr)
+        rightParams = rightVisualReferenceParams(vr)
+        theme = leftVisualReferenceColors(vr)
+        rightTheme = rightVisualReferenceColors(vr)
+        timeMs = 0
+      } else if (state.mode === 'design') {
         idleEngineRef.current.reset()
         // Design mode is the only place the live pose can actually diverge per eye (Eye
         // Target: Left/Right) — Animate/Idle keep playing back one shared pose mirrored, as
@@ -95,6 +118,7 @@ export function PreviewCanvas() {
           }
           const sample = sampleAnimation(anim, t)
           params = sample.params
+          rightParams = params
           frameIndex = sample.segmentIndex
           timeMs = t
         }
@@ -106,6 +130,7 @@ export function PreviewCanvas() {
           state.project.timing.breathingAmount,
           state.project.timing.blinkSpeed
         )
+        rightParams = params
         timeMs = 0
       }
 

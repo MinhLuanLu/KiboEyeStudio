@@ -1,6 +1,6 @@
-import { useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { useStore } from '@/state/store'
+import type { LeftTab, RightTab } from '@/state/store'
 import { Toolbar, type ToolbarActions } from './Toolbar'
 import { PreviewCanvas } from '@/components/Canvas/PreviewCanvas'
 import { Timeline } from '@/components/Timeline/Timeline'
@@ -14,6 +14,20 @@ import { DevModePanel } from '@/components/DevMode/DevModePanel'
 import { ExportDialog } from '@/components/Export/ExportDialog'
 import { UserGuideModal } from '@/components/Guide/UserGuideModal'
 import { VisualReferencePanel } from '@/components/VisualReference/VisualReferencePanel'
+import { PanelTabs } from '@/components/ui/PanelTabs'
+
+const LEFT_TABS: { value: LeftTab; label: string }[] = [
+  { value: 'animations', label: 'Animations' },
+  { value: 'expressions', label: 'Expressions' }
+]
+
+const RIGHT_TABS: { value: RightTab; label: string }[] = [
+  { value: 'controls', label: 'Controls' },
+  { value: 'colors', label: 'Colors' },
+  { value: 'display', label: 'Display' },
+  { value: 'personality', label: 'Personality' },
+  { value: 'visual-reference', label: 'Visual Reference' }
+]
 
 function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'horizontal' }) {
   return (
@@ -28,7 +42,8 @@ function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'ho
 export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions }) {
   const leftTab = useStore((s) => s.leftTab)
   const setLeftTab = useStore((s) => s.setLeftTab)
-  const [rightTab, setRightTab] = useState<'controls' | 'colors' | 'display' | 'personality'>('controls')
+  const rightTab = useStore((s) => s.rightTab)
+  const setRightTab = useStore((s) => s.setRightTab)
 
   return (
     <div className="flex flex-col h-screen w-screen">
@@ -37,30 +52,10 @@ export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions })
         <PanelGroup direction="horizontal">
           <Panel defaultSize={18} minSize={14} maxSize={30}>
             <div className="h-full studio-panel m-2 mr-1 flex flex-col overflow-hidden">
-              <div className="flex border-b border-studio-border">
-                <button
-                  className={`studio-tab flex-1 ${leftTab === 'animations' ? 'studio-tab-active' : ''}`}
-                  onClick={() => setLeftTab('animations')}
-                >
-                  Animations
-                </button>
-                <button
-                  className={`studio-tab flex-1 ${leftTab === 'expressions' ? 'studio-tab-active' : ''}`}
-                  onClick={() => setLeftTab('expressions')}
-                >
-                  Expressions
-                </button>
-                <button
-                  className={`studio-tab flex-1 ${leftTab === 'visual-reference' ? 'studio-tab-active' : ''}`}
-                  onClick={() => setLeftTab('visual-reference')}
-                >
-                  Visual Reference
-                </button>
-              </div>
+              <PanelTabs tabs={LEFT_TABS} active={leftTab} onChange={setLeftTab} />
               <div className="flex-1 min-h-0">
                 {leftTab === 'animations' && <AnimationLibraryPanel />}
                 {leftTab === 'expressions' && <ExpressionLibraryPanel />}
-                {leftTab === 'visual-reference' && <VisualReferencePanel />}
               </div>
             </div>
           </Panel>
@@ -88,37 +83,13 @@ export function AppShell({ toolbarActions }: { toolbarActions: ToolbarActions })
 
           <Panel defaultSize={26} minSize={18} maxSize={38}>
             <div className="h-full studio-panel m-2 ml-1 flex flex-col overflow-hidden">
-              <div className="flex border-b border-studio-border">
-                <button
-                  className={`studio-tab flex-1 ${rightTab === 'controls' ? 'studio-tab-active' : ''}`}
-                  onClick={() => setRightTab('controls')}
-                >
-                  Controls
-                </button>
-                <button
-                  className={`studio-tab flex-1 ${rightTab === 'colors' ? 'studio-tab-active' : ''}`}
-                  onClick={() => setRightTab('colors')}
-                >
-                  Colors
-                </button>
-                <button
-                  className={`studio-tab flex-1 ${rightTab === 'display' ? 'studio-tab-active' : ''}`}
-                  onClick={() => setRightTab('display')}
-                >
-                  Display
-                </button>
-                <button
-                  className={`studio-tab flex-1 ${rightTab === 'personality' ? 'studio-tab-active' : ''}`}
-                  onClick={() => setRightTab('personality')}
-                >
-                  Personality
-                </button>
-              </div>
+              <PanelTabs tabs={RIGHT_TABS} active={rightTab} onChange={setRightTab} />
               <div className="flex-1 min-h-0">
                 {rightTab === 'controls' && <ControlsPanel />}
                 {rightTab === 'colors' && <ColorPanel />}
                 {rightTab === 'display' && <DisplayPanel />}
                 {rightTab === 'personality' && <PersonalityPanel />}
+                {rightTab === 'visual-reference' && <VisualReferencePanel />}
               </div>
             </div>
           </Panel>

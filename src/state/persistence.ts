@@ -58,7 +58,11 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
   const rawVr = raw.visualReference as Partial<VisualReferenceStyle> | undefined
   const visualReference: VisualReferenceStyle = {
     params: rawVr?.params ? normalizeEyeParams(rawVr.params) : { ...eyeBase },
-    colors: rawVr?.colors ? { ...DEFAULT_EYE_COLORS, ...rawVr.colors } : { ...colors }
+    colors: rawVr?.colors ? { ...DEFAULT_EYE_COLORS, ...rawVr.colors } : { ...colors },
+    paramsLeftOverride: normalizeEyeParamsOverride(rawVr?.paramsLeftOverride),
+    paramsRightOverride: normalizeEyeParamsOverride(rawVr?.paramsRightOverride),
+    colorsLeftOverride: normalizeEyeColorsOverride(rawVr?.colorsLeftOverride),
+    colorsRightOverride: normalizeEyeColorsOverride(rawVr?.colorsRightOverride)
   }
 
   const animations: Animation[] = (raw.animations ?? []).map((a) => ({

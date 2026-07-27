@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useStore } from '@/state/store'
-import { DEFAULT_EYE_COLORS, EYE_COLOR_RANGES, effectiveEyeColors } from '@/types'
+import { DEFAULT_EYE_COLORS, effectiveEyeColors, effectiveVisualReferenceColors, EYE_COLOR_RANGES } from '@/types'
 import type { EyeColors } from '@/types'
 import { ColorField } from '@/components/ui/ColorField'
 import { Slider } from '@/components/ui/Slider'
@@ -15,25 +15,33 @@ const COLOR_TABS: { value: ColorTab; label: string }[] = [
   { value: 'effects', label: 'Effects' }
 ]
 
-export function ColorPanel() {
+// editTarget defaults to 'live' (the normal base-pose/expression color editing this panel has
+// always done). Passing 'visual-reference' (used when reused inside the right panel's Visual
+// Reference tab) points every field at project.visualReference.colors via
+// setVisualReferenceColor instead — same sliders, different write target.
+export function ColorPanel({ editTarget = 'live' }: { editTarget?: 'live' | 'visual-reference' }) {
   const project = useStore((s) => s.project)
   const eyeTarget = useStore((s) => s.eyeTarget)
-  const colors = effectiveEyeColors(project, eyeTarget)
-  const setColor = useStore((s) => s.setColor)
+  const colors = editTarget === 'visual-reference' ? effectiveVisualReferenceColors(project.visualReference, eyeTarget) : effectiveEyeColors(project, eyeTarget)
+  const setColorLive = useStore((s) => s.setColor)
+  const setVisualReferenceColor = useStore((s) => s.setVisualReferenceColor)
+  const setColor = editTarget === 'visual-reference' ? setVisualReferenceColor : setColorLive
   const checkpoint = useStore((s) => s.checkpoint)
-  const selectedExpressionId = useStore((s) => s.selectedExpressionId)
 
   const [tab, setTab] = useState<ColorTab>('colors')
 
-  // Unlike EyeParams, colors have no per-keyframe concept at all (an animation's colors
-  // always come from the shared project palette, never from a keyframe) — so the only
-  // overridable "thing" for colors is the expression currently loaded live, if any.
-  const editingContext = !!selectedExpressionId
+  // Always compare against the Visual Reference for live editing — whether editing a
+  // selected expression's colors or the plain base palette with nothing selected — so it's
+  // never ambiguous whether the current colors are actually in sync with the reference or
+  // holding stale values. Editing the Visual Reference itself has nothing to compare against
+  // (it IS the reference), so no indicators there.
+  const editingContext = editTarget === 'live'
   const visualReference = project.visualReference
-  const isStyleOverridden = (field: keyof EyeColors) => colors[field] !== visualReference.colors[field]
+  const vrReference = effectiveVisualReferenceColors(visualReference, eyeTarget)
+  const isStyleOverridden = (field: keyof EyeColors) => colors[field] !== vrReference[field]
   const resetStyleField = (field: keyof EyeColors) => {
     checkpoint()
-    setColor(field, visualReference.colors[field])
+    setColor(field, vrReference[field])
   }
 
   const reset = () => {
@@ -46,9 +54,15 @@ export function ColorPanel() {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <div className="flex flex-col gap-3 p-3">
-        <p className="text-xs text-studio-muted leading-relaxed">
-          Customize every layer of the eye. Changes preview live on the round display.
-        </p>
+        {editTarget === 'visual-reference' ? (
+          <div className="text-xs bg-studio-accent/15 text-studio-accent border border-studio-accent/40 rounded-md px-2 py-1.5">
+            Editing the Visual Reference's default colors — {eyeTarget === 'both' ? 'Both Eyes' : eyeTarget === 'left' ? 'Left Eye' : 'Right Eye'}
+          </div>
+        ) : (
+          <p className="text-xs text-studio-muted leading-relaxed">
+            Customize every layer of the eye. Changes preview live on the round display.
+          </p>
+        )}
         <EyeTargetSelector />
       </div>
 

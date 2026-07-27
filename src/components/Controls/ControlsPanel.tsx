@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useStore, getActiveAnimation } from '@/state/store'
-import { effectiveEyeParams, EYE_PARAM_RANGES } from '@/types'
+import { effectiveEyeParams, effectiveVisualReferenceParams, EYE_PARAM_RANGES } from '@/types'
 import type { EyeParams } from '@/types'
 import { Slider } from '@/components/ui/Slider'
 import { EyeTargetSelector } from '@/components/ui/EyeTargetSelector'
@@ -27,11 +27,26 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-export function ControlsPanel() {
+function PreviewOnlyNote() {
+  return (
+    <p className="text-[11px] text-studio-muted italic">
+      Preview only — this is behavioral, not shared style, so "Apply Visual Reference" never changes it on any
+      expression or animation.
+    </p>
+  )
+}
+
+// editTarget defaults to 'live' (the normal base-pose/keyframe editing this panel has always
+// done). Passing 'visual-reference' (used when this panel is reused inside the right panel's
+// Visual Reference tab) instead points every field at project.visualReference.params via
+// setVisualReferenceParam — the exact same sliders, just a different write target — so Visual
+// Reference editing never needs its own duplicate copy of this UI.
+export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | 'visual-reference' }) {
   const project = useStore((s) => s.project)
   const eyeTarget = useStore((s) => s.eyeTarget)
   const timing = useStore((s) => s.project.timing)
   const setEyeParam = useStore((s) => s.setEyeParam)
+  const setVisualReferenceParam = useStore((s) => s.setVisualReferenceParam)
   const setTiming = useStore((s) => s.setTiming)
   const checkpoint = useStore((s) => s.checkpoint)
 
@@ -40,34 +55,52 @@ export function ControlsPanel() {
   const selectedExpressionId = useStore((s) => s.selectedExpressionId)
   const updateKeyframeParams = useStore((s) => s.updateKeyframeParams)
   const anim = useStore(() => getActiveAnimation())
-  const selectedKeyframe = mode === 'animate' ? anim?.keyframes.find((k) => k.id === selectedKeyframeId) : undefined
+  const selectedKeyframe = editTarget === 'live' && mode === 'animate' ? anim?.keyframes.find((k) => k.id === selectedKeyframeId) : undefined
 
   const [tab, setTab] = useState<ControlsTab>('shape')
 
   // Keyframes stay a single shared pose (mirrored for both eyes) — the Eye Target selector
   // only applies to the live base pose, so it's disabled while a keyframe is selected.
-  const target: EyeParams = selectedKeyframe ? selectedKeyframe.params : effectiveEyeParams(project, eyeTarget)
+  const target: EyeParams =
+    editTarget === 'visual-reference'
+      ? effectiveVisualReferenceParams(project.visualReference, eyeTarget)
+      : selectedKeyframe
+        ? selectedKeyframe.params
+        : effectiveEyeParams(project, eyeTarget)
   const setParam = <K extends keyof EyeParams>(key: K, value: EyeParams[K]) => {
-    if (selectedKeyframe) updateKeyframeParams(selectedKeyframe.id, { [key]: value } as Partial<EyeParams>)
+    if (editTarget === 'visual-reference') setVisualReferenceParam(key, value)
+    else if (selectedKeyframe) updateKeyframeParams(selectedKeyframe.id, { [key]: value } as Partial<EyeParams>)
     else setEyeParam(key, value)
   }
 
-  // Inherited/Custom indicators only make sense while editing a specific, nameable thing
-  // that can have Visual Reference overrides — a selected keyframe, or (in Design mode) the
-  // expression currently loaded live. The raw "Both Eyes" base pose with nothing selected
-  // isn't itself an overridable entity, so no indicators show there.
-  const editingContext: 'keyframe' | 'expression' | null = selectedKeyframe ? 'keyframe' : selectedExpressionId ? 'expression' : null
+  // Inherited/Custom indicators compare `target` against the current Visual Reference —
+  // always shown for live editing (keyframe, expression, AND the plain base pose with
+  // nothing selected) so it's never ambiguous whether the base pose is actually in sync with
+  // the reference or just holding stale values from an earlier edit/Apply. Editing the
+  // Visual Reference itself has nothing to compare against (it IS the reference), so no
+  // indicators there.
+  const editingContext: 'keyframe' | 'expression' | 'base' | null =
+    editTarget === 'visual-reference' ? null : selectedKeyframe ? 'keyframe' : selectedExpressionId ? 'expression' : 'base'
   const visualReference = project.visualReference
-  const isStyleOverridden = (field: keyof EyeParams) => target[field] !== visualReference.params[field]
+  // Keyframes have no left/right concept (always one shared pose), so they always compare
+  // against/reset to the VR's shared base regardless of the current Eye Target; expressions
+  // and the base pose resolve whichever VR variant (base/left/right) matches the eye being
+  // edited, same resolution rule as `target` above.
+  const vrReference: EyeParams = selectedKeyframe ? visualReference.params : effectiveVisualReferenceParams(visualReference, eyeTarget)
+  const isStyleOverridden = (field: keyof EyeParams) => target[field] !== vrReference[field]
   const resetStyleField = (field: keyof EyeParams) => {
     checkpoint()
-    setParam(field, visualReference.params[field])
+    setParam(field, vrReference[field])
   }
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <div className="flex flex-col gap-3 p-3">
-        {selectedKeyframe ? (
+        {editTarget === 'visual-reference' ? (
+          <div className="text-xs bg-studio-accent/15 text-studio-accent border border-studio-accent/40 rounded-md px-2 py-1.5">
+            Editing the Visual Reference's default shape — {eyeTarget === 'both' ? 'Both Eyes' : eyeTarget === 'left' ? 'Left Eye' : 'Right Eye'}
+          </div>
+        ) : selectedKeyframe ? (
           <div className="text-xs bg-studio-accent/15 text-studio-accent border border-studio-accent/40 rounded-md px-2 py-1.5">
             Editing selected keyframe (shared, both eyes)
           </div>
@@ -75,6 +108,13 @@ export function ControlsPanel() {
           <div className="text-xs bg-studio-panel2 text-studio-muted border border-studio-border rounded-md px-2 py-1.5">
             Editing base design pose — {eyeTarget === 'both' ? 'Both Eyes' : eyeTarget === 'left' ? 'Left Eye' : 'Right Eye'}
           </div>
+        )}
+
+        {editTarget === 'visual-reference' && (
+          <p className="text-[11px] text-studio-muted -mt-1">
+            Optional — most projects leave this at Both Eyes. Editing Left/Right Eye here authors a per-eye Visual
+            Reference variant that Apply carries into matching left/right targets.
+          </p>
         )}
 
         <EyeTargetSelector disabled={!!selectedKeyframe} />
@@ -96,6 +136,7 @@ export function ControlsPanel() {
             </StyleFieldRow>
             <Slider label="Eye Distance" value={target.distance} min={EYE_PARAM_RANGES.distance[0]} max={EYE_PARAM_RANGES.distance[1]} onCommitStart={checkpoint} onChange={(v) => setParam('distance', v)} />
             <Slider label="Eye Rotation" value={target.rotation} min={EYE_PARAM_RANGES.rotation[0]} max={EYE_PARAM_RANGES.rotation[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('rotation', v)} />
+            {editTarget === 'visual-reference' && <PreviewOnlyNote />}
           </Section>
         )}
 
@@ -117,6 +158,7 @@ export function ControlsPanel() {
               <Slider label="Pupil X" value={target.pupilX} min={EYE_PARAM_RANGES.pupilX[0]} max={EYE_PARAM_RANGES.pupilX[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilX', v)} />
               <Slider label="Pupil Y" value={target.pupilY} min={EYE_PARAM_RANGES.pupilY[0]} max={EYE_PARAM_RANGES.pupilY[1]} onCommitStart={checkpoint} onChange={(v) => setParam('pupilY', v)} />
               <Slider label="Pupil Rotation" value={target.pupilRotation} min={EYE_PARAM_RANGES.pupilRotation[0]} max={EYE_PARAM_RANGES.pupilRotation[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('pupilRotation', v)} />
+              {editTarget === 'visual-reference' && <PreviewOnlyNote />}
             </Section>
 
             <Section title="Highlight">
@@ -139,6 +181,7 @@ export function ControlsPanel() {
             <Slider label="Lower Eyelid" value={target.lowerEyelid} min={EYE_PARAM_RANGES.lowerEyelid[0]} max={EYE_PARAM_RANGES.lowerEyelid[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelid', v)} />
             <Slider label="Upper Eyelid Tilt" value={target.upperEyelidTilt} min={EYE_PARAM_RANGES.upperEyelidTilt[0]} max={EYE_PARAM_RANGES.upperEyelidTilt[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidTilt', v)} />
             <Slider label="Lower Eyelid Tilt" value={target.lowerEyelidTilt} min={EYE_PARAM_RANGES.lowerEyelidTilt[0]} max={EYE_PARAM_RANGES.lowerEyelidTilt[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidTilt', v)} />
+            {editTarget === 'visual-reference' && <PreviewOnlyNote />}
             <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidCurvature')} onReset={() => resetStyleField('upperEyelidCurvature')}>
               <Slider label="Upper Eyelid Curvature" value={target.upperEyelidCurvature} min={EYE_PARAM_RANGES.upperEyelidCurvature[0]} max={EYE_PARAM_RANGES.upperEyelidCurvature[1]} onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidCurvature', v)} />
             </StyleFieldRow>
@@ -153,6 +196,12 @@ export function ControlsPanel() {
             <Slider label="Animation Speed" value={timing.animationSpeed} min={10} max={300} suffix="%" onCommitStart={checkpoint} onChange={(v) => setTiming('animationSpeed', v)} />
             <Slider label="Blink Speed" value={timing.blinkSpeed} min={10} max={300} suffix="%" onCommitStart={checkpoint} onChange={(v) => setTiming('blinkSpeed', v)} />
             <Slider label="Breathing Amount" value={timing.breathingAmount} min={0} max={100} suffix="%" onCommitStart={checkpoint} onChange={(v) => setTiming('breathingAmount', v)} />
+            {editTarget === 'visual-reference' && (
+              <p className="text-[11px] text-studio-muted italic">
+                Timing is already a single project-wide setting (not duplicated per expression/animation), so
+                editing it here is the same as editing it anywhere else.
+              </p>
+            )}
           </Section>
         )}
       </div>
