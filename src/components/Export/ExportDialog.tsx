@@ -3,25 +3,38 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useStore, getActiveAnimation } from '@/state/store'
 import { projectToJson, animationToJson } from '@/lib/export/jsonExport'
 import { generateCppHeader } from '@/lib/export/cppExport'
-import { validateStickerExport, type StickerValidationStatus } from '@/lib/export/validateStickers'
+import { validateStickerExport, type StickerValidationResult } from '@/lib/export/validateStickers'
+import { validatePupilShapeExport, type PupilShapeValidationResult } from '@/lib/export/validatePupilShapes'
 import { parseAnimationJson } from '@/lib/import/jsonImport'
 import { exportFile, importJsonDialog } from '@/state/persistence'
 
 type Tab = 'json-project' | 'json-animation' | 'cpp'
+type ValidationStatus = 'passed' | 'warning' | 'failed'
 
-const STATUS_ICON: Record<StickerValidationStatus, string> = { passed: '✓', warning: '⚠', failed: '✕' }
-const STATUS_CLASS: Record<StickerValidationStatus, string> = {
+const STATUS_ICON: Record<ValidationStatus, string> = { passed: '✓', warning: '⚠', failed: '✕' }
+const STATUS_CLASS: Record<ValidationStatus, string> = {
   passed: 'text-emerald-400',
   warning: 'text-amber-400',
   failed: 'text-red-400'
 }
 
-/** Per-sticker pass/warning/fail checklist for the C++ export — see validateStickerExport().
- * Only rendered when the project actually has stickers anywhere, so projects with none don't
- * see an empty panel. Collapsed by default unless something actually failed, so a clean
- * project isn't forced to scroll past a wall of green checkmarks to reach the code preview. */
-function StickerValidationPanel({ project }: { project: Parameters<typeof validateStickerExport>[0] }) {
-  const results = useMemo(() => validateStickerExport(project), [project])
+/** Generic pass/warning/fail checklist renderer, shared by the sticker and pupil-shape export
+ * checks below — same collapse-unless-something-failed behavior, same row layout, just a
+ * different title/subtitle per item. Only rendered when there's at least one result, so
+ * projects with nothing of that kind don't show an empty panel. */
+function ValidationPanel<T extends { status: ValidationStatus; messages: string[] }>({
+  title,
+  results,
+  itemKey,
+  itemTitle,
+  itemSubtitle
+}: {
+  title: string
+  results: T[]
+  itemKey: (r: T, i: number) => string
+  itemTitle: (r: T) => string
+  itemSubtitle?: (r: T) => string | null
+}) {
   const [expanded, setExpanded] = useState(false)
   if (results.length === 0) return null
 
@@ -33,7 +46,7 @@ function StickerValidationPanel({ project }: { project: Parameters<typeof valida
   return (
     <div className="mx-3 mt-3 border border-studio-border rounded-md overflow-hidden shrink-0">
       <button className="w-full flex items-center justify-between px-3 py-2 bg-studio-panel2 text-xs" onClick={() => setExpanded((v) => !v)}>
-        <span className="font-medium">Sticker Export Check</span>
+        <span className="font-medium">{title}</span>
         <span className="flex items-center gap-3 text-studio-muted">
           {passed > 0 && <span className="text-emerald-400">{passed} passed</span>}
           {warnings > 0 && <span className="text-amber-400">{warnings} warning{warnings === 1 ? '' : 's'}</span>}
@@ -43,24 +56,52 @@ function StickerValidationPanel({ project }: { project: Parameters<typeof valida
       </button>
       {isOpen && (
         <div className="max-h-40 overflow-y-auto divide-y divide-studio-border">
-          {results.map((r, i) => (
-            <div key={`${r.stickerId}-${i}`} className="flex items-start gap-2 px-3 py-1.5 text-xs">
-              <span className={`shrink-0 font-bold ${STATUS_CLASS[r.status]}`}>{STATUS_ICON[r.status]}</span>
-              <div className="min-w-0">
-                <div>
-                  <span className="font-medium">{r.stickerName}</span> <span className="text-studio-muted">({r.scope})</span>
-                </div>
-                {r.messages.map((m, mi) => (
-                  <div key={mi} className="text-studio-muted leading-snug">
-                    {m}
+          {results.map((r, i) => {
+            const subtitle = itemSubtitle?.(r)
+            return (
+              <div key={itemKey(r, i)} className="flex items-start gap-2 px-3 py-1.5 text-xs">
+                <span className={`shrink-0 font-bold ${STATUS_CLASS[r.status]}`}>{STATUS_ICON[r.status]}</span>
+                <div className="min-w-0">
+                  <div>
+                    <span className="font-medium">{itemTitle(r)}</span> {subtitle && <span className="text-studio-muted">({subtitle})</span>}
                   </div>
-                ))}
+                  {r.messages.map((m, mi) => (
+                    <div key={mi} className="text-studio-muted leading-snug">
+                      {m}
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>
+  )
+}
+
+function StickerValidationPanel({ project }: { project: Parameters<typeof validateStickerExport>[0] }) {
+  const results = useMemo(() => validateStickerExport(project), [project])
+  return (
+    <ValidationPanel<StickerValidationResult>
+      title="Sticker Export Check"
+      results={results}
+      itemKey={(r, i) => `${r.stickerId}-${i}`}
+      itemTitle={(r) => r.stickerName}
+      itemSubtitle={(r) => r.scope}
+    />
+  )
+}
+
+function PupilShapeValidationPanel({ project }: { project: Parameters<typeof validatePupilShapeExport>[0] }) {
+  const results = useMemo(() => validatePupilShapeExport(project), [project])
+  return (
+    <ValidationPanel<PupilShapeValidationResult>
+      title="Custom Pupil Shape Export Check"
+      results={results}
+      itemKey={(r, i) => `${r.shapeId}-${i}`}
+      itemTitle={(r) => r.shapeName}
+    />
   )
 }
 
@@ -139,6 +180,7 @@ export function ExportDialog() {
             </button>
           </div>
 
+          {tab === 'cpp' && <PupilShapeValidationPanel project={project} />}
           {tab === 'cpp' && <StickerValidationPanel project={project} />}
 
           <pre className="flex-1 overflow-auto p-3 text-xs font-mono bg-studio-bg m-3 rounded-md border border-studio-border whitespace-pre">
