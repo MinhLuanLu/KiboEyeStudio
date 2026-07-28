@@ -2343,6 +2343,8 @@ export function generateCppHeader(project: Project): string {
 #include <avr/pgmspace.h> // only classic AVR boards need this; ESP32/ESP8266/SAMD/RP2040 cores already define PROGMEM
 #endif
 
+${exportQuickReference(project)}
+
 enum EyeEasing : uint8_t {
   EYE_EASE_LINEAR = 0,
   EYE_EASE_IN,
@@ -2452,8 +2454,6 @@ ${project.animations.map((a) => exportAnimation(a, project.customPupilShapes, st
 ${project.expressions
   .map((e) => exportExpression(e, project.customPupilShapes, project.display.backgroundColor, stickersExport.assetsById, stickersExport.rasterIndexByAssetId))
   .join('\n\n')}
-
-${exportQuickReference(project)}
 
 ${exportDemo(project)}
 
