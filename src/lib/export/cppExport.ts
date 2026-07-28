@@ -412,8 +412,9 @@ function stickerBuiltinEnumName(id: BuiltinStickerId): string {
 // Every built-in now has a real C++ drawer (see eyesDrawStickerProcedural() in PLAYER_CODE) —
 // kept as a set (rather than deleting the "unported" check in exportStickers() below) so a
 // future built-in that's added without a firmware port yet still gets flagged instead of
-// silently drawing nothing.
-const STICKER_BUILTINS_WITH_FIRMWARE_DRAWER: ReadonlySet<BuiltinStickerId> = new Set(STICKER_BUILTIN_ENUM_ORDER)
+// silently drawing nothing. Exported so validateStickers.ts can report the same thing per
+// sticker in the Export dialog's checklist, instead of only as a header comment.
+export const STICKER_BUILTINS_WITH_FIRMWARE_DRAWER: ReadonlySet<BuiltinStickerId> = new Set(STICKER_BUILTIN_ENUM_ORDER)
 
 // RGBA (0-255 per channel) -> RGB565, with alpha < 128 mapped to the reserved transparent
 // sentinel instead of a real color — see STICKER_TRANSPARENT_RGB565's own comment.
@@ -479,7 +480,11 @@ function stickerDefLiteral(s: StickerInstance, asset: StickerAsset | undefined, 
 // pair (or an empty-array fallback when there are none) — shared by Project/Expression/
 // Animation scope export so all three use the exact same literal format and the exact same
 // (already-built, cross-scope) rasterIndexByAssetId, so a raster asset used in more than one
-// scope still shares a single exported pixel table (see exportStickers() below).
+// scope still shares a single exported pixel table (see exportStickers() below). Each entry
+// gets a `// "name" (layer)` comment right above it — StickerDef itself carries no name field
+// (nothing at runtime needs one), but without this a human reading the generated header has no
+// way to tell which raw struct came from which named sticker in the studio, which makes "did
+// my sticker actually export" impossible to check by eye.
 function stickerArrayLiteral(
   stickers: StickerInstance[],
   ident: string,
@@ -491,7 +496,9 @@ function stickerArrayLiteral(
   }
   return [
     `const StickerDef ${ident}[] PROGMEM = {`,
-    stickers.map((s) => stickerDefLiteral(s, assetsById.get(s.assetId), rasterIndexByAssetId)).join(',\n'),
+    stickers
+      .map((s) => `  // "${s.name}" (${s.layer})\n${stickerDefLiteral(s, assetsById.get(s.assetId), rasterIndexByAssetId)}`)
+      .join(',\n'),
     `};`,
     `const uint8_t ${ident}_Count = ${stickers.length};`
   ]
@@ -1014,7 +1021,12 @@ inline void eyesFillPupilShape(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eye
       }
       break;
   }
-  if (points) {
+  // count < 3 falls back too (not just points == nullptr) -- a degenerate/empty point table
+  // (shouldn't happen via the studio's own import path, but a hand-edited or corrupted
+  // project file could produce one) would otherwise reach eyesFillPolygonInEye() and silently
+  // draw nothing at all, leaving the pupil invisible instead of falling back to the ellipse
+  // like the studio preview's drawEye.ts does for the same case.
+  if (points && count >= 3) {
     eyesFillPolygonInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, points, count, color);
   } else {
     eyesFillEllipseInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, color);
@@ -1598,26 +1610,36 @@ inline uint8_t eyesPickStickerFrame(const StickerRasterAsset& asset, const Stick
 // Draws every sticker on the given layer. eyesDrawEyePair() below already calls this
 // automatically (STICKER_LAYER_BEHIND before the eyes, STICKER_LAYER_FRONT after) — call it
 // directly yourself only if you're not using eyesDrawEyePair() (e.g. drawing each eye
-// separately via eyesDrawEye()). \`stickers\`/\`rasterAssets\` are always PROJECT_STICKERS/
-// STICKER_RASTER_ASSETS from the generated header; \`elapsedMs\` should be a free-running clock
-// (e.g. millis() since boot) — stickers animate independently of whatever expression/animation
-// the eyes are currently playing.
+// separately via eyesDrawEye()), passing the same screenCx/screenCy you use there.
+// \`stickers\`/\`rasterAssets\` are always PROJECT_STICKERS/STICKER_RASTER_ASSETS from the
+// generated header; \`elapsedMs\` should be a free-running clock (e.g. millis() since boot) —
+// stickers animate independently of whatever expression/animation the eyes are currently
+// playing. \`screenCx\`/\`screenCy\` is the display's own center pixel (e.g. 120,120 on a
+// 240x240 panel) — StickerDef.x/y (and thus live.cx/live.cy from eyesComputeStickerLive()) are
+// offsets *from that center*, matching the studio's own coordinate convention
+// (faceRenderer.ts translates to the display center before drawing stickers) — without adding
+// it here, every sticker draws at (x, y) as if it were an absolute top-left-origin pixel
+// coordinate instead, landing it off-canvas unless x/y happens to be within a few pixels of
+// (0, 0). This is the sticker-position analogue of eyesDrawEye() already receiving cx/cy
+// (pre-offset) from eyesDrawEyePair() below for the exact same reason.
 template <typename T>
 inline void eyesDrawStickers(T& gfx, const StickerDef* stickers, uint8_t count,
                               const StickerRasterAsset* rasterAssets, uint8_t rasterCount,
-                              uint8_t layer, unsigned long elapsedMs) {
+                              uint8_t layer, unsigned long elapsedMs, int16_t screenCx, int16_t screenCy) {
   for (uint8_t i = 0; i < count; i++) {
     StickerDef s = stickers[i];
     if (s.layer != layer) continue;
     StickerLive live = eyesComputeStickerLive(s, elapsedMs);
     if (!live.visible) continue;
     unsigned long localMs = elapsedMs > s.startDelayMs ? elapsedMs - s.startDelayMs : 0;
+    int16_t drawCx = screenCx + live.cx;
+    int16_t drawCy = screenCy + live.cy;
     if (s.kind == STICKER_KIND_PROCEDURAL) {
-      eyesDrawStickerProcedural(gfx, s.assetIndex, live.cx, live.cy, live.rx, live.ry, live.rotationDeg, s.tintColor, localMs / 1000.0f);
+      eyesDrawStickerProcedural(gfx, s.assetIndex, drawCx, drawCy, live.rx, live.ry, live.rotationDeg, s.tintColor, localMs / 1000.0f);
     } else if (s.assetIndex < rasterCount) {
       const StickerRasterAsset& asset = rasterAssets[s.assetIndex];
       uint8_t frame = eyesPickStickerFrame(asset, s, localMs);
-      eyesDrawStickerRaster(gfx, asset, frame, live.cx, live.cy, (int16_t)(live.rx < 0 ? -live.rx : live.rx) * 2,
+      eyesDrawStickerRaster(gfx, asset, frame, drawCx, drawCy, (int16_t)(live.rx < 0 ? -live.rx : live.rx) * 2,
                              (int16_t)(live.ry < 0 ? -live.ry : live.ry) * 2, live.rotationDeg, s.flipH, s.flipV);
     }
   }
@@ -1946,12 +1968,12 @@ inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const Li
     activeStickers = eyesPlayer.expression->stickers;
     activeStickerCount = eyesPlayer.expression->stickerCount;
   }
-  eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs);
-  eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs);
+  eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs, screenCx, screenCy);
+  eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs, screenCx, screenCy);
   eyesDrawEye(gfx, screenCx - half, screenCy, e, false, bgColor, leftColors);
   eyesDrawEye(gfx, screenCx + half, screenCy, e, true, bgColor, rightColors);
-  eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs);
-  eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs);
+  eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
+  eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
 }
 
 // ---- Optional: flicker-free buffered display for Adafruit_GC9A01A. Only defined if ----
@@ -1994,6 +2016,9 @@ public:
   // Adafruit_SPITFT's own unbuffered versions and flicker straight onto the live panel.
   void drawPixel(int16_t x, int16_t y, uint16_t color) { canvas->drawPixel(x, y, color); }
   void drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color) { canvas->drawLine(x0, y0, x1, y1, color); }
+  // Same reasoning again — eyesDrawSticker_ExpandingCircles() calls drawCircle() (stroked,
+  // not filled) directly.
+  void drawCircle(int16_t x, int16_t y, int16_t r, uint16_t color) { canvas->drawCircle(x, y, r, color); }
 
   // Blit the finished frame to the panel in a single windowed SPI burst.
   void present() { drawRGBBitmap(0, 0, canvas->getBuffer(), width(), height()); }

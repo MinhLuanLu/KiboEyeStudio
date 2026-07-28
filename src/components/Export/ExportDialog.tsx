@@ -1,12 +1,68 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore, getActiveAnimation } from '@/state/store'
 import { projectToJson, animationToJson } from '@/lib/export/jsonExport'
 import { generateCppHeader } from '@/lib/export/cppExport'
+import { validateStickerExport, type StickerValidationStatus } from '@/lib/export/validateStickers'
 import { parseAnimationJson } from '@/lib/import/jsonImport'
 import { exportFile, importJsonDialog } from '@/state/persistence'
 
 type Tab = 'json-project' | 'json-animation' | 'cpp'
+
+const STATUS_ICON: Record<StickerValidationStatus, string> = { passed: '✓', warning: '⚠', failed: '✕' }
+const STATUS_CLASS: Record<StickerValidationStatus, string> = {
+  passed: 'text-emerald-400',
+  warning: 'text-amber-400',
+  failed: 'text-red-400'
+}
+
+/** Per-sticker pass/warning/fail checklist for the C++ export — see validateStickerExport().
+ * Only rendered when the project actually has stickers anywhere, so projects with none don't
+ * see an empty panel. Collapsed by default unless something actually failed, so a clean
+ * project isn't forced to scroll past a wall of green checkmarks to reach the code preview. */
+function StickerValidationPanel({ project }: { project: Parameters<typeof validateStickerExport>[0] }) {
+  const results = useMemo(() => validateStickerExport(project), [project])
+  const [expanded, setExpanded] = useState(false)
+  if (results.length === 0) return null
+
+  const passed = results.filter((r) => r.status === 'passed').length
+  const warnings = results.filter((r) => r.status === 'warning').length
+  const failed = results.filter((r) => r.status === 'failed').length
+  const isOpen = expanded || failed > 0
+
+  return (
+    <div className="mx-3 mt-3 border border-studio-border rounded-md overflow-hidden shrink-0">
+      <button className="w-full flex items-center justify-between px-3 py-2 bg-studio-panel2 text-xs" onClick={() => setExpanded((v) => !v)}>
+        <span className="font-medium">Sticker Export Check</span>
+        <span className="flex items-center gap-3 text-studio-muted">
+          {passed > 0 && <span className="text-emerald-400">{passed} passed</span>}
+          {warnings > 0 && <span className="text-amber-400">{warnings} warning{warnings === 1 ? '' : 's'}</span>}
+          {failed > 0 && <span className="text-red-400">{failed} failed</span>}
+          <span>{isOpen ? '▲' : '▼'}</span>
+        </span>
+      </button>
+      {isOpen && (
+        <div className="max-h-40 overflow-y-auto divide-y divide-studio-border">
+          {results.map((r, i) => (
+            <div key={`${r.stickerId}-${i}`} className="flex items-start gap-2 px-3 py-1.5 text-xs">
+              <span className={`shrink-0 font-bold ${STATUS_CLASS[r.status]}`}>{STATUS_ICON[r.status]}</span>
+              <div className="min-w-0">
+                <div>
+                  <span className="font-medium">{r.stickerName}</span> <span className="text-studio-muted">({r.scope})</span>
+                </div>
+                {r.messages.map((m, mi) => (
+                  <div key={mi} className="text-studio-muted leading-snug">
+                    {m}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function ExportDialog() {
   const open = useStore((s) => s.exportDialogOpen)
@@ -82,6 +138,8 @@ export function ExportDialog() {
               Import JSON...
             </button>
           </div>
+
+          {tab === 'cpp' && <StickerValidationPanel project={project} />}
 
           <pre className="flex-1 overflow-auto p-3 text-xs font-mono bg-studio-bg m-3 rounded-md border border-studio-border whitespace-pre">
             {content}
