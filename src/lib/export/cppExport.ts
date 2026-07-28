@@ -13,13 +13,15 @@ import type {
 } from '@/types'
 import {
   clampFps,
+  expressionLeftColors,
   expressionLeftParams,
+  expressionRightColors,
   expressionRightParams,
   expressionShapeDiverges,
   leftEyeColors,
   rightEyeColors
 } from '@/types'
-import { hexToRgb565, mixColors } from '@/lib/color'
+import { hexToRgb565, mixColors, shadeColor } from '@/lib/color'
 import { PUPIL_SHAPE_POLYGONS } from '@/renderer/pupilShapes'
 
 const EASING_ENUM: Record<EasingType, string> = {
@@ -118,12 +120,20 @@ function eyeFrameLiteral(
 }
 
 // Emits the raw keyframe array plus its count/loop flag (for anyone who wants direct/
-// low-level access) AND a single `EyeAnimation` wrapper bundling all three — that wrapper
-// is what PlayAnimation() below takes, so playing an animation is just `PlayAnimation(Anim_X)`
-// instead of threading three separate globals through eyesPlayAnimation() by hand.
-function exportAnimation(anim: Animation, customShapes: CustomPupilShape[]): string {
+// low-level access), this animation's own sticker array (visible only while it's playing —
+// see the Stickers comment above), AND a single `EyeAnimation` wrapper bundling all of it —
+// that wrapper is what PlayAnimation() below takes, so playing an animation is just
+// `PlayAnimation(Anim_X)` instead of threading several separate globals through
+// eyesPlayAnimation() by hand.
+function exportAnimation(
+  anim: Animation,
+  customShapes: CustomPupilShape[],
+  assetsById: Map<string, StickerAsset>,
+  rasterIndexByAssetId: Map<string, number>
+): string {
   const ident = toIdentifier(anim.name)
   const lines = anim.keyframes.map((k) => eyeFrameLiteral(k.params, k.duration, k.easing, customShapes, k.customBezier))
+  const stickers = anim.stickers.filter((s) => s.visible)
   return [
     `// ${anim.name}${anim.loop ? ' (loops)' : ' (plays once)'}`,
     `const EyeFrame Anim_${ident}_frames[] PROGMEM = {`,
@@ -131,23 +141,59 @@ function exportAnimation(anim: Animation, customShapes: CustomPupilShape[]): str
     `};`,
     `const uint16_t Anim_${ident}_count = ${anim.keyframes.length};`,
     `const bool Anim_${ident}_loop = ${anim.loop ? 'true' : 'false'};`,
-    `const EyeAnimation Anim_${ident} = { Anim_${ident}_frames, Anim_${ident}_count, Anim_${ident}_loop };`
+    ...stickerArrayLiteral(stickers, `Anim_${ident}_Stickers`, assetsById, rasterIndexByAssetId),
+    `const EyeAnimation Anim_${ident} = { Anim_${ident}_frames, Anim_${ident}_count, Anim_${ident}_loop, Anim_${ident}_Stickers, Anim_${ident}_Stickers_Count };`
   ].join('\n')
 }
 
-// Expressions carry independent left/right shape only when they actually differ (Eye
-// Target: Left/Right editing at Save time) — otherwise a single shared constant is emitted,
-// exactly as before this feature existed, so existing (non-diverged) expressions export
-// identically to how they always have.
-function exportExpression(expr: Expression, customShapes: CustomPupilShape[]): string {
+// Expressions carry independent left/right *shape* only when they actually differ (Eye
+// Target: Left/Right editing at Save time) — colors are handled separately (an expression can
+// have divergent left/right colors independent of whether its shape diverges, so
+// Expr_X_ColorsLeft/Right are always emitted as a pair regardless — see EYE_COLORS_LEFT/RIGHT's
+// own "shared if identical" comment for the same pattern applied here). When shape doesn't
+// diverge, everything bundles into one `EyeExpression` so SetExpression(Expr_X) also switches
+// this expression's own colors and stickers, not just its pose — matching the studio, where
+// applying an expression can change all three. When shape *does* diverge, SetExpression() can't
+// take it (it needs one shared pose) — colors/stickers still export for manual
+// eyesDrawEye()/eyesDrawStickers() use, per the existing Expr_X_L/Expr_X_R pattern.
+function exportExpression(
+  expr: Expression,
+  customShapes: CustomPupilShape[],
+  backgroundColor: string,
+  assetsById: Map<string, StickerAsset>,
+  rasterIndexByAssetId: Map<string, number>
+): string {
   const ident = toIdentifier(expr.name)
+  const leftColors = expressionLeftColors(expr)
+  const rightColors = expressionRightColors(expr)
+  const colorsSame = JSON.stringify(leftColors) === JSON.stringify(rightColors)
+  const stickers = expr.stickers.filter((s) => s.visible)
+
+  const colorLines = [`const EyeColorSet Expr_${ident}_ColorsLeft = ${colorSetLiteral(leftColors, backgroundColor)};`]
+  if (colorsSame) {
+    colorLines.push(`const EyeColorSet& Expr_${ident}_ColorsRight = Expr_${ident}_ColorsLeft;`)
+  } else {
+    colorLines.push(`const EyeColorSet Expr_${ident}_ColorsRight = ${colorSetLiteral(rightColors, backgroundColor)};`)
+  }
+  const stickerLines = stickerArrayLiteral(stickers, `Expr_${ident}_Stickers`, assetsById, rasterIndexByAssetId)
+
   if (!expressionShapeDiverges(expr)) {
-    return `const EyeFrame Expr_${ident} PROGMEM = \n${eyeFrameLiteral(expr.params, 0, 'linear', customShapes)};`
+    return [
+      `const EyeFrame Expr_${ident}_Frame PROGMEM = \n${eyeFrameLiteral(expr.params, 0, 'linear', customShapes)};`,
+      ...colorLines,
+      ...stickerLines,
+      `const EyeExpression Expr_${ident} = { &Expr_${ident}_Frame, &Expr_${ident}_ColorsLeft, &Expr_${ident}_ColorsRight, Expr_${ident}_Stickers, Expr_${ident}_Stickers_Count };`
+    ].join('\n')
   }
   return [
-    `// "${expr.name}" has different left/right eye shapes`,
+    `// "${expr.name}" has different left/right eye shapes -- SetExpression() needs a single`,
+    `// shared pose, so this exports as separate pieces for manual eyesDrawEye()/`,
+    `// eyesDrawStickers() use instead of one bundled EyeExpression (see the Quick Reference`,
+    `// below).`,
     `const EyeFrame Expr_${ident}_L PROGMEM = \n${eyeFrameLiteral(expressionLeftParams(expr), 0, 'linear', customShapes)};`,
-    `const EyeFrame Expr_${ident}_R PROGMEM = \n${eyeFrameLiteral(expressionRightParams(expr), 0, 'linear', customShapes)};`
+    `const EyeFrame Expr_${ident}_R PROGMEM = \n${eyeFrameLiteral(expressionRightParams(expr), 0, 'linear', customShapes)};`,
+    ...colorLines,
+    ...stickerLines
   ].join('\n')
 }
 
@@ -155,15 +201,32 @@ function toRgb565Hex(hex: string): string {
   return `0x${hexToRgb565(hex).toString(16).toUpperCase().padStart(4, '0')}`
 }
 
-// RGB565 has no alpha channel, so Border Opacity and Pupil Opacity are both pre-blended here
-// into single flat colors: border against the display background (matching the ring trick
-// eyesDrawEye uses below) — 0% -> exactly the background color (invisible ring), 100% -> the
-// pure border color; pupil against the iris (what it visually sits on top of) — 0% -> the
-// pupil becomes invisible against the iris, 100% -> the pure pupil color, same idea Highlight
-// uses in the studio preview (drawn at a fixed 92% alpha over whatever's beneath it).
+// RGB565 has no alpha channel, so everything the studio preview draws as a gradient, a soft
+// blur, or a partial-alpha overlay is pre-computed here into flat colors eyesDrawEye() can
+// paint directly:
+//   - Border Opacity: blended against the display background (matching the ring trick
+//     eyesDrawEye uses) — 0% -> exactly the background color (invisible ring), 100% -> the
+//     pure border color.
+//   - Pupil Opacity: blended against the iris (what the pupil visually sits on top of) — 0% ->
+//     the pupil becomes invisible against the iris, 100% -> the pure pupil color.
+//   - Sclera/Iris: the studio draws a soft vertical gradient (sclera) and radial gradient
+//     (iris) via shadeColor() — scleraTop/Bottom and irisLight/Dark are those exact shaded
+//     endpoints, RGB565-packed; eyesFillEyeSclera()/eyesFillIrisGradient() (PLAYER_CODE)
+//     approximate the gradients from these (scanline blend for sclera, concentric rings for
+//     iris — Adafruit_GFX has no gradient primitive).
+//   - Highlight: the studio draws it at a fixed 92% alpha over the pupil (matching pupilBlend
+//     above) — highlightBlend is that exact blend, pre-baked the same way pupil opacity is.
+//   - shadowIntensity/glowIntensity: passed through as-is (0-100) — eyesDrawEye() computes the
+//     studio's exact alpha-ramp formulas from these at draw time, since (unlike the above) the
+//     shadow/glow bands cover a *range* of alphas across many pixels, not one flat blend.
 function colorSetLiteral(colors: EyeColors, backgroundColor: string): string {
   const borderBlend = mixColors(backgroundColor, colors.border, colors.borderOpacity / 100)
   const pupilBlend = mixColors(colors.iris, colors.pupil, colors.pupilOpacity / 100)
+  const highlightBlend = mixColors(pupilBlend, colors.highlight, 0.92)
+  const scleraTop = shadeColor(colors.sclera, 6)
+  const scleraBottom = shadeColor(colors.sclera, -10)
+  const irisLight = shadeColor(colors.iris, 12)
+  const irisDark = shadeColor(colors.iris, -22)
   const fields = [
     toRgb565Hex(colors.sclera),
     toRgb565Hex(colors.iris),
@@ -172,7 +235,14 @@ function colorSetLiteral(colors: EyeColors, backgroundColor: string): string {
     toRgb565Hex(colors.shadow),
     toRgb565Hex(colors.glow),
     toRgb565Hex(borderBlend),
-    Math.round(colors.borderWidth)
+    Math.round(colors.borderWidth),
+    Math.max(0, Math.min(100, Math.round(colors.shadowIntensity))),
+    Math.max(0, Math.min(100, Math.round(colors.glowIntensity))),
+    toRgb565Hex(scleraTop),
+    toRgb565Hex(scleraBottom),
+    toRgb565Hex(irisLight),
+    toRgb565Hex(irisDark),
+    toRgb565Hex(highlightBlend)
   ]
   return `{ ${fields.join(', ')} }`
 }
@@ -189,8 +259,11 @@ function exportColors(project: Project): string {
   const lines = [
     `#define EYE_COLOR_BACKGROUND ${toRgb565Hex(display.backgroundColor)} // RGB565 — Display panel's background color`,
     ``,
-    `// sclera, iris, pupil, highlight, shadow, glow, border, borderWidth (border and pupil`,
-    `// already have Border/Pupil Opacity pre-blended in — RGB565 has no alpha channel).`,
+    `// sclera, iris, pupil, highlight, shadow, glow, border, borderWidth, shadowIntensity,`,
+    `// glowIntensity, scleraTop, scleraBottom, irisLight, irisDark, highlightBlend — see the`,
+    `// comment above colorSetLiteral() in the studio's cppExport.ts for what each precomputed`,
+    `// field is for (border/pupil/highlight opacity and the sclera/iris gradients all have no`,
+    `// RGB565 alpha channel to work with, so they're pre-blended here).`,
     `const EyeColorSet EYE_COLORS_LEFT = ${colorSetLiteral(left, display.backgroundColor)};`
   ]
   if (same) {
@@ -283,15 +356,12 @@ function exportPupilShapes(project: Project): string {
 // state beyond what this pass covers. Flagging this here the same way SVG/sprite-sheet
 // import were flagged as deferred in the plan, rather than silently under-delivering it.
 //
-// Built-in procedural stickers: only 4 of the 14 (stars, hearts, rain, confetti) have a
-// hand-ported C++ drawer below (eyesDrawSticker_Stars/Hearts/Rain/Confetti) — chosen because
-// they cover the range of techniques the other 10 reuse (twinkling polygon particles, a
-// reused pupil-shape polygon, simple looping line particles, rotating polygon particles) and
-// because two of them reuse point tables already exported for pupil shapes (PUPIL_SHAPE_STAR/
-// HEART/DIAMOND), keeping the added code small. The rest are opaque, hand-authored particle
-// art. This is a real, scoped reduction from "all 14 export" — flagged rather than silently
-// dropped: selecting one of the other 10 as a project-level sticker draws nothing on real
-// hardware (still renders correctly in the studio preview) until a follow-up ports the rest.
+// Built-in procedural stickers: all 14 have a hand-ported C++ drawer below
+// (eyesDrawSticker_Rain/Snow/Zzz/... in PLAYER_CODE), each a direct port of the matching
+// drawer in the studio's builtinStickers.ts — same closed-form math/seeds, so firmware and
+// studio preview lay out identically. A few use a fixed-polygon approximation of a curve the
+// studio draws with quadratic beziers (tears, fire — Adafruit_GFX has no curve-fill
+// primitive); noted on those two drawers individually.
 //
 // Raster (imported PNG/GIF) stickers export in full: each frame's already-capped (<=64x64,
 // see stickerImport.ts) RGBA data quantizes to RGB565 here, with a reserved magenta sentinel
@@ -339,9 +409,11 @@ function stickerBuiltinEnumName(id: BuiltinStickerId): string {
   return `STICKER_BUILTIN_${id.replace(/([A-Z])/g, '_$1').toUpperCase()}`
 }
 
-// The 4 built-ins with a real C++ drawer below — everything else falls back to "draw nothing"
-// in eyesDrawStickerProcedural() (PLAYER_CODE) rather than something visually wrong.
-const STICKER_BUILTINS_WITH_FIRMWARE_DRAWER: ReadonlySet<BuiltinStickerId> = new Set(['stars', 'hearts', 'rain', 'confetti'])
+// Every built-in now has a real C++ drawer (see eyesDrawStickerProcedural() in PLAYER_CODE) —
+// kept as a set (rather than deleting the "unported" check in exportStickers() below) so a
+// future built-in that's added without a firmware port yet still gets flagged instead of
+// silently drawing nothing.
+const STICKER_BUILTINS_WITH_FIRMWARE_DRAWER: ReadonlySet<BuiltinStickerId> = new Set(STICKER_BUILTIN_ENUM_ORDER)
 
 // RGBA (0-255 per channel) -> RGB565, with alpha < 128 mapped to the reserved transparent
 // sentinel instead of a real color — see STICKER_TRANSPARENT_RGB565's own comment.
@@ -403,17 +475,59 @@ function stickerDefLiteral(s: StickerInstance, asset: StickerAsset | undefined, 
   return `  { ${fields.join(', ')} }`
 }
 
-function exportStickers(project: Project): string {
-  const stickers = project.stickers.filter((s) => s.visible)
+// Emits one scope's `const StickerDef <ident>[] PROGMEM = {...}; const uint8_t <ident>_Count = N;`
+// pair (or an empty-array fallback when there are none) — shared by Project/Expression/
+// Animation scope export so all three use the exact same literal format and the exact same
+// (already-built, cross-scope) rasterIndexByAssetId, so a raster asset used in more than one
+// scope still shares a single exported pixel table (see exportStickers() below).
+function stickerArrayLiteral(
+  stickers: StickerInstance[],
+  ident: string,
+  assetsById: Map<string, StickerAsset>,
+  rasterIndexByAssetId: Map<string, number>
+): string[] {
+  if (stickers.length === 0) {
+    return [`const StickerDef ${ident}[] = {};`, `const uint8_t ${ident}_Count = 0;`]
+  }
+  return [
+    `const StickerDef ${ident}[] PROGMEM = {`,
+    stickers.map((s) => stickerDefLiteral(s, assetsById.get(s.assetId), rasterIndexByAssetId)).join(',\n'),
+    `};`,
+    `const uint8_t ${ident}_Count = ${stickers.length};`
+  ]
+}
+
+// Every scope's sticker instances (project + every expression + every animation), each already
+// filtered to `visible` — collected once so the raster-asset table (below) is built from every
+// scope a raster sticker could appear in, not just Project.stickers, and so the "no firmware
+// drawer yet" check (also below) covers every scope too.
+function allStickerScopes(project: Project): { label: string; stickers: StickerInstance[] }[] {
+  return [
+    { label: 'project', stickers: project.stickers.filter((s) => s.visible) },
+    ...project.expressions.map((e) => ({ label: `expression "${e.name}"`, stickers: e.stickers.filter((s) => s.visible) })),
+    ...project.animations.map((a) => ({ label: `animation "${a.name}"`, stickers: a.stickers.filter((s) => s.visible) }))
+  ]
+}
+
+// Exports the sticker enums/structs, the (cross-scope, deduped) raster asset pixel tables, and
+// Project.stickers itself (PROJECT_STICKERS) — Expression/Animation scopes export their own
+// StickerDef arrays from exportExpression()/exportAnimation() via stickerArrayLiteral() above,
+// reusing the assetsById/rasterIndexByAssetId this returns so every scope shares one raster
+// pixel table instead of duplicating it per scope.
+function exportStickers(project: Project): { code: string; assetsById: Map<string, StickerAsset>; rasterIndexByAssetId: Map<string, number> } {
+  const scopes = allStickerScopes(project)
+  const projectStickers = scopes[0].stickers
   const assetsById = new Map(project.stickerAssets.map((a) => [a.id, a]))
 
   const usedRasterAssets: StickerAsset[] = []
   const rasterIndexByAssetId = new Map<string, number>()
-  for (const s of stickers) {
-    const asset = assetsById.get(s.assetId)
-    if (asset && asset.kind === 'raster' && asset.frameRgba && !rasterIndexByAssetId.has(asset.id)) {
-      rasterIndexByAssetId.set(asset.id, usedRasterAssets.length)
-      usedRasterAssets.push(asset)
+  for (const { stickers } of scopes) {
+    for (const s of stickers) {
+      const asset = assetsById.get(s.assetId)
+      if (asset && asset.kind === 'raster' && asset.frameRgba && !rasterIndexByAssetId.has(asset.id)) {
+        rasterIndexByAssetId.set(asset.id, usedRasterAssets.length)
+        usedRasterAssets.push(asset)
+      }
     }
   }
 
@@ -427,7 +541,9 @@ function exportStickers(project: Project): string {
     STICKER_BUILTIN_ENUM_ORDER.map((id, i) => `  ${stickerBuiltinEnumName(id)}${i === 0 ? ' = 0' : ''}`).join(',\n'),
     '};',
     '',
-    '// One placed sticker (project-wide scope only — see the Stickers comment above).',
+    '// One placed sticker (Project.stickers export as PROJECT_STICKERS below; each Expression',
+    '// and Animation exports its own array the same way — see exportExpression()/',
+    '// exportAnimation() and their _Stickers/_Stickers_Count constants).',
     'struct StickerDef {',
     '  uint8_t kind;        // StickerKind',
     '  uint8_t assetIndex;  // StickerBuiltinId when kind==PROCEDURAL; index into STICKER_RASTER_ASSETS when kind==RASTER',
@@ -487,38 +603,38 @@ function exportStickers(project: Project): string {
     })
     lines.push(`const StickerRasterAsset STICKER_RASTER_ASSETS[] = {\n${rows.join(',\n')}\n};`)
   } else {
-    lines.push('// (no imported raster stickers used at the project scope in this project)')
+    lines.push('// (no imported raster stickers used anywhere in this project)')
     lines.push('const StickerRasterAsset STICKER_RASTER_ASSETS[] = { { nullptr, nullptr, 0, 0, 0 } };')
   }
   lines.push(`const uint8_t STICKER_RASTER_ASSET_COUNT = ${usedRasterAssets.length};`)
   lines.push('')
 
-  if (stickers.length > 0) {
-    lines.push('// kind, assetIndex, layer, x, y, width, height, scale, rotation, opacity, tintColor,')
-    lines.push('// flipH, flipV, animSpeed, animFps, startDelayMs, loopMode, reverse, fadeInMs, fadeOutMs,')
-    lines.push('// startTimeMs, endTimeMs, driftX, driftY, spin, pulseScale, pulseOpacity')
-    lines.push('const StickerDef PROJECT_STICKERS[] PROGMEM = {')
-    lines.push(stickers.map((s) => stickerDefLiteral(s, assetsById.get(s.assetId), rasterIndexByAssetId)).join(',\n'))
-    lines.push('};')
-  } else {
-    lines.push('// (this project has no project-scope stickers)')
-    lines.push('const StickerDef PROJECT_STICKERS[] = {};')
-  }
-  lines.push(`const uint8_t PROJECT_STICKER_COUNT = ${stickers.length};`)
+  lines.push('// kind, assetIndex, layer, x, y, width, height, scale, rotation, opacity, tintColor,')
+  lines.push('// flipH, flipV, animSpeed, animFps, startDelayMs, loopMode, reverse, fadeInMs, fadeOutMs,')
+  lines.push('// startTimeMs, endTimeMs, driftX, driftY, spin, pulseScale, pulseOpacity')
+  lines.push('// Project-wide stickers — always visible. Each Expression/Animation below exports its own')
+  lines.push('// _Stickers array the same way; eyesDrawEyePair() merges whichever is currently active with')
+  lines.push('// this one at draw time (see the Stickers comment above and eyesDrawEyePair() in PLAYER_CODE).')
+  lines.push(...stickerArrayLiteral(projectStickers, 'PROJECT_STICKERS', assetsById, rasterIndexByAssetId))
 
-  const unported = stickers.filter((s) => {
-    const asset = assetsById.get(s.assetId)
-    return asset?.kind === 'procedural' && asset.builtinId && !STICKER_BUILTINS_WITH_FIRMWARE_DRAWER.has(asset.builtinId)
-  })
-  if (unported.length > 0) {
+  const unported = new Set<string>()
+  for (const { label, stickers } of scopes) {
+    for (const s of stickers) {
+      const asset = assetsById.get(s.assetId)
+      if (asset?.kind === 'procedural' && asset.builtinId && !STICKER_BUILTINS_WITH_FIRMWARE_DRAWER.has(asset.builtinId)) {
+        unported.add(`"${s.name}" (${label})`)
+      }
+    }
+  }
+  if (unported.size > 0) {
     lines.push('')
-    lines.push('// NOTE: the following project stickers use a built-in that has no firmware drawer yet')
-    lines.push('// (see the Stickers comment above) and will draw nothing on real hardware, though they')
-    lines.push('// render correctly in the studio preview:')
-    for (const s of unported) lines.push(`//   "${s.name}"`)
+    lines.push('// NOTE: the following stickers use a built-in that has no firmware drawer yet (see the')
+    lines.push('// Stickers comment above) and will draw nothing on real hardware, though they render')
+    lines.push('// correctly in the studio preview:')
+    for (const s of unported) lines.push(`//   ${s}`)
   }
 
-  return lines.join('\n')
+  return { code: lines.join('\n'), assetsById, rasterIndexByAssetId }
 }
 
 // eyesPlayAnimation() itself is time-based (reads millis(), not a per-call frame counter),
@@ -700,6 +816,23 @@ inline float eyesEyeHalfWidthAt(float dy, float hx, float hy, float rx, float ry
   float t = (ySide - (hy - ry)) / ry;
   if (t > 1.0f) t = 1.0f;
   return (hx - rx) + rx * sqrtf(max(0.0f, 1.0f - t * t));
+}
+
+// The eye's own half-height at horizontal offset \`dx\` from its center — the column-
+// parameterized twin of eyesEyeHalfWidthAt() above (identical rounded-rect-with-elliptical-
+// corners boundary, x/y roles swapped): \`hy\` for columns within the flat vertical span
+// (|dx| <= hx-rx), narrowing toward \`hy-ry\` as dx approaches the corner band's outer edge
+// (|dx| -> hx). eyesFillEyelid() below uses this to confine its fill to the eye's TRUE
+// silhouette per column instead of a fixed margin, so the eyelid's edge follows the eye's own
+// rounded corners exactly (matching the studio preview's ctx.clip()) rather than cutting a
+// flat/straight edge through them. Returns -1 for columns entirely left/right of the eye.
+inline float eyesEyeHalfHeightAt(float dx, float hx, float hy, float rx, float ry) {
+  float xSide = fabsf(dx);
+  if (xSide > hx) return -1.0f;
+  if (rx < 0.01f || xSide <= hx - rx) return hy;
+  float t = (xSide - (hx - rx)) / rx;
+  if (t > 1.0f) t = 1.0f;
+  return (hy - ry) + ry * sqrtf(max(0.0f, 1.0f - t * t));
 }
 
 // Fills a rounded-rect whose corners are quarter-*ellipses* (independent x/y radii), via
@@ -888,8 +1021,8 @@ inline void eyesFillPupilShape(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eye
   }
 }
 
-// Fills one eyelid: a background-colored region from the eye's own top/bottom edge down to
-// a cutoff line that combines a linear tilt (shear) and a symmetric curvature offset —
+// Fills one eyelid: a background-colored region from the eye's own TRUE rounded-rect boundary
+// down to a cutoff line that combines a linear tilt (shear) and a symmetric curvature offset —
 //   taper(x)  = (1 - (x/halfW)^2)^2      for |x| <= halfW, else 0
 //   yCutoff(x) = yBase + slope*x + curveOffset * taper(x)
 // curvaturePct ranges -100 (curved inward) to 100 (curved outward) through 0 (flat/neutral):
@@ -898,121 +1031,70 @@ inline void eyesFillPupilShape(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eye
 // toward less coverage instead. The taper is a border-radius-style bump, not a plain
 // parabola: at x=±halfW (the eye's own flat-side edge) it reaches 0 WITH zero slope, so the
 // curve blends smoothly into the flat sides — and from there into the eye's rounded corners
-// — with no kink, at any eye width/height/radius or curvature value.
-// This is mathematically identical to what the studio's preview draws: it samples this exact
-// formula one point per pixel column and connects the dots (see the comment above the eyelid
-// block in drawEye.ts). Filled column-by-column (drawFastVLine) since the cutoff is
-// naturally a function of x, not y, which also makes the curve inherently smooth — no
-// per-pixel corner cases, so no sharp edges regardless of how extreme the tilt/curvature
-// values are.
+// — with no kink, at any eye width/height/radius or curvature value. This taper/cutoff math
+// is mathematically identical to what the studio's preview draws (see the comment above the
+// eyelid block in drawEye.ts) — deliberately NOT radius-aware itself, same as the studio.
+//
+// What differs from a naive port: the studio gets its eyelid's OUTER edge trimmed to the
+// eye's true rounded-corner silhouette for free from the ctx.clip() already in effect when it
+// draws the eye — the "flat past yCutoff" that a naive column sweep would draw all the way up
+// to a fixed top/bottom margin gets cut off by that clip near the corners, so what's actually
+// visible there follows the corner's own curve. Adafruit_GFX has no equivalent clip, so this
+// recomputes the exact same eye boundary (eyesEyeHalfHeightAt, the column-parameterized twin
+// of eyesEyeHalfWidthAt() the sclera/iris/pupil fills already clip against) per column and
+// uses THAT as the far bound instead of a fixed margin — without this, the eyelid would paint
+// a flat/straight edge through the rounded corner, extending past the true eye boundary and
+// overpainting the border's own corner curve, exactly the defect this fixes. Filled
+// column-by-column (drawFastVLine) since the cutoff is naturally a function of x, not y.
 template <typename T>
-inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, bool isUpper,
+inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius, bool isUpper,
                             float coveragePct, float tiltDeg, float curvaturePct, uint16_t color) {
   if (coveragePct <= 0) return;
-  float halfW = w / 2.0f;
+  float hx = w / 2.0f;
+  float hy = h / 2.0f;
+  float rx = radius < hx ? (float)radius : hx;
+  float ry = radius < hy ? (float)radius : hy;
   float coverage = (coveragePct / 100.0f) * h;
-  float yBase = isUpper ? (-h / 2.0f + coverage) : (h / 2.0f - coverage);
+  float yBase = isUpper ? (-hy + coverage) : (hy - coverage);
   float curveOffset = (curvaturePct / 100.0f) * h * 0.5f;
   float slope = tanf(tiltDeg * (float)PI / 180.0f);
-  int16_t edgeMargin = (int16_t)ceilf(h / 2.0f) + 2; // a couple px past the eye's own top/bottom, safely covers the flat side
 
-  int16_t halfWi = (int16_t)ceilf(halfW);
+  int16_t halfWi = (int16_t)ceilf(hx);
   for (int16_t dx = -halfWi; dx <= halfWi; dx++) {
-    float u = halfW > 0.01f ? (float)dx / halfW : 0.0f;
+    float eyeHalfHeight = eyesEyeHalfHeightAt((float)dx, hx, hy, rx, ry);
+    if (eyeHalfHeight < 0) continue; // this column falls entirely outside the eye's own silhouette
+
+    float u = hx > 0.01f ? (float)dx / hx : 0.0f;
     if (u > 1.0f) u = 1.0f;
     if (u < -1.0f) u = -1.0f;
     float t = 1.0f - u * u;
     float taper = t * t;
     float yCutoff = yBase + slope * (float)dx + curveOffset * taper;
+    // Clamp the curve itself to the eye's true silhouette too — without this, a large
+    // negative curvature/tilt could compute a yCutoff *beyond* the corner's own boundary,
+    // which would flip yTop/yBottom's usual ordering meaning near the corner instead of just
+    // clipping cleanly to it.
+    if (yCutoff > eyeHalfHeight) yCutoff = eyeHalfHeight;
+    if (yCutoff < -eyeHalfHeight) yCutoff = -eyeHalfHeight;
     int16_t worldX = cx + dx;
     int16_t yTop, yBottom;
     if (isUpper) {
-      yTop = cy - edgeMargin;
+      yTop = cy - (int16_t)ceilf(eyeHalfHeight);
       yBottom = cy + (int16_t)roundf(yCutoff);
     } else {
       yTop = cy + (int16_t)roundf(yCutoff);
-      yBottom = cy + edgeMargin;
+      yBottom = cy + (int16_t)ceilf(eyeHalfHeight);
     }
     if (yBottom < yTop) continue;
     gfx.drawFastVLine(worldX, yTop, yBottom - yTop + 1, color);
   }
 }
 
-// ---- Drawing — flat-color layered render: border -> sclera -> iris -> pupil -> highlight -> ----
-// eyelids. \`T\` is a template (not \`Adafruit_GFX&\`) on purpose: fillRoundRect()/
-// fillCircle() aren't virtual in Adafruit_GFX, so a buffered subclass like
-// EyesBufferedDisplay below only gets called correctly when the concrete type is known at
-// compile time. \`bgColor\` should match your Display panel's background so eyelids blend in.
-// \`colors\` is passed in (not hardcoded macros) so the two eyes can use different palettes
-// when Eye Target: Left/Right editing gave them different colors in the studio.
-template <typename T>
-inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor, const EyeColorSet& colors) {
-  int16_t w = (int16_t)e.width, h = (int16_t)e.height;
-  int16_t radius = (int16_t)e.radius;
-
-  // Border — an outer stadium/oval shape colors.borderWidth larger on every side, in a color
-  // already pre-blended toward the background by Border Opacity (see EYE_COLORS_LEFT/RIGHT
-  // above). The sclera fill right after this covers everything except a thin ring, giving
-  // an opaque border with no per-pixel alpha needed. Both fills go through
-  // eyesFillRoundedRect() (elliptical corners) rather than Adafruit_GFX's own
-  // fillRoundRect(), so a maxed-out Radius on a non-square eye renders as a smooth oval
-  // here exactly like it does in the studio's preview. borderWidth lives on EyeColorSet
-  // (not a single global #define) so left/right eyes can have different ring thicknesses,
-  // matching the studio's per-eye Visual Reference overrides.
-  if (colors.borderWidth > 0) {
-    eyesFillRoundedRect(gfx, cx, cy, w + colors.borderWidth * 2, h + colors.borderWidth * 2,
-                         radius + colors.borderWidth, colors.border);
-  }
-
-  eyesFillRoundedRect(gfx, cx, cy, w, h, radius, colors.sclera);
-
-  int sign = mirror ? -1 : 1;
-  int16_t px = cx + (int16_t)(sign * (e.pupilX / 100.0f) * (w / 2.0f));
-  int16_t py = cy + (int16_t)((e.pupilY / 100.0f) * (h / 2.0f));
-
-  int16_t irisRX = (int16_t)((e.irisWidth / 100.0f) * (w / 2.0f));
-  int16_t irisRY = (int16_t)((e.irisHeight / 100.0f) * (h / 2.0f));
-  int16_t pupilRX = (int16_t)((e.pupilWidth / 100.0f) * (w / 2.0f));
-  int16_t pupilRY = (int16_t)((e.pupilHeight / 100.0f) * (h / 2.0f));
-
-  // Both clipped to the eye's own silhouette (see eyesFillEllipseInEye) since Pupil X/Y can
-  // now push the shared iris/pupil center out toward the eye's edge. The iris never rotates
-  // (0deg) and stays a plain ellipse; the pupil uses its own independent Pupil Rotation and
-  // whatever shape e.pupilShape selects — see eyesFillPupilShape() above.
-  if (irisRX > 0 && irisRY > 0) eyesFillEllipseInEye(gfx, cx, cy, w, h, radius, px, py, irisRX, irisRY, 0.0f, colors.iris);
-  if (pupilRX > 0 && pupilRY > 0) {
-    eyesFillPupilShape(gfx, cx, cy, w, h, radius, px, py, pupilRX, pupilRY, e.pupilRotation, e.pupilShape, e.pupilCustomShapeIndex, colors.pupil);
-  }
-
-  float hlBaseX = pupilRX > 0 ? pupilRX : irisRX;
-  float hlBaseY = pupilRY > 0 ? pupilRY : irisRY;
-  float hlBase = (hlBaseX + hlBaseY) / 2.0f;
-  int16_t hR = (int16_t)((e.highlightSize / 100.0f) * hlBase);
-  if (hR > 0 && hlBase > 0) {
-    int16_t hx = px + (int16_t)(sign * (e.highlightX / 100.0f) * hlBaseX);
-    int16_t hy = py + (int16_t)((e.highlightY / 100.0f) * hlBaseY);
-    gfx.fillCircle(hx, hy, hR, colors.highlight);
-  }
-
-  eyesFillEyelid(gfx, cx, cy, w, h, true, e.upperEyelid, e.upperEyelidTilt, e.upperEyelidCurvature, bgColor);
-  eyesFillEyelid(gfx, cx, cy, w, h, false, e.lowerEyelid, e.lowerEyelidTilt, e.lowerEyelidCurvature, bgColor);
-}
-
-// Draws both eyes from one shared LiveEye pose (the common case: animations always play
-// back mirrored). Pass EYE_COLORS_LEFT/EYE_COLORS_RIGHT — when the studio's two eyes have
-// identical colors, EYE_COLORS_RIGHT is just a reference to EYE_COLORS_LEFT (see above), so
-// this always works whether or not the eyes actually differ.
-template <typename T>
-inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& e, uint16_t bgColor,
-                             const EyeColorSet& leftColors, const EyeColorSet& rightColors) {
-  int16_t half = (int16_t)(e.distance / 2);
-  eyesDrawEye(gfx, screenCx - half, screenCy, e, false, bgColor, leftColors);
-  eyesDrawEye(gfx, screenCx + half, screenCy, e, true, bgColor, rightColors);
-}
-
 // ---- Stickers — see the "Stickers" comment in the studio's cppExport.ts for the exported ----
-// scope/simplifications this player implements (project-wide only, 4 of 14 built-ins have a
-// firmware drawer, opacity is a visibility threshold not a smooth blend).
+// scope/simplifications this player implements (project-wide only; opacity is a visibility
+// threshold, not a smooth blend). Declared before eyesDrawEyePair() below since it calls
+// eyesDrawStickers() directly as an ordinary
+// (non-dependent-lookup) name.
 
 // Deterministic pseudo-random in [0,1) — must match hash01() in the studio's
 // builtinStickers.ts exactly (same formula) so a particle sticker's layout in firmware matches
@@ -1159,15 +1241,235 @@ inline void eyesDrawSticker_Confetti(T& gfx, int16_t cx, int16_t cy, int16_t rx,
   }
 }
 
-// Dispatches to whichever of the 4 ported built-ins matches builtinId; anything else (the
-// remaining 10 — see the Stickers comment above) draws nothing, on purpose.
+template <typename T>
+inline void eyesDrawSticker_Snow(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  float rMag = (fabsf((float)rx) + fabsf((float)ry)) * 0.5f;
+  for (uint8_t i = 0; i < 7; i++) {
+    float phase = eyesStickerHash01(i * 5 + 3);
+    float xBase = -0.8f + 1.6f * eyesStickerHash01(i * 11 + 4);
+    float speed = 0.35f + 0.1f * eyesStickerHash01(i * 13 + 5);
+    float local = fmodf(t * speed + phase, 1.0f);
+    if (local < 0) local += 1.0f;
+    float y = local * 2.2f - 1.1f;
+    float x = xBase + 0.12f * sinf(t * 2.0f + i);
+    float pr = 0.05f + 0.03f * eyesStickerHash01(i * 17 + 6);
+    int16_t wx = cx + (int16_t)roundf((x * oc - y * os) * rx);
+    int16_t wy = cy + (int16_t)roundf((x * os + y * oc) * ry);
+    int16_t wr = (int16_t)roundf(pr * rMag);
+    if (wr > 0) gfx.fillCircle(wx, wy, wr, color);
+  }
+}
+
+template <typename T>
+inline void eyesDrawSticker_Zzz(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  const float period = 2.4f;
+  for (uint8_t i = 0; i < 3; i++) {
+    float local = fmodf(t + i * (period / 3.0f), period) / period;
+    if (local < 0) local += 1.0f;
+    float zcx = -0.6f + local * 1.3f;
+    float zcy = 0.7f - local * 1.6f;
+    float r = 0.14f + 0.08f * i;
+    float px[4] = { -r, r, -r, r };
+    float py[4] = { -r, -r, r, r };
+    int16_t wx[4], wy[4];
+    for (uint8_t v = 0; v < 4; v++) {
+      float lx = zcx + px[v];
+      float ly = zcy + py[v];
+      wx[v] = cx + (int16_t)roundf((lx * oc - ly * os) * rx);
+      wy[v] = cy + (int16_t)roundf((lx * os + ly * oc) * ry);
+    }
+    gfx.drawLine(wx[0], wy[0], wx[1], wy[1], color);
+    gfx.drawLine(wx[1], wy[1], wx[2], wy[2], color);
+    gfx.drawLine(wx[2], wy[2], wx[3], wy[3], color);
+  }
+}
+
+template <typename T>
+inline void eyesDrawSticker_Sparkles(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  static const float SPARK_X[8] = { 0.0f, 0.18f, 1.0f, 0.18f, 0.0f, -0.18f, -1.0f, -0.18f };
+  static const float SPARK_Y[8] = { -1.0f, -0.18f, 0.0f, 0.18f, 1.0f, 0.18f, 0.0f, -0.18f };
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  for (uint8_t i = 0; i < 5; i++) {
+    float x = -0.75f + 1.5f * eyesStickerHash01(i * 21 + 1);
+    float y = -0.75f + 1.5f * eyesStickerHash01(i * 21 + 2);
+    float phase = eyesStickerHash01(i * 21 + 3) * (float)PI * 2.0f;
+    float twinkle = sinf(t * 3.0f + phase);
+    if (twinkle < 0) twinkle = 0;
+    if (twinkle < 0.05f) continue;
+    float pr = 0.12f * twinkle + 0.04f;
+    float prot = t * 0.5f + i;
+    float pc = cosf(prot), ps = sinf(prot);
+    int16_t wx[8], wy[8];
+    for (uint8_t v = 0; v < 8; v++) {
+      float lx = x + (SPARK_X[v] * pc - SPARK_Y[v] * ps) * pr;
+      float ly = y + (SPARK_X[v] * ps + SPARK_Y[v] * pc) * pr;
+      wx[v] = cx + (int16_t)roundf((lx * oc - ly * os) * rx);
+      wy[v] = cy + (int16_t)roundf((lx * os + ly * oc) * ry);
+    }
+    eyesFillPolygonScreen(gfx, wx, wy, 8, color);
+  }
+}
+
+template <typename T>
+inline void eyesDrawSticker_Clouds(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  float rMag = (fabsf((float)rx) + fabsf((float)ry)) * 0.5f;
+  float dx = 0.05f * sinf(t * 0.3f);
+  static const float PUFF_X[4] = { -0.35f, 0.0f, 0.4f, -0.05f };
+  static const float PUFF_Y[4] = { 0.1f, -0.05f, 0.1f, 0.25f };
+  static const float PUFF_R[4] = { 0.32f, 0.4f, 0.3f, 0.28f };
+  for (uint8_t i = 0; i < 4; i++) {
+    float x = PUFF_X[i] + dx;
+    float y = PUFF_Y[i];
+    int16_t wx = cx + (int16_t)roundf((x * oc - y * os) * rx);
+    int16_t wy = cy + (int16_t)roundf((x * os + y * oc) * ry);
+    int16_t wr = (int16_t)roundf(PUFF_R[i] * rMag);
+    if (wr > 0) gfx.fillCircle(wx, wy, wr, color);
+  }
+}
+
+// Approximates drawTeardrop()'s quadratic-bezier outline in the studio as a fixed 6-point
+// polygon (Adafruit_GFX has no curve-fill primitive) — visually close at sticker sizes.
+template <typename T>
+inline void eyesDrawSticker_Tears(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  static const float TEAR_X[6] = { 0.0f, 0.75f, 0.45f, 0.0f, -0.45f, -0.75f };
+  static const float TEAR_Y[6] = { -1.0f, 0.2f, 0.85f, 1.0f, 0.85f, 0.2f };
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  for (uint8_t i = 0; i < 2; i++) {
+    float xBase = -0.3f + 0.6f * i;
+    float phase = eyesStickerHash01(i * 31 + 1);
+    float local = fmodf(t * 0.4f + phase, 1.0f);
+    if (local < 0) local += 1.0f;
+    float y = local * 1.6f - 0.6f;
+    float pr = 0.16f;
+    int16_t wx[6], wy[6];
+    for (uint8_t v = 0; v < 6; v++) {
+      float lx = xBase + TEAR_X[v] * pr;
+      float ly = y + TEAR_Y[v] * pr;
+      wx[v] = cx + (int16_t)roundf((lx * oc - ly * os) * rx);
+      wy[v] = cy + (int16_t)roundf((lx * os + ly * oc) * ry);
+    }
+    eyesFillPolygonScreen(gfx, wx, wy, 6, color);
+  }
+}
+
+// Approximates fire()'s quadratic-bezier flame silhouette as a fixed 8-point polygon, with
+// the flicker applied to the tip (the dominant visual wobble) rather than every curve segment.
+template <typename T>
+inline void eyesDrawSticker_Fire(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  static const float FLAME_X[8] = { 0.0f, 0.5f, 0.32f, 0.2f, 0.0f, -0.2f, -0.32f, -0.5f };
+  static const float FLAME_Y[8] = { -1.0f, -0.2f, 0.4f, 0.9f, 1.0f, 0.9f, 0.4f, -0.2f };
+  float flick = 0.08f * sinf(t * 9.0f) + 0.05f * sinf(t * 17.0f + 1.0f);
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  int16_t wx[8], wy[8];
+  for (uint8_t v = 0; v < 8; v++) {
+    float lx = FLAME_X[v];
+    float ly = FLAME_Y[v] + (v == 0 ? -flick : 0.0f);
+    wx[v] = cx + (int16_t)roundf((lx * oc - ly * os) * rx);
+    wy[v] = cy + (int16_t)roundf((lx * os + ly * oc) * ry);
+  }
+  eyesFillPolygonScreen(gfx, wx, wy, 8, color);
+}
+
+template <typename T>
+inline void eyesDrawSticker_Smoke(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  float rMag = (fabsf((float)rx) + fabsf((float)ry)) * 0.5f;
+  for (uint8_t i = 0; i < 4; i++) {
+    float phase = eyesStickerHash01(i * 41 + 1);
+    float local = fmodf(t * 0.3f + phase, 1.0f);
+    if (local < 0) local += 1.0f;
+    float y = 0.9f - local * 1.8f;
+    float x = 0.15f * sinf(t * 1.5f + i * 2.0f);
+    float pr = 0.12f + local * 0.22f;
+    int16_t wx = cx + (int16_t)roundf((x * oc - y * os) * rx);
+    int16_t wy = cy + (int16_t)roundf((x * os + y * oc) * ry);
+    int16_t wr = (int16_t)roundf(pr * rMag);
+    if (wr > 0) gfx.fillCircle(wx, wy, wr, color);
+  }
+}
+
+// The studio's lightning fades between two alpha levels (1.0, then 0.4) before going fully
+// invisible — collapsed here into one visible window (no partial-alpha step in firmware, see
+// the opacity comment above) rather than a three-way alpha cut.
+template <typename T>
+inline void eyesDrawSticker_Lightning(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  static const float BOLT_X[6] = { 0.15f, -0.25f, 0.05f, -0.15f, 0.35f, 0.05f };
+  static const float BOLT_Y[6] = { -1.0f, 0.05f, 0.05f, 1.0f, -0.1f, -0.1f };
+  float cycle = fmodf(t, 1.6f);
+  if (cycle < 0) cycle += 1.6f;
+  if (cycle >= 0.22f) return;
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  int16_t wx[6], wy[6];
+  for (uint8_t v = 0; v < 6; v++) {
+    wx[v] = cx + (int16_t)roundf((BOLT_X[v] * oc - BOLT_Y[v] * os) * rx);
+    wy[v] = cy + (int16_t)roundf((BOLT_X[v] * os + BOLT_Y[v] * oc) * ry);
+  }
+  eyesFillPolygonScreen(gfx, wx, wy, 6, color);
+}
+
+template <typename T>
+inline void eyesDrawSticker_BurstLines(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  float rad = rotationDeg * (float)PI / 180.0f;
+  float oc = cosf(rad), os = sinf(rad);
+  float pulse = 0.7f + 0.3f * sinf(t * 4.0f);
+  const uint8_t N = 8;
+  for (uint8_t i = 0; i < N; i++) {
+    float angle = ((float)i / N) * 2.0f * (float)PI;
+    float ca = cosf(angle), sa = sinf(angle);
+    float inner = 0.35f;
+    float outer = 0.35f + 0.6f * pulse;
+    float x1 = ca * inner, y1 = sa * inner;
+    float x2 = ca * outer, y2 = sa * outer;
+    int16_t wx1 = cx + (int16_t)roundf((x1 * oc - y1 * os) * rx);
+    int16_t wy1 = cy + (int16_t)roundf((x1 * os + y1 * oc) * ry);
+    int16_t wx2 = cx + (int16_t)roundf((x2 * oc - y2 * os) * rx);
+    int16_t wy2 = cy + (int16_t)roundf((x2 * os + y2 * oc) * ry);
+    gfx.drawLine(wx1, wy1, wx2, wy2, color);
+  }
+}
+
+template <typename T>
+inline void eyesDrawSticker_ExpandingCircles(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+  (void)rotationDeg; // rings are rotation-invariant
+  float rMag = (fabsf((float)rx) + fabsf((float)ry)) * 0.5f;
+  const uint8_t N = 3;
+  for (uint8_t i = 0; i < N; i++) {
+    float local = fmodf(t * 0.6f + (float)i / N, 1.0f);
+    if (local < 0) local += 1.0f;
+    int16_t wr = (int16_t)roundf(local * rMag);
+    if (wr > 0) gfx.drawCircle(cx, cy, wr, color);
+  }
+}
+
+// Dispatches to the matching built-in drawer. All 14 built-ins have a firmware drawer.
 template <typename T>
 inline void eyesDrawStickerProcedural(T& gfx, uint8_t builtinId, int16_t cx, int16_t cy, int16_t rx, int16_t ry,
                                        float rotationDeg, uint16_t color, float t) {
   switch (builtinId) {
+    case STICKER_BUILTIN_RAIN: eyesDrawSticker_Rain(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_SNOW: eyesDrawSticker_Snow(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_ZZZ: eyesDrawSticker_Zzz(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
     case STICKER_BUILTIN_STARS: eyesDrawSticker_Stars(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
     case STICKER_BUILTIN_HEARTS: eyesDrawSticker_Hearts(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
-    case STICKER_BUILTIN_RAIN: eyesDrawSticker_Rain(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_SPARKLES: eyesDrawSticker_Sparkles(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_CLOUDS: eyesDrawSticker_Clouds(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_TEARS: eyesDrawSticker_Tears(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_FIRE: eyesDrawSticker_Fire(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_SMOKE: eyesDrawSticker_Smoke(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_LIGHTNING: eyesDrawSticker_Lightning(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_BURST_LINES: eyesDrawSticker_BurstLines(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_EXPANDING_CIRCLES: eyesDrawSticker_ExpandingCircles(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
     case STICKER_BUILTIN_CONFETTI: eyesDrawSticker_Confetti(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
     default: break;
   }
@@ -1293,13 +1595,13 @@ inline uint8_t eyesPickStickerFrame(const StickerRasterAsset& asset, const Stick
   return asset.frameCount - 1;
 }
 
-// Draws every sticker on the given layer — call with STICKER_LAYER_BEHIND right after
-// fillScreen()/before eyesDrawEyePair(), and STICKER_LAYER_FRONT right after it, matching the
-// studio preview's background -> behind-stickers -> eyes -> front-stickers -> bezel order.
-// \`stickers\`/\`rasterAssets\` are always PROJECT_STICKERS/STICKER_RASTER_ASSETS from the
-// generated header; \`elapsedMs\` should be a free-running clock (e.g. millis() since boot, or
-// since a sticker-scene reset) — stickers animate independently of whatever expression/
-// animation the eyes are currently playing.
+// Draws every sticker on the given layer. eyesDrawEyePair() below already calls this
+// automatically (STICKER_LAYER_BEHIND before the eyes, STICKER_LAYER_FRONT after) — call it
+// directly yourself only if you're not using eyesDrawEyePair() (e.g. drawing each eye
+// separately via eyesDrawEye()). \`stickers\`/\`rasterAssets\` are always PROJECT_STICKERS/
+// STICKER_RASTER_ASSETS from the generated header; \`elapsedMs\` should be a free-running clock
+// (e.g. millis() since boot) — stickers animate independently of whatever expression/animation
+// the eyes are currently playing.
 template <typename T>
 inline void eyesDrawStickers(T& gfx, const StickerDef* stickers, uint8_t count,
                               const StickerRasterAsset* rasterAssets, uint8_t rasterCount,
@@ -1378,12 +1680,14 @@ inline bool eyesPlayAnimation(const EyeAnimation& anim, unsigned long& startMill
 // command — then call UpdateEyes() once per loop() to advance and get the pose to draw.
 // Switching expressions crossfades smoothly over EYES_BLEND_MS; switching (or restarting)
 // an animation cuts over immediately, since the animation's own first keyframe already
-// eases in on its own.
+// eases in on its own. Declared before "Drawing" below since eyesDrawEyePair() reads
+// eyesPlayer directly (to merge in whichever expression's/animation's own stickers are
+// currently active — see the Stickers comment further up) as an ordinary, non-dependent name.
 const unsigned long EYES_BLEND_MS = 250;
 
 struct EyesPlayerState {
   bool playingAnimation;
-  const EyeFrame* expression;
+  const EyeExpression* expression;
   EyeAnimation animation;
   unsigned long animStart;
   uint16_t frameIndex;
@@ -1391,21 +1695,28 @@ struct EyesPlayerState {
   LiveEye blendFrom;
   unsigned long blendStart;
   bool blending;
+  EyeColorSet colorsLeft;
+  EyeColorSet colorsRight;
 };
-static EyesPlayerState eyesPlayer = { false, nullptr, { nullptr, 0, false }, 0, 0, {}, {}, 0, false };
+static EyesPlayerState eyesPlayer = { false, nullptr, { nullptr, 0, false, nullptr, 0 }, 0, 0, {}, {}, 0, false, EYE_COLORS_LEFT, EYE_COLORS_RIGHT };
 
 // Shows a static expression, crossfading smoothly from whatever's currently on screen —
-// call it with any Expr_* constant, e.g. SetExpression(Expr_Happy).
-inline void SetExpression(const EyeFrame& expression) {
+// call it with any Expr_* constant, e.g. SetExpression(Expr_Happy). Also switches this
+// expression's own color palette and stickers, matching the studio (applying an expression
+// there can change all three — see the EyeExpression comment above).
+inline void SetExpression(const EyeExpression& expression) {
   eyesPlayer.blendFrom = eyesPlayer.live;
   eyesPlayer.blendStart = millis();
   eyesPlayer.blending = true;
   eyesPlayer.playingAnimation = false;
   eyesPlayer.expression = &expression;
+  eyesPlayer.colorsLeft = *expression.colorsLeft;
+  eyesPlayer.colorsRight = *expression.colorsRight;
 }
 
 // Plays (or restarts) an animation from its first keyframe — call it with any Anim_*
-// constant, e.g. PlayAnimation(Anim_Blink).
+// constant, e.g. PlayAnimation(Anim_Blink). Colors are left untouched (matching the studio,
+// where Animate mode never changes the color theme — only expressions can).
 inline void PlayAnimation(const EyeAnimation& animation) {
   eyesPlayer.playingAnimation = true;
   eyesPlayer.animation = animation;
@@ -1421,14 +1732,226 @@ inline LiveEye UpdateEyes() {
   if (eyesPlayer.blending) {
     float t = (float)(millis() - eyesPlayer.blendStart) / (float)EYES_BLEND_MS;
     if (t >= 1.0f) { t = 1.0f; eyesPlayer.blending = false; }
-    LiveEye target = eyesLerpFrame(*eyesPlayer.expression, *eyesPlayer.expression, 0);
+    LiveEye target = eyesLerpFrame(*eyesPlayer.expression->frame, *eyesPlayer.expression->frame, 0);
     eyesPlayer.live = eyesLerpLive(eyesPlayer.blendFrom, target, t);
   } else if (eyesPlayer.playingAnimation) {
     eyesPlayAnimation(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live);
   } else if (eyesPlayer.expression) {
-    eyesPlayer.live = eyesLerpFrame(*eyesPlayer.expression, *eyesPlayer.expression, 0);
+    eyesPlayer.live = eyesLerpFrame(*eyesPlayer.expression->frame, *eyesPlayer.expression->frame, 0);
   }
   return eyesPlayer.live;
+}
+
+// ---- Drawing — flat-color layered render: border -> sclera -> iris -> pupil -> highlight -> ----
+// eyelids. \`T\` is a template (not \`Adafruit_GFX&\`) on purpose: fillRoundRect()/
+// fillCircle() aren't virtual in Adafruit_GFX, so a buffered subclass like
+// EyesBufferedDisplay below only gets called correctly when the concrete type is known at
+// compile time. \`bgColor\` should match your Display panel's background so eyelids blend in.
+// \`colors\` is passed in (not hardcoded macros) so the two eyes can use different palettes
+// when Eye Target: Left/Right editing gave them different colors in the studio.
+// Blends two RGB565 colors channel-by-channel; t=0 -> a, t=1 -> b — the RGB565 counterpart to
+// the studio's mixColors()/shadeColor(), used by the gradient/glow/shadow approximations below
+// to combine two *already-exported* flat colors at a runtime-computed ratio (something
+// colorSetLiteral() can't precompute, since it varies per scanline row, not per project).
+inline uint16_t eyesBlendRgb565(uint16_t a, uint16_t b, float t) {
+  if (t <= 0.0f) return a;
+  if (t >= 1.0f) return b;
+  uint8_t ar = (a >> 11) & 0x1F, ag = (a >> 5) & 0x3F, ab = a & 0x1F;
+  uint8_t br = (b >> 11) & 0x1F, bg = (b >> 5) & 0x3F, bb = b & 0x1F;
+  uint8_t rr = (uint8_t)roundf(ar + (br - ar) * t);
+  uint8_t rg = (uint8_t)roundf(ag + (bg - ag) * t);
+  uint8_t rb = (uint8_t)roundf(ab + (bb - ab) * t);
+  return ((uint16_t)rr << 11) | ((uint16_t)rg << 5) | rb;
+}
+
+// Fills the sclera as a top-to-bottom gradient (scleraTop -> scleraBottom) via horizontal
+// scanlines, the RGB565 equivalent of the studio's ctx.createLinearGradient() sclera fill —
+// same eyesEyeHalfWidthAt() boundary eyesFillRoundedRect() uses, so the silhouette matches
+// exactly. If shadowIntensity > 0, additionally blends in the ambient shadow color across the
+// eye's top ~32% (matching drawEye.ts's shadow gradient band exactly: alpha 0 at the shadow
+// band's own bottom edge, ramping up toward the eye's top edge, scaled by the studio's
+// 0.15 + intensity/100*0.45 formula) — composited per-row on top of the sclera gradient
+// color already computed for that row, since RGB565 can't layer two semi-transparent fills
+// the way Canvas 2D does.
+template <typename T>
+inline void eyesFillEyeSclera(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius,
+                               uint16_t scleraTop, uint16_t scleraBottom, uint16_t shadowColor, uint8_t shadowIntensity) {
+  if (w <= 0 || h <= 0) return;
+  float hx = w / 2.0f;
+  float hy = h / 2.0f;
+  float rx = radius < hx ? (float)radius : hx;
+  float ry = radius < hy ? (float)radius : hy;
+  int16_t halfH = (int16_t)ceilf(hy);
+  float shadowH = h * 0.32f;
+  float shadowAlpha = 0.15f + (shadowIntensity / 100.0f) * 0.45f;
+  for (int16_t dy = -halfH; dy <= halfH; dy++) {
+    float xExtent = eyesEyeHalfWidthAt((float)dy, hx, hy, rx, ry);
+    if (xExtent < 0) continue;
+    float t = (dy + hy) / (float)h;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    uint16_t rowColor = eyesBlendRgb565(scleraTop, scleraBottom, t);
+    if (shadowIntensity > 0) {
+      float distFromTop = dy + hy;
+      if (distFromTop < shadowH) {
+        float localAlpha = shadowAlpha * (1.0f - distFromTop / shadowH);
+        rowColor = eyesBlendRgb565(rowColor, shadowColor, localAlpha);
+      }
+    }
+    int16_t ix = (int16_t)xExtent;
+    gfx.drawFastHLine(cx - ix, cy + dy, ix * 2 + 1, rowColor);
+  }
+}
+
+// Approximates the studio's 3-stop radial iris gradient (light center -> base color at 75% ->
+// dark edge) with RINGS concentric ellipses, largest/darkest drawn first and smallest/lightest
+// drawn last (on top) — Adafruit_GFX has no gradient fill, so nested flat-color shapes is the
+// standard MCU-graphics approximation. Clipped to the eye's own silhouette via
+// eyesFillEllipseInEye() exactly like the flat iris fill this replaces.
+template <typename T>
+inline void eyesFillIrisGradient(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eyeW, int16_t eyeH, int16_t eyeRadius,
+                                  int16_t ecx, int16_t ecy, int16_t rx, int16_t ry,
+                                  uint16_t irisLight, uint16_t irisBase, uint16_t irisDark) {
+  const uint8_t RINGS = 6;
+  for (int8_t i = RINGS; i >= 1; i--) {
+    float t = (float)i / (float)RINGS;
+    uint16_t color;
+    if (t >= 0.75f) {
+      color = eyesBlendRgb565(irisBase, irisDark, (t - 0.75f) / 0.25f);
+    } else {
+      color = eyesBlendRgb565(irisLight, irisBase, t / 0.75f);
+    }
+    int16_t ringRx = (int16_t)roundf(rx * t);
+    int16_t ringRy = (int16_t)roundf(ry * t);
+    if (ringRx <= 0 || ringRy <= 0) continue;
+    eyesFillEllipseInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, ringRx, ringRy, 0.0f, color);
+  }
+}
+
+// Approximates the studio's outer glow halo (a blurred, semi-transparent copy of the eye
+// shape bleeding outward past the border) with RINGS concentric enlarged rounded-rects, each
+// blended toward the background color — Adafruit_GFX has no blur/shadow primitive, so this is
+// a soft-edged-looking ring falloff rather than a true gaussian blur; genuinely the closest
+// achievable approximation on this hardware, not a pixel-identical match (see the Colors
+// comment in generateCppHeader() below for the equivalent studio-vs-firmware caveat). Drawn
+// *before* the border/sclera, same order as the studio, so the border still paints cleanly on
+// top of it.
+template <typename T>
+inline void eyesFillGlow(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius,
+                          uint16_t bgColor, uint16_t glowColor, uint8_t glowIntensity) {
+  if (glowIntensity == 0) return;
+  const uint8_t RINGS = 4;
+  float maxBlur = 4.0f + (glowIntensity / 100.0f) * 22.0f;
+  float baseAlpha = 0.25f + (glowIntensity / 100.0f) * 0.55f;
+  for (int8_t i = RINGS; i >= 1; i--) {
+    float t = (float)i / (float)RINGS;
+    float expand = maxBlur * t;
+    float alpha = baseAlpha * (1.0f - t) * 1.3f;
+    if (alpha > 1.0f) alpha = 1.0f;
+    if (alpha <= 0.02f) continue;
+    uint16_t ringColor = eyesBlendRgb565(bgColor, glowColor, alpha);
+    eyesFillRoundedRect(gfx, cx, cy, w + (int16_t)(expand * 2), h + (int16_t)(expand * 2), radius + (int16_t)expand, ringColor);
+  }
+}
+
+template <typename T>
+inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor, const EyeColorSet& colors) {
+  int16_t w = (int16_t)e.width, h = (int16_t)e.height;
+  int16_t radius = (int16_t)e.radius;
+
+  // Glow — a soft halo bleeding outward past the eye's own edge (and past the border ring
+  // below), drawn first so everything else paints over it. See eyesFillGlow()'s own comment
+  // for the approximation this makes (no true blur on this hardware).
+  eyesFillGlow(gfx, cx, cy, w, h, radius, bgColor, colors.glow, colors.glowIntensity);
+
+  // Border — an outer stadium/oval shape colors.borderWidth larger on every side, in a color
+  // already pre-blended toward the background by Border Opacity (see EYE_COLORS_LEFT/RIGHT
+  // above). The sclera fill right after this covers everything except a thin ring, giving
+  // an opaque border with no per-pixel alpha needed. Both fills go through
+  // eyesFillRoundedRect() (elliptical corners) rather than Adafruit_GFX's own
+  // fillRoundRect(), so a maxed-out Radius on a non-square eye renders as a smooth oval
+  // here exactly like it does in the studio's preview. borderWidth lives on EyeColorSet
+  // (not a single global #define) so left/right eyes can have different ring thicknesses,
+  // matching the studio's per-eye Visual Reference overrides.
+  if (colors.borderWidth > 0) {
+    eyesFillRoundedRect(gfx, cx, cy, w + colors.borderWidth * 2, h + colors.borderWidth * 2,
+                         radius + colors.borderWidth, colors.border);
+  }
+
+  // Sclera — vertical gradient (scleraTop -> scleraBottom) with the ambient shadow band
+  // blended in — see eyesFillEyeSclera()'s own comment.
+  eyesFillEyeSclera(gfx, cx, cy, w, h, radius, colors.scleraTop, colors.scleraBottom, colors.shadow, colors.shadowIntensity);
+
+  int sign = mirror ? -1 : 1;
+  int16_t px = cx + (int16_t)(sign * (e.pupilX / 100.0f) * (w / 2.0f));
+  int16_t py = cy + (int16_t)((e.pupilY / 100.0f) * (h / 2.0f));
+
+  int16_t irisRX = (int16_t)((e.irisWidth / 100.0f) * (w / 2.0f));
+  int16_t irisRY = (int16_t)((e.irisHeight / 100.0f) * (h / 2.0f));
+  int16_t pupilRX = (int16_t)((e.pupilWidth / 100.0f) * (w / 2.0f));
+  int16_t pupilRY = (int16_t)((e.pupilHeight / 100.0f) * (h / 2.0f));
+
+  // Both clipped to the eye's own silhouette (see eyesFillEllipseInEye) since Pupil X/Y can
+  // now push the shared iris/pupil center out toward the eye's edge. The iris never rotates
+  // (0deg) and gets the radial-gradient approximation (eyesFillIrisGradient — see its own
+  // comment); the pupil uses its own independent Pupil Rotation and whatever shape
+  // e.pupilShape selects — see eyesFillPupilShape() above.
+  if (irisRX > 0 && irisRY > 0) {
+    eyesFillIrisGradient(gfx, cx, cy, w, h, radius, px, py, irisRX, irisRY, colors.irisLight, colors.iris, colors.irisDark);
+  }
+  if (pupilRX > 0 && pupilRY > 0) {
+    eyesFillPupilShape(gfx, cx, cy, w, h, radius, px, py, pupilRX, pupilRY, e.pupilRotation, e.pupilShape, e.pupilCustomShapeIndex, colors.pupil);
+  }
+
+  float hlBaseX = pupilRX > 0 ? pupilRX : irisRX;
+  float hlBaseY = pupilRY > 0 ? pupilRY : irisRY;
+  float hlBase = (hlBaseX + hlBaseY) / 2.0f;
+  int16_t hR = (int16_t)((e.highlightSize / 100.0f) * hlBase);
+  if (hR > 0 && hlBase > 0) {
+    int16_t hx = px + (int16_t)(sign * (e.highlightX / 100.0f) * hlBaseX);
+    int16_t hy = py + (int16_t)((e.highlightY / 100.0f) * hlBaseY);
+    // colors.highlightBlend is the highlight pre-blended 92% over the pupil color, matching
+    // the studio's fixed-alpha look (RGB565 can't do the real per-pixel alpha blend here).
+    gfx.fillCircle(hx, hy, hR, colors.highlightBlend);
+  }
+
+  eyesFillEyelid(gfx, cx, cy, w, h, radius, true, e.upperEyelid, e.upperEyelidTilt, e.upperEyelidCurvature, bgColor);
+  eyesFillEyelid(gfx, cx, cy, w, h, radius, false, e.lowerEyelid, e.lowerEyelidTilt, e.lowerEyelidCurvature, bgColor);
+}
+
+// Draws both eyes from one shared LiveEye pose (the common case: animations always play
+// back mirrored), plus every currently-active sticker (behind-layer first, then the eyes,
+// then front-layer) — Project.stickers (always active) merged with whichever
+// Expression/Animation is currently active via eyesPlayer (see SetExpression()/
+// PlayAnimation() above), matching the studio's effectiveStickers(). So this one call is
+// genuinely everything needed to draw a frame, matching the "Minimal usage" example at the
+// top of this file. Stickers animate off millis() directly (a free-running clock since boot)
+// since there's no other natural "since when" reference for a call site with no extra state
+// of its own — see the Stickers comment further up for what this covers/doesn't. Pass
+// EYE_COLORS_LEFT/EYE_COLORS_RIGHT (or, if you want per-expression colors — see the Colors
+// comment above — eyesPlayer.colorsLeft/colorsRight) — when the studio's two eyes have
+// identical colors, EYE_COLORS_RIGHT is just a reference to EYE_COLORS_LEFT (see above), so
+// this always works whether or not the eyes actually differ.
+template <typename T>
+inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& e, uint16_t bgColor,
+                             const EyeColorSet& leftColors, const EyeColorSet& rightColors) {
+  int16_t half = (int16_t)(e.distance / 2);
+  unsigned long stickersMs = millis();
+  const StickerDef* activeStickers = nullptr;
+  uint8_t activeStickerCount = 0;
+  if (eyesPlayer.playingAnimation) {
+    activeStickers = eyesPlayer.animation.stickers;
+    activeStickerCount = eyesPlayer.animation.stickerCount;
+  } else if (eyesPlayer.expression) {
+    activeStickers = eyesPlayer.expression->stickers;
+    activeStickerCount = eyesPlayer.expression->stickerCount;
+  }
+  eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs);
+  eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs);
+  eyesDrawEye(gfx, screenCx - half, screenCy, e, false, bgColor, leftColors);
+  eyesDrawEye(gfx, screenCx + half, screenCy, e, true, bgColor, rightColors);
+  eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs);
+  eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs);
 }
 
 // ---- Optional: flicker-free buffered display for Adafruit_GC9A01A. Only defined if ----
@@ -1578,7 +2101,7 @@ function exportDemo(project: Project): string {
     lines.push('// Cycles through every expression a few seconds apart, purely to show them off.')
     lines.push('// Replace this timer with your own trigger — a button, a sensor, a serial command,')
     lines.push('// anything — that calls SetExpression() whenever you actually want the eyes to change.')
-    lines.push(`const EyeFrame* const demoExpressions[] = { ${demoExpressions.map((e) => `&Expr_${toIdentifier(e.name)}`).join(', ')} };`)
+    lines.push(`const EyeExpression* const demoExpressions[] = { ${demoExpressions.map((e) => `&Expr_${toIdentifier(e.name)}`).join(', ')} };`)
     lines.push(`const char* const demoExpressionNames[] = { ${demoExpressions.map((e) => JSON.stringify(e.name)).join(', ')} };`)
     lines.push(`const int demoExpressionCount = ${demoExpressions.length};`)
     lines.push('int demoExprIndex = -1;')
@@ -1604,8 +2127,6 @@ function exportDemo(project: Project): string {
   }
 
   lines.push('// ---- Main update loop ---------------------------------------------------------')
-  lines.push('unsigned long demoStickersStart = 0;')
-  lines.push('')
   lines.push('void setup() {')
   lines.push('  Serial.begin(115200);')
   lines.push('  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);')
@@ -1617,7 +2138,6 @@ function exportDemo(project: Project): string {
     lines.push(`  SetExpression(Expr_${toIdentifier(demoExpressions[0].name)});`)
   }
   if (hasExpressions) lines.push('  demoExprCycleStart = millis();')
-  lines.push('  demoStickersStart = millis();')
   lines.push('}')
   lines.push('')
   lines.push('void loop() {')
@@ -1626,14 +2146,9 @@ function exportDemo(project: Project): string {
     lines.push('')
   }
   lines.push('  LiveEye live = UpdateEyes();')
-  lines.push('  unsigned long stickersElapsed = millis() - demoStickersStart;')
   lines.push('  tft.fillScreen(EYE_COLOR_BACKGROUND);')
   lines.push(
-    '  eyesDrawStickers(tft, PROJECT_STICKERS, PROJECT_STICKER_COUNT, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersElapsed);'
-  )
-  lines.push('  eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND, EYE_COLORS_LEFT, EYE_COLORS_RIGHT);')
-  lines.push(
-    '  eyesDrawStickers(tft, PROJECT_STICKERS, PROJECT_STICKER_COUNT, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersElapsed);'
+    "  eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND, eyesPlayer.colorsLeft, eyesPlayer.colorsRight);  // also draws this project's/the active expression's/animation's stickers, and the active expression's own colors"
   )
   lines.push('  tft.present();')
   lines.push('  delay(EYE_FRAME_DELAY_MS);')
@@ -1646,6 +2161,11 @@ function exportDemo(project: Project): string {
 
 export function generateCppHeader(project: Project): string {
   const guard = `EYES_EYE_ANIMATIONS_${toIdentifier(project.name).toUpperCase() || 'PROJECT'}_H`
+  // Computed once up front: builds the cross-scope raster-asset table (project + every
+  // expression + every animation) so exportAnimation()/exportExpression() below can each emit
+  // their own sticker array against the same shared STICKER_RASTER_ASSETS table instead of
+  // duplicating pixel data per scope — see exportStickers()'s own comment.
+  const stickersExport = exportStickers(project)
   const header = `/*
  * Generated by Eyes Eye Studio — do not hand-edit, re-export instead.
  * Project: ${project.name}
@@ -1729,7 +2249,7 @@ export function generateCppHeader(project: Project): string {
  *   void loop() {
  *     LiveEye live = UpdateEyes();
  *     tft.fillScreen(EYE_COLOR_BACKGROUND);
- *     eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND, EYE_COLORS_LEFT, EYE_COLORS_RIGHT);
+ *     eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND, eyesPlayer.colorsLeft, eyesPlayer.colorsRight);
  *     tft.present();
  *     delay(EYE_FRAME_DELAY_MS);  // paces drawing to EYE_TARGET_FPS
  *   }
@@ -1743,17 +2263,44 @@ export function generateCppHeader(project: Project): string {
  * See "Quick Reference" further down for every Expr_ and Anim_ name this project exports,
  * and "Example (opt-in)" at the very bottom for a complete ready-to-flash sketch using them.
  *
- * EYE_COLORS_LEFT/EYE_COLORS_RIGHT are always both defined -- pass both to eyesDrawEyePair()
- * every time. When the studio's two eyes have identical colors, EYE_COLORS_RIGHT is just a
- * reference to EYE_COLORS_LEFT (no duplicate data); when Eye Target: Left/Right editing gave
- * them different colors, both are real, distinct structs. Static poses saved with a
- * left/right shape divergence export as two constants instead of one, e.g. Expr_Blink_L /
- * Expr_Blink_R rather than a plain Expr_Blink — SetExpression() needs a single shared pose,
- * so those two aren't included in it; draw them yourself with eyesDrawEye() per eye instead.
+ * eyesPlayer.colorsLeft/colorsRight always hold whichever color palette should currently be
+ * showing: EYE_COLORS_LEFT/RIGHT (the project's shared base) until the first SetExpression()
+ * call, then that expression's own colors from then on (expressions can have their own colors,
+ * distinct from the shared base — see "Colors" further down) — PlayAnimation() never changes
+ * them, matching the studio (Animate mode always shows the project's currently-active color
+ * theme, never a per-animation one, since animations/keyframes don't carry colors at all).
+ * When an expression's own left/right colors are identical, colorsRight after SetExpression()
+ * is just a copy of colorsLeft — same "shared if identical" idea EYE_COLORS_LEFT/RIGHT use.
+ * Static poses saved with a left/right shape divergence export as two constants instead of
+ * one, e.g. Expr_Blink_L / Expr_Blink_R rather than a plain Expr_Blink — SetExpression() needs
+ * a single shared pose, so those two aren't included in it; draw them yourself with
+ * eyesDrawEye() per eye instead (their own Expr_Blink_ColorsLeft/Right and
+ * Expr_Blink_Stickers/_Stickers_Count still export normally for this manual path).
  *
- * Want lower-level control? eyesPlayAnimation(Anim_X, ...) and eyesLerpFrame(Expr_X, ...)
- * are both still here and work exactly as before — SetExpression()/PlayAnimation()/
- * UpdateEyes() are a convenience layer built on top of them, not a replacement.
+ * Want lower-level control? eyesPlayAnimation(Anim_X, ...) and eyesLerpFrame(*Expr_X.frame,
+ * ...) are both still here and work exactly as before — SetExpression()/PlayAnimation()/
+ * UpdateEyes() are a convenience layer built on top of them, not a replacement. (Expr_X is an
+ * EyeExpression now, not a bare EyeFrame — see "Colors"/"Stickers" further down for why —
+ * .frame is the pose eyesLerpFrame()/eyesDrawEye() themselves want.)
+ *
+ * If this project has any Stickers (studio's Stickers tab), eyesDrawEyePair() above already
+ * draws them too — no separate call needed, and this includes Project-wide stickers, the
+ * currently-active Expression's own stickers, and the currently-playing Animation's own
+ * stickers, merged automatically — see "Stickers" further down for exactly what exports.
+ *
+ * *** NOT EXPORTED: Idle mode / Personality ***
+ * The studio's "Idle" playback mode runs a procedural behavior engine (gaze drift, blink
+ * timing, micro-movement, breathing) driven by the 9 Personality sliders (Blink Frequency,
+ * Curiosity, Energy, Confidence, Sleepiness, Movement Speed, Random Eye Drift, Micro
+ * Movement, Idle Delay) plus Global Timing's Breathing Amount. None of that behavior is in
+ * this file — this export only ever gives you fixed Animations/Expressions, never the
+ * randomized/continuous procedural motion Idle mode previews. There's no static
+ * Anim_/Expr_ equivalent to fall back to automatically, so nothing is substituted in its
+ * place; if your firmware needs idle-style behavior, either build an Animation in the studio
+ * that approximates it (a looping blink/drift cycle) and PlayAnimation() that, or write your
+ * own timer-driven logic calling SetExpression()/eyesLerpFrame() directly. This is a real,
+ * intentionally-scoped gap (a full behavior-engine port is a substantially different task
+ * from the rendering/data export this file does), not an oversight.
  *
  * Using TFT_eSPI/LovyanGFX instead of Adafruit_GC9A01A? Skip that #include — pass your own
  * sprite/canvas object as the template type to eyesDrawEyePair()/eyesDrawEye() instead;
@@ -1804,18 +2351,18 @@ struct EyeFrame {
 // One eye's full color palette (RGB565) plus its border thickness — the studio's Eye
 // Target: Left/Right editing lets the two eyes end up with different palettes (and
 // different border widths, via Visual Reference per-eye overrides), so this is a value
-// passed to the drawing functions rather than fixed macros.
+// passed to the drawing functions rather than fixed macros. sclera/iris/pupil/highlight/
+// shadow/glow/border are the raw or opacity-blended colors (see colorSetLiteral() in the
+// studio's cppExport.ts); scleraTop/Bottom, irisLight/Dark, and highlightBlend are additional
+// precomputed values the gradient/glow/shadow drawing routines below use, approximating what
+// the studio preview renders as true Canvas 2D gradients/blur (Adafruit_GFX has neither).
 struct EyeColorSet {
   uint16_t sclera, iris, pupil, highlight, shadow, glow, border;
   uint8_t borderWidth; // ring thickness in pixels
-};
-
-// One playable animation, bundled into a single value so PlayAnimation() below only needs
-// one argument instead of the three (frames, count, loop) eyesPlayAnimation() itself needs.
-struct EyeAnimation {
-  const EyeFrame* frames;
-  uint16_t count;
-  bool loop;
+  uint8_t shadowIntensity, glowIntensity; // 0-100, straight from the Color panel
+  uint16_t scleraTop, scleraBottom; // sclera gradient endpoints
+  uint16_t irisLight, irisDark; // iris radial-gradient endpoints (iris itself is the midpoint)
+  uint16_t highlightBlend; // highlight pre-blended 92% over the pupil, matching the studio's fixed-alpha look
 };
 
 // ---- Colors -----------------------------------------------------------
@@ -1832,13 +2379,40 @@ ${exportPupilShapes(project)}
 
 // ---- Stickers -------------------------------------------------------------
 //
-// Project-wide stickers only (Expression/Animation-scoped stickers are studio-preview-only
-// for this release). Only 4 of the 14 built-ins (stars, hearts, rain, confetti) have a
-// firmware drawer yet; the rest are noted below if used. Call eyesDrawStickers() (see the
-// Player section) around eyesDrawEyePair() — STICKER_LAYER_BEHIND before it,
-// STICKER_LAYER_FRONT after — see the demo loop() below for a working example.
+// Every scope exports: Project.stickers (PROJECT_STICKERS, always visible), and each
+// Expression/Animation's own stickers (visible only while that expression/animation is
+// active — bundled into its EyeExpression/EyeAnimation below). All 14 built-ins draw on real
+// hardware. No extra code needed to draw any of this — eyesDrawEyePair() (see the Player
+// section) already merges and draws whichever stickers are currently active automatically,
+// behind-layer before the eyes and front-layer after, every time it's called.
 
-${exportStickers(project)}
+${stickersExport.code}
+
+// One playable animation, bundled into a single value so PlayAnimation() below only needs
+// one argument instead of the several eyesPlayAnimation()/eyesDrawStickers() themselves need.
+// stickers/stickerCount are this animation's own Stickers-tab stickers (visible only while
+// it's playing — see the Stickers comment above); an animation with none still gets a valid
+// (empty, count 0) array here, never a null pointer.
+struct EyeAnimation {
+  const EyeFrame* frames;
+  uint16_t count;
+  bool loop;
+  const StickerDef* stickers;
+  uint8_t stickerCount;
+};
+
+// One static expression, bundled the same way EyeAnimation is: SetExpression(Expr_X) switches
+// pose, color palette, AND stickers all at once, matching the studio (applying an expression
+// there can change all three — see applyExpression()/saveExpression() in the studio's
+// state/store.ts). Only emitted for expressions whose left/right *shape* doesn't diverge —
+// see exportExpression()'s own comment in the studio's cppExport.ts for the diverged case.
+struct EyeExpression {
+  const EyeFrame* frame;
+  const EyeColorSet* colorsLeft;
+  const EyeColorSet* colorsRight;
+  const StickerDef* stickers;
+  uint8_t stickerCount;
+};
 
 // ---- Player (easing, interpolation, drawing, playback) -----------------------
 
@@ -1846,11 +2420,13 @@ ${PLAYER_CODE}
 
 // ---- Animations -----------------------------------------------------------
 
-${project.animations.map((a) => exportAnimation(a, project.customPupilShapes)).join('\n\n')}
+${project.animations.map((a) => exportAnimation(a, project.customPupilShapes, stickersExport.assetsById, stickersExport.rasterIndexByAssetId)).join('\n\n')}
 
 // ---- Expressions (static poses) -------------------------------------------
 
-${project.expressions.map((e) => exportExpression(e, project.customPupilShapes)).join('\n\n')}
+${project.expressions
+  .map((e) => exportExpression(e, project.customPupilShapes, project.display.backgroundColor, stickersExport.assetsById, stickersExport.rasterIndexByAssetId))
+  .join('\n\n')}
 
 ${exportQuickReference(project)}
 

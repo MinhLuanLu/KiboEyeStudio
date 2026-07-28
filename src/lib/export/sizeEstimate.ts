@@ -25,9 +25,9 @@ const CUSTOM_PUPIL_SHAPE_TABLE_BYTES = 48 * 2
 // 4-byte aligned), so the struct rounds up to a multiple of 4 — roughly 56 bytes across
 // kind/assetIndex/layer/x/y/width/height/scale/rotation/opacity/tintColor/flipH/flipV/
 // animSpeed/animFps/startDelayMs/loopMode/reverse/fadeInMs/fadeOutMs/startTimeMs/endTimeMs/
-// driftX/driftY/spin/pulseScale/pulseOpacity plus alignment gaps. Only project-scope stickers
-// export to firmware today (see the Stickers comment in cppExport.ts), so this only counts
-// project.stickers, not Expression/Animation-scoped ones.
+// driftX/driftY/spin/pulseScale/pulseOpacity plus alignment gaps. Project, Expression, and
+// Animation stickers all export to firmware (see the Stickers comment in cppExport.ts), so
+// this counts every scope's own StickerDef array, not just project.stickers.
 const STICKER_DEF_BYTES = 56
 
 // A raster sticker frame's flash cost is exact (width*height*2 bytes RGB565, PROGMEM) rather
@@ -37,6 +37,9 @@ const STICKER_WARN_FRAME_COUNT = 20 // frames — more than this per raster asse
 
 export interface SizeEstimate {
   keyframeCount: number
+  /** Visible stickers across every scope (project + every expression + every animation) —
+   * matches what exportStickers() actually emits, see estimateProjectSize(). */
+  stickerCount: number
   flashBytes: number
   ramBytes: number
   /** Human-readable warnings for oversized/too-many-frame raster stickers — surfaced in the
@@ -53,9 +56,15 @@ export function estimateProjectSize(project: Project): SizeEstimate {
   const keyframeCount = project.animations.reduce((sum, a) => sum + a.keyframes.length, 0) + expressionFrameCount
   const pupilShapeBytes = BUILTIN_PUPIL_SHAPE_TABLE_BYTES + project.customPupilShapes.length * CUSTOM_PUPIL_SHAPE_TABLE_BYTES
 
-  // Mirrors exportStickers()'s own "visible project stickers, raster assets deduped by id"
-  // logic in cppExport.ts, so this estimate matches what actually gets exported.
-  const visibleStickers = project.stickers.filter((s) => s.visible)
+  // Mirrors exportStickers()'s own "every scope's visible stickers, raster assets deduped by
+  // id across all of them" logic in cppExport.ts, so this estimate matches what actually gets
+  // exported (Project.stickers + every Expression's + every Animation's own stickers).
+  const allScopeStickers = [
+    ...project.stickers,
+    ...project.expressions.flatMap((e) => e.stickers),
+    ...project.animations.flatMap((a) => a.stickers)
+  ]
+  const visibleStickers = allScopeStickers.filter((s) => s.visible)
   const assetsById = new Map(project.stickerAssets.map((a) => [a.id, a]))
   const usedRasterAssetIds = new Set<string>()
   const stickerWarnings: string[] = []
@@ -79,7 +88,7 @@ export function estimateProjectSize(project: Project): SizeEstimate {
   // Rough RAM estimate: one "current" and one "target" EyeFrame plus small player state,
   // since PROGMEM data itself doesn't consume RAM until copied out frame-by-frame.
   const ramBytes = EYE_FRAME_BYTES * 2 + 64
-  return { keyframeCount, flashBytes, ramBytes, stickerWarnings }
+  return { keyframeCount, stickerCount: visibleStickers.length, flashBytes, ramBytes, stickerWarnings }
 }
 
 export function formatBytes(bytes: number): string {
