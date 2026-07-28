@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useStore } from '@/state/store'
 import type { ApplyVisualReferenceOptions } from '@/state/store'
 import { ControlsPanel } from '@/components/Controls/ControlsPanel'
@@ -57,24 +57,12 @@ export function VisualReferencePanel() {
   const project = useStore((s) => s.project)
   const applyVisualReference = useStore((s) => s.applyVisualReference)
   const checkpoint = useStore((s) => s.checkpoint)
-  const referenceImportOpen = useStore((s) => s.referenceImportOpen)
-  const setReferenceImportOpen = useStore((s) => s.setReferenceImportOpen)
 
   const [tab, setTab] = useState<VRTab>('controls')
   const [scope, setScope] = useState<ApplyVisualReferenceOptions['scope']>('all')
   const [eyeTargetOpt, setEyeTargetOpt] = useState<ApplyVisualReferenceOptions['eyeTarget']>('both')
   const [overrideMode, setOverrideMode] = useState<ApplyVisualReferenceOptions['overrideMode']>('preserve')
   const [status, setStatus] = useState<string | null>(null)
-
-  // Toolbar's "Import Reference..." button sets this one-shot signal (and switches the right
-  // panel here) to jump straight to the Import Image tab; consume it immediately so it fires
-  // again next time the button is clicked even if this tab is already open.
-  useEffect(() => {
-    if (referenceImportOpen) {
-      setTab('import')
-      setReferenceImportOpen(false)
-    }
-  }, [referenceImportOpen, setReferenceImportOpen])
 
   const overrideCountInScope = (): number => {
     let count = 0

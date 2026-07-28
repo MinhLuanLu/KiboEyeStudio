@@ -37,7 +37,7 @@ import {
 } from '@/types'
 import { builtinAnimations } from '@/data/builtinAnimations'
 import { builtinExpressions } from '@/data/builtinExpressions'
-import { animationDuration } from '@/engine/interpolate'
+import { MIN_SEGMENT_MS, animationDuration, keyframeStartTimes } from '@/engine/interpolate'
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
 import { STICKER_PRESET_BUNDLES } from '@/data/stickerPresets'
 
@@ -117,6 +117,11 @@ interface StoreState {
   activeAnimationId: string
   selectedKeyframeId: string | null
   selectedExpressionId: string | null
+  /** Session-only clipboard for Copy/Paste Keyframe — a plain deep copy, not tied to the
+   * animation it was copied from, so pasting into a different animation just works. Not part
+   * of `project` (so it's outside undo/redo and never persisted), matching how
+   * `selectedKeyframeId` etc. are already handled. */
+  keyframeClipboard: Keyframe | null
 
   /** Which eye(s) setEyeParam/setEyeParams/setColor currently write to. Switching this
    * alone never mutates the project — only a subsequent edit does. */
@@ -129,9 +134,6 @@ interface StoreState {
   devModeOpen: boolean
   devStats: DevStats
   exportDialogOpen: boolean
-  /** One-shot navigation signal: Toolbar sets this true to ask the Visual Reference panel to
-   * jump to its Import Image sub-tab; the panel consumes it (flips back to false) once seen. */
-  referenceImportOpen: boolean
   guideOpen: boolean
 
   /** Which top-level section the left library panel shows. Lives in the store (not local
@@ -204,10 +206,35 @@ interface StoreState {
   addKeyframe: (afterKeyframeId?: string) => void
   updateKeyframeParams: (keyframeId: string, partial: Partial<EyeParams>) => void
   updateKeyframeDuration: (keyframeId: string, duration: number) => void
+  /** Repositions a keyframe to land at an absolute time (ms) from the animation's start, by
+   * adjusting the *previous* keyframe's outgoing duration — the same mechanism dragging a
+   * keyframe on the timeline already uses (duration is "time to the next keyframe", so a
+   * keyframe's own absolute start time is entirely a function of every earlier keyframe's
+   * duration; there's no separate "absolute time" field to write). No-op for the first
+   * keyframe, which is always pinned at t=0. */
+  setKeyframeAbsoluteTime: (keyframeId: string, absoluteMs: number) => void
   updateKeyframeEasing: (keyframeId: string, easing: EasingType, customBezier?: [number, number, number, number]) => void
   duplicateKeyframe: (keyframeId: string) => void
   deleteKeyframe: (keyframeId: string) => void
   reorderKeyframe: (keyframeId: string, newIndex: number) => void
+  /** Deep-copies a keyframe into keyframeClipboard (session-only, see its own comment). */
+  copyKeyframe: (keyframeId: string) => void
+  /** Inserts keyframeClipboard's contents as a new keyframe in the *active* animation at
+   * absoluteMs, splitting whichever segment it lands in (the surrounding keyframes' own
+   * positions are preserved — only the segment it's inserted into is divided) rather than
+   * shifting everything after it, matching "paste without disturbing the rest of the timeline"
+   * — a no-op if the clipboard is empty. */
+  pasteKeyframeAt: (absoluteMs: number) => void
+  /** Copies fields from an existing Expression into a keyframe's pose. 'styleOnly' (the
+   * default — see the Timeline UI) copies just the shared-appearance fields
+   * (STYLE_EYE_PARAM_FIELDS: shape/size/curvature/highlight — the same set Visual Reference
+   * uses), leaving this keyframe's own movement/pupil-position/eyelid-motion values alone so
+   * applying an expression to e.g. a "look left" keyframe doesn't erase the look-left part.
+   * 'replace' overwrites the keyframe's entire pose with the expression's. Either way this
+   * copies values in *once* — the keyframe has no memory of which expression it came from
+   * (see the Timeline "Apply Expression" control's own comment for why a live-linked
+   * reference isn't implemented in this pass). */
+  applyExpressionToKeyframe: (keyframeId: string, expressionId: string, mode: 'replace' | 'styleOnly') => void
 
   // expressions
   addExpression: (name: string) => void
@@ -232,11 +259,9 @@ interface StoreState {
   toggleDevMode: () => void
   setDevStats: (stats: DevStats) => void
   setExportDialogOpen: (open: boolean) => void
-  setReferenceImportOpen: (open: boolean) => void
   setGuideOpen: (open: boolean) => void
   setLeftTab: (tab: LeftTab) => void
   setRightTab: (tab: RightTab) => void
-  openReferenceImport: () => void
 
   // stickers
   /** Which sticker list add/edit actions below operate on — mirrors eyeTarget's "switching
@@ -303,6 +328,7 @@ export const useStore = create<StoreState>()(
     activeAnimationId: '',
     selectedKeyframeId: null,
     selectedExpressionId: null,
+    keyframeClipboard: null,
     eyeTarget: 'both',
 
     stickerScope: 'project',
@@ -315,7 +341,6 @@ export const useStore = create<StoreState>()(
     devModeOpen: false,
     devStats: { fps: 0, frame: 0, timeMs: 0 },
     exportDialogOpen: false,
-    referenceImportOpen: false,
     guideOpen: false,
     leftTab: 'animations',
     rightTab: 'controls',
@@ -826,6 +851,17 @@ export const useStore = create<StoreState>()(
         s.dirty = true
       }),
 
+    setKeyframeAbsoluteTime: (keyframeId, absoluteMs) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        const idx = a.keyframes.findIndex((k) => k.id === keyframeId)
+        if (idx <= 0) return // first keyframe is always pinned at t=0, same as the drag handler
+        const prevStart = keyframeStartTimes(a)[idx - 1]
+        a.keyframes[idx - 1].duration = Math.max(MIN_SEGMENT_MS, Math.round(absoluteMs - prevStart))
+        s.dirty = true
+      }),
+
     updateKeyframeEasing: (keyframeId, easing, customBezier) =>
       set((s) => {
         const a = activeAnimationOf(s.project, s.activeAnimationId)
@@ -868,6 +904,67 @@ export const useStore = create<StoreState>()(
         const clamped = Math.max(0, Math.min(a.keyframes.length - 1, newIndex))
         const [item] = a.keyframes.splice(idx, 1)
         a.keyframes.splice(clamped, 0, item)
+        s.dirty = true
+      }),
+
+    copyKeyframe: (keyframeId) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const kf = a?.keyframes.find((k) => k.id === keyframeId)
+        if (kf) s.keyframeClipboard = JSON.parse(JSON.stringify(kf))
+      }),
+
+    pasteKeyframeAt: (absoluteMsRaw) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const clip = s.keyframeClipboard
+        if (!a || !clip) return
+        const absoluteMs = Math.max(0, absoluteMsRaw)
+
+        const copy: Keyframe = JSON.parse(JSON.stringify(clip))
+        copy.id = nanoid(10)
+
+        const starts = keyframeStartTimes(a)
+        const lastIdx = a.keyframes.length - 1
+        if (a.keyframes.length === 0) {
+          a.keyframes.push(copy)
+        } else if (absoluteMs >= starts[lastIdx]) {
+          // Pasting at/after the last keyframe extends the timeline rather than splitting a
+          // segment — there's nothing after it to preserve the position of.
+          a.keyframes.push(copy)
+        } else {
+          // Find which segment [starts[i], starts[i+1]) absoluteMs falls in and split it: the
+          // earlier keyframe's own duration shrinks to reach the new keyframe, and the new
+          // keyframe's duration covers the remainder — every *other* keyframe's absolute time
+          // is unaffected, matching "paste without disturbing the rest of the timeline."
+          let i = 0
+          while (i < lastIdx && !(absoluteMs >= starts[i] && absoluteMs < starts[i + 1])) i++
+          const segStart = starts[i]
+          const segEnd = starts[i + 1]
+          const clampedMs = Math.max(segStart + MIN_SEGMENT_MS, Math.min(segEnd - MIN_SEGMENT_MS, absoluteMs))
+          copy.duration = Math.round(segEnd - clampedMs)
+          a.keyframes[i].duration = Math.round(clampedMs - segStart)
+          a.keyframes.splice(i + 1, 0, copy)
+        }
+
+        s.selectedKeyframeId = copy.id
+        s.dirty = true
+      }),
+
+    applyExpressionToKeyframe: (keyframeId, expressionId, mode) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const kf = a?.keyframes.find((k) => k.id === keyframeId)
+        const expr = s.project.expressions.find((e) => e.id === expressionId)
+        if (!kf || !expr) return
+        if (mode === 'replace') {
+          kf.params = { ...expr.params }
+        } else {
+          const target = kf.params as unknown as Record<string, number | string | null>
+          const source = expr.params as unknown as Record<string, number | string | null>
+          for (const field of STYLE_EYE_PARAM_FIELDS) target[field] = source[field]
+        }
+        kf.styleOverrides = computeStyleOverrides(kf.params, null, s.project.visualReference)
         s.dirty = true
       }),
 
@@ -995,15 +1092,9 @@ export const useStore = create<StoreState>()(
     toggleDevMode: () => set((s) => void (s.devModeOpen = !s.devModeOpen)),
     setDevStats: (stats) => set((s) => void (s.devStats = stats)),
     setExportDialogOpen: (open) => set((s) => void (s.exportDialogOpen = open)),
-    setReferenceImportOpen: (open) => set((s) => void (s.referenceImportOpen = open)),
     setGuideOpen: (open) => set((s) => void (s.guideOpen = open)),
     setLeftTab: (tab) => set((s) => void (s.leftTab = tab)),
     setRightTab: (tab) => set((s) => void (s.rightTab = tab)),
-    openReferenceImport: () =>
-      set((s) => {
-        s.rightTab = 'visual-reference'
-        s.referenceImportOpen = true
-      }),
 
     setStickerScope: (scope) => set((s) => void (s.stickerScope = scope)),
     selectSticker: (id) => set((s) => void (s.selectedStickerId = id)),

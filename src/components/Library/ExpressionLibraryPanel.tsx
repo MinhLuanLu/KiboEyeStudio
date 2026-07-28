@@ -5,13 +5,13 @@ import { fitDisplayToBox } from '@/renderer/displayMask'
 import { expressionLeftColors, expressionLeftParams, expressionRightColors, expressionRightParams } from '@/types'
 import type { Expression } from '@/types'
 
-const THUMB_BOX = 48
+export const EXPRESSION_THUMB_BOX = 48
 
-function ExpressionThumb({ expr }: { expr: Expression }) {
+export function ExpressionThumb({ expr }: { expr: Expression }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const display = useStore((s) => s.project.display)
   const customShapes = useStore((s) => s.project.customPupilShapes)
-  const fitted = fitDisplayToBox(display, THUMB_BOX)
+  const fitted = fitDisplayToBox(display, EXPRESSION_THUMB_BOX)
   const leftParams = expressionLeftParams(expr)
   const rightParams = expressionRightParams(expr)
   const leftColors = expressionLeftColors(expr)

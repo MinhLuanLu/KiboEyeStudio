@@ -31,7 +31,7 @@ const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
 const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
 const PROJECT_FILE_EXTENSION = 'kiboeyes'
 
-/** Thrown by parseProjectFile for anything that isn't a readable Kibo Eye Studio project —
+/** Thrown by parseProjectFile for anything that isn't a readable Kibo Studio project —
  * caught at the call site (App.tsx) and shown to the user as a plain-language error rather
  * than crashing or silently discarding their file. */
 export class ProjectFileError extends Error {}
@@ -239,7 +239,7 @@ function parseProjectFile(json: string): ProjectFile {
   }
 
   if (!raw || typeof raw !== 'object') {
-    throw new ProjectFileError('This file does not contain a Kibo Eye Studio project.')
+    throw new ProjectFileError('This file does not contain a Kibo  Studio project.')
   }
   const obj = raw as Record<string, unknown>
 
@@ -254,7 +254,7 @@ function parseProjectFile(json: string): ProjectFile {
     return { formatVersion: PROJECT_FILE_VERSION, project, editorState: defaultEditorState(project) }
   }
 
-  throw new ProjectFileError('This file does not contain a Kibo Eye Studio project.')
+  throw new ProjectFileError('This file does not contain a Kibo  Studio project.')
 }
 
 export function serializeProjectFile(project: Project, editorState: EditorState): string {

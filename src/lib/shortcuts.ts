@@ -15,6 +15,8 @@ export interface ShortcutActions {
   prevFrame: () => void
   duplicateKeyframe: () => void
   deleteKeyframe: () => void
+  copyKeyframe: () => void
+  pasteKeyframe: () => void
   toggleDevMode: () => void
   openGuide: () => void
 }
@@ -79,6 +81,18 @@ export function useKeyboardShortcuts(actions: ShortcutActions): void {
       if (mod && e.key.toLowerCase() === 'd' && !isEditableTarget(e.target)) {
         e.preventDefault()
         actions.duplicateKeyframe()
+        return
+      }
+      // Guarded by isEditableTarget so this never hijacks normal text copy/paste in inputs —
+      // Ctrl/Cmd+C/V only act on the selected keyframe when focus is elsewhere in the app.
+      if (mod && e.key.toLowerCase() === 'c' && !isEditableTarget(e.target)) {
+        e.preventDefault()
+        actions.copyKeyframe()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'v' && !isEditableTarget(e.target)) {
+        e.preventDefault()
+        actions.pasteKeyframe()
         return
       }
       if (mod && e.key === '.') {

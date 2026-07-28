@@ -33,7 +33,7 @@ const welcome: GuideSection = {
   content: (
     <>
       <GuideP>
-        Kibo Eye Studio is a desktop app for designing procedural robot-eye animations — two eyes, rendered live on a simulated
+        Kibo  Studio is a desktop app for designing procedural robot-eye animations — two eyes, rendered live on a simulated
         round display — and exporting them as ready-to-flash C++ code for an ESP32-C6 driving a 240×240 GC9A01 display. Every
         eye is built entirely from numbers (widths, positions, colors, curves), not artwork or video, so it renders identically
         in the preview and on the real hardware, and animates smoothly at any size.
@@ -111,7 +111,7 @@ const gettingStarted: GuideSection = {
         state.
       </GuideP>
       <GuideCallout tone="note">
-        If you have unsaved changes, Kibo Eye Studio asks before discarding them — this applies to New, Open, and closing the
+        If you have unsaved changes, Kibo  Studio asks before discarding them — this applies to New, Open, and closing the
         app.
       </GuideCallout>
 
@@ -417,7 +417,7 @@ const expressions: GuideSection = {
 
       <GuideH3>Suggested expressions to build</GuideH3>
       <GuideP>
-        Kibo Eye Studio ships with 14 built-in expressions covering exactly this list already (Neutral, Happy, Sad, Focused,
+        Kibo  Studio ships with 14 built-in expressions covering exactly this list already (Neutral, Happy, Sad, Focused,
         Angry, Surprised, Confused, Sleepy, Offline, Charging, Thinking, Notification, Meeting, Listening) — open any of them to
         see a worked example of how each look is built, then duplicate the approach for your own:
       </GuideP>
@@ -475,7 +475,7 @@ const animOverview: GuideSection = {
           ['Expression', 'A named, reusable static pose — not tied to any timeline.'],
           ['Keyframe', 'One pose plus a point in time, belonging to one specific animation.'],
           ['Transition / segment', 'The duration + easing between two consecutive keyframes — motion, not a pose.'],
-          ['Clip', 'Not a distinct concept in Kibo Eye Studio — a full animation is the smallest playable unit.'],
+          ['Clip', 'Not a distinct concept in Kibo  Studio — a full animation is the smallest playable unit.'],
           ['Animation', 'The whole ordered sequence of keyframes and their transitions, saved under one name.']
         ]}
       />
@@ -626,7 +626,7 @@ const animAddingExpressions: GuideSection = {
   content: (
     <>
       <GuideCallout tone="note">
-        Kibo Eye Studio doesn't have drag-and-drop of an Expression directly onto the timeline — keyframes are always built with
+        Kibo  Studio doesn't have drag-and-drop of an Expression directly onto the timeline — keyframes are always built with
         the Controls/Colors panels. The workflow below achieves the same result: starting a keyframe from a known, named look.
       </GuideCallout>
       <GuideOl>
@@ -663,7 +663,7 @@ const animTracks: GuideSection = {
   content: (
     <>
       <GuideCallout tone="note">
-        Kibo Eye Studio doesn't split an animation into separate per-property tracks (no left-eye track, pupil track, color
+        Kibo  Studio doesn't split an animation into separate per-property tracks (no left-eye track, pupil track, color
         track, and so on, with individual expand/collapse/hide/lock/mute controls) — there's a single timeline per animation,
         and each keyframe is one complete pose covering every property at once.
       </GuideCallout>
@@ -1051,7 +1051,7 @@ const animExporting: GuideSection = {
       </GuideOl>
 
       <GuideCallout tone="note">
-        Kibo Eye Studio's exported API is symbol-based, not string-based — there's no <code>EyesPlayAnimation("Blink")</code>{' '}
+        Kibo  Studio's exported API is symbol-based, not string-based — there's no <code>EyesPlayAnimation("Blink")</code>{' '}
         that looks an animation up by name at runtime. Each animation/expression is its own C++ symbol (<code>Anim_Blink</code>,{' '}
         <code>Expr_Happy</code>, ...) that you reference directly in your own code, and there's no separate "stop" function —
         you simply stop calling <code>eyesPlayAnimation()</code> for that animation (e.g. switch to drawing a static expression
@@ -1114,7 +1114,7 @@ const animOptimization: GuideSection = {
       <li><strong>Avoid large embedded assets</strong> — there are none in this pipeline by design; everything is procedural (numbers), not images, so there's no bitmap/video bloat to worry about.</li>
       <li><strong>Interpolation, not stored frames</strong> — the export only ever stores your keyframes, never every intermediate frame; the ESP32 computes each frame's pose live from <code>eyesLerpFrame()</code>, which is cheap.</li>
       <li><strong>Test on the real 240×240 display</strong> — the preview is faithful, but only real hardware confirms actual achieved frame rate and any panel-specific quirks.</li>
-      <li><strong>Monitor frame rate/performance</strong> — track <code>millis()</code> between frames in your own sketch if you suspect drops; Kibo Eye Studio's export doesn't include built-in FPS instrumentation on-device.</li>
+      <li><strong>Monitor frame rate/performance</strong> — track <code>millis()</code> between frames in your own sketch if you suspect drops; Kibo  Studio's export doesn't include built-in FPS instrumentation on-device.</li>
       <li><strong>Avoid blocking delays</strong> — the generated example uses a single small <code>delay(EYE_FRAME_DELAY_MS)</code> per loop; if you add your own logic (sensors, networking) in the same <code>loop()</code>, keep it non-blocking so it doesn't stall animation timing.</li>
     </GuideUl>
   )
@@ -1141,7 +1141,7 @@ const animTroubleshooting: GuideSection = {
         ['Loop jumps at the end', "The last keyframe's pose doesn't match the first — see 7.12's seamless-loop guidance."],
         ['Negative eyelid curvature is not restored', 'This is fully supported — curvature values from -100 to 100 round-trip correctly through Save/Open and export. If an older project file predates the negative-curvature range, its stored value is preserved as-is on reopen (no reset to 0).'],
         ['FPS is not included in the exported code', "It always is — check the header's #define EYE_TARGET_FPS / EYE_FRAME_DELAY_MS near the top."],
-        ['Saved projects reopen without animation data', "Shouldn't happen with a valid .kiboeyes file. If you opened an unrelated or corrupted file, Kibo Eye Studio shows a clear error instead of silently loading an empty project — if you saw an empty project instead of an error, please report it as a bug."]
+        ['Saved projects reopen without animation data', "Shouldn't happen with a valid .kiboeyes file. If you opened an unrelated or corrupted file, Kibo  Studio shows a clear error instead of silently loading an empty project — if you saw an empty project instead of an error, please report it as a bug."]
       ]}
     />
   )
@@ -1253,7 +1253,7 @@ const shortcuts: GuideSection = {
         ]}
       />
       <GuideCallout tone="note">
-        Copy/Paste don't apply to anything in Kibo Eye Studio today (there's no copy/paste for keyframes — Duplicate is the
+        Copy/Paste don't apply to anything in Kibo  Studio today (there's no copy/paste for keyframes — Duplicate is the
         closest equivalent, see 7.4), so they're intentionally left off this list rather than bound to something misleading.
         Shortcuts are inactive while typing in a text field (project name, expression name, numeric inputs, etc.) so normal
         text editing always works as expected.
@@ -1296,7 +1296,7 @@ export const GUIDE_SECTIONS: GuideSection[] = [
  * topic like "curvature" or "easing" even though that word isn't in any section heading,
  * without needing to extract plain text out of each section's JSX content at runtime. */
 export const GUIDE_SEARCH_KEYWORDS: Record<string, string> = {
-  welcome: 'introduction overview what is kibo eye studio workflow',
+  welcome: 'introduction overview what is kibo studio workflow',
   'getting-started': 'new project open save save as fps resolution display background export code difference autosave',
   'eye-controls': 'width height radius distance rotation border color opacity sclera eye target left right both mirror copy symmetry',
   'pupil-controls': 'iris pupil size position rotation color movement range look direction shape',

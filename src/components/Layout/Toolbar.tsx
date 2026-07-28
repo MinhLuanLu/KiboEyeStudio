@@ -48,12 +48,11 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
   const showBezel = useStore((s) => s.project.display.showBezel)
   const toggleBezel = useStore((s) => s.toggleBezel)
   const setExportDialogOpen = useStore((s) => s.setExportDialogOpen)
-  const openReferenceImport = useStore((s) => s.openReferenceImport)
   const setGuideOpen = useStore((s) => s.setGuideOpen)
 
   return (
     <div className="flex items-center gap-3 px-3 py-2 border-b border-studio-border bg-studio-panel">
-      <span className="font-semibold text-sm tracking-wide text-studio-accent">Kibo Eye Studio</span>
+      <span className="font-semibold text-sm tracking-wide text-studio-accent">Kibo Studio</span>
 
       <input
         className="bg-transparent border border-transparent hover:border-studio-border focus:border-studio-border rounded px-1.5 py-0.5 text-sm w-44"
@@ -77,9 +76,6 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
         </button>
         <button className="studio-btn" onClick={() => setExportDialogOpen(true)}>
           Export...
-        </button>
-        <button className="studio-btn" onClick={openReferenceImport}>
-          Import Reference...
         </button>
       </div>
 

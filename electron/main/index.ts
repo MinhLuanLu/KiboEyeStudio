@@ -170,9 +170,9 @@ function buildMenu(): void {
 ipcMain.handle('project:save-as', async (_e, json: string, suggestedName: string) => {
   if (!mainWindow) return { canceled: true }
   const result = await dialog.showSaveDialog(mainWindow, {
-    title: 'Save Kibo Eye Studio Project',
+    title: 'Save Kibo  Studio Project',
     defaultPath: suggestedName,
-    filters: [{ name: 'Kibo Eye Studio Project', extensions: ['kiboeyes'] }]
+    filters: [{ name: 'Kibo  Studio Project', extensions: ['kiboeyes'] }]
   })
   if (result.canceled || !result.filePath) return { canceled: true }
   await atomicWriteFile(result.filePath, json)
@@ -187,11 +187,11 @@ ipcMain.handle('project:save-to-path', async (_e, filePath: string, json: string
 ipcMain.handle('project:open', async () => {
   if (!mainWindow) return { canceled: true }
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Open Kibo Eye Studio Project',
+    title: 'Open Kibo  Studio Project',
     properties: ['openFile'],
     // 'json' stays accepted so projects saved before the dedicated extension existed can
     // still be opened — parseProjectFile() on the renderer side handles both formats.
-    filters: [{ name: 'Kibo Eye Studio Project', extensions: ['kiboeyes', 'json'] }]
+    filters: [{ name: 'Kibo  Studio Project', extensions: ['kiboeyes', 'json'] }]
   })
   if (result.canceled || result.filePaths.length === 0) return { canceled: true }
   const filePath = result.filePaths[0]

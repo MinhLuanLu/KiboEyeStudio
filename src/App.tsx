@@ -44,6 +44,8 @@ export default function App() {
   const activeAnimationId = useStore((s) => s.activeAnimationId)
   const duplicateKeyframe = useStore((s) => s.duplicateKeyframe)
   const deleteKeyframe = useStore((s) => s.deleteKeyframe)
+  const copyKeyframe = useStore((s) => s.copyKeyframe)
+  const pasteKeyframeAt = useStore((s) => s.pasteKeyframeAt)
   const checkpoint = useStore((s) => s.checkpoint)
 
   const loadedAutosave = useRef(false)
@@ -189,6 +191,16 @@ export default function App() {
     }
   }
 
+  const copySelectedKeyframe = () => {
+    if (selectedKeyframeId) copyKeyframe(selectedKeyframeId)
+  }
+
+  const pasteKeyframeAtPlayhead = () => {
+    if (!useStore.getState().keyframeClipboard) return
+    checkpoint()
+    pasteKeyframeAt(useStore.getState().playbackTimeMs)
+  }
+
   const actions = {
     newProject: handleNewProject,
     openProject: handleOpenProject,
@@ -204,6 +216,8 @@ export default function App() {
     prevFrame,
     duplicateKeyframe: duplicateSelectedKeyframe,
     deleteKeyframe: deleteSelectedKeyframe,
+    copyKeyframe: copySelectedKeyframe,
+    pasteKeyframe: pasteKeyframeAtPlayhead,
     toggleDevMode,
     openGuide: () => setGuideOpen(true)
   }

@@ -160,7 +160,7 @@ export interface GlobalTiming {
 
 // ---- Visual Reference (shared style inheritance) ---------------------------------------
 //
-// Kibo Eye Studio separates project data into two kinds:
+// Kibo Studio separates project data into two kinds:
 //   - Visual style: the shared, project-wide appearance (shape, colors, border, curvature
 //     defaults, highlight) — authored once in the Visual Reference tab.
 //   - Animation/expression data: movement, timing, positions, transitions, and the

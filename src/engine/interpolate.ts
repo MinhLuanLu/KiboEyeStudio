@@ -123,5 +123,10 @@ export function keyframeStartTimes(anim: Animation): number[] {
   return starts
 }
 
+/** Smallest allowed segment duration (ms) between two adjacent keyframes — shared by the
+ * Timeline's own drag-to-resize handling and the store's absolute-time/paste actions, so
+ * "how close can two keyframes get" is defined in exactly one place. */
+export const MIN_SEGMENT_MS = 16
+
 export { EYE_PARAM_KEYS }
 export type { Keyframe }

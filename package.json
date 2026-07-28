@@ -37,7 +37,7 @@
   },
   "build": {
     "appId": "com.kibo.eyestudio",
-    "productName": "Kibo Eye Studio",
+    "productName": "Kibo  Studio",
     "files": [
       "out"
     ],

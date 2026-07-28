@@ -212,7 +212,7 @@ function ContentsPage({
 }) {
   return (
     <div>
-      <h1 className="text-lg font-semibold mb-1">Kibo Eye Studio User Guide</h1>
+      <h1 className="text-lg font-semibold mb-1">Kibo Studio User Guide</h1>
       <p className="text-sm text-studio-muted mb-5">
         Everything about designing eye expressions, building animations, and exporting them for ESP32 — pick a topic below, or
         search the sidebar.
