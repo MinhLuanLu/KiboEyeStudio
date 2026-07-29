@@ -17,13 +17,14 @@
 // Example.ino, README.md) assembled by generateLvglExport() — see that function at the bottom
 // for the overall composition, mirroring cppExport.ts's own section-generator-function style.
 
-import type { Project, UiAsset, UiCssRule, UiDesignProject, UiDisplaySettings, UiWidget, UiWidgetStateName, UiWidgetStyle, UiWidgetType } from '@/types'
+import type { Project, UiAsset, UiCssRule, UiDesignProject, UiDisplaySettings, UiScreen, UiWidget, UiWidgetStateName, UiWidgetStyle, UiWidgetType } from '@/types'
 import { UI_WIDGET_LABELS } from '@/types'
 import { decodeDataUrlToRgba } from '@/lib/import/uiAssetImport'
 import { matchesSelector } from '@/lib/uiDesign/selectors'
 import { generateScriptCpp, type CodegenContext, type CodegenResult } from '@/lib/uiDesign/scriptLang/codegen'
 import { parseScript } from '@/lib/uiDesign/scriptLang/parser'
 import { LV_CONF_TEMPLATE_V9 } from './lvConfTemplate'
+import { boardIdFor, DISPLAY_MODEL_LABELS, type ExportTarget } from './exportTarget'
 
 const LVGL_VERSION = '9.x'
 
@@ -47,6 +48,21 @@ function toCIdentifier(raw: string): string {
   return cleaned || '_'
 }
 
+/** snake_case identifier — used only by the "UI Screen Only" export mode's public
+ * `create_<screen>_screen()`/`show_<screen>_screen()` function names, per that mode's own
+ * explicit naming spec (deliberately different from the rest of this file's PascalCase
+ * `KiboUI::CreateXxxScreen()` convention — see the "naming continuity" note where this is used). */
+function toSnakeCase(raw: string): string {
+  const words = raw
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  if (words.length === 0) return 'screen'
+  return words.map((w) => w.toLowerCase()).join('_')
+}
+
 /** Local C++ variable name for a widget's `lv_obj_t*` — stable, derived from tagId when set
  * (so generated code reads naturally, e.g. `wifi_btn`) or from the widget's short id otherwise.
  * Exported for scriptLang/codegen.ts's CodegenContext (see buildCodegenContext below) — the
@@ -60,14 +76,14 @@ export function widgetVarName(widget: UiWidget): string {
  * widget kind (Button/Label/...) unless the id already reads as ending with it, so `id="wifi"`
  * (a button) becomes `CreateWifiButton` while `id="statusLabel"` (a label) becomes
  * `CreateStatusLabel` rather than the redundant `CreateStatusLabelLabel`. */
-function widgetCreateFnName(widget: UiWidget): string {
+export function widgetCreateFnName(widget: UiWidget): string {
   const idPascal = toPascalCase(widget.tagId ?? widget.id)
   const kindPascal = toPascalCase(UI_WIDGET_LABELS[widget.type])
   const alreadyEndsWithKind = idPascal.toLowerCase().endsWith(kindPascal.toLowerCase())
   return `Create${idPascal}${alreadyEndsWithKind ? '' : kindPascal}`
 }
 
-function screenCreateFnName(screenName: string): string {
+export function screenCreateFnName(screenName: string): string {
   const pascal = toPascalCase(screenName)
   return pascal.toLowerCase().endsWith('screen') ? `Create${pascal}` : `Create${pascal}Screen`
 }
@@ -91,7 +107,7 @@ function children(uiDesign: UiDesignProject, widget: UiWidget): UiWidget[] {
 /** Every widget reachable from any screen's root, in tree order — used to decide which CSS
  * rules/assets/styles are actually referenced (so unused ones don't bloat the export or trip
  * "unresolved" validation). */
-function allReachableWidgets(uiDesign: UiDesignProject): UiWidget[] {
+export function allReachableWidgets(uiDesign: UiDesignProject): UiWidget[] {
   const out: UiWidget[] = []
   const seen = new Set<string>()
   const visit = (widget: UiWidget) => {
@@ -104,6 +120,26 @@ function allReachableWidgets(uiDesign: UiDesignProject): UiWidget[] {
     const root = uiDesign.widgets[screen.rootWidgetId]
     if (root) visit(root)
   }
+  return out
+}
+
+/** Same walk as `allReachableWidgets`, seeded from a single screen's root only — the scoping
+ * primitive "UI Screen Only" export needs. Every downstream function this file already has
+ * (`usedCssRules`, `usedAssets`, `exportLvglStyles`, `exportLvglAssets`, `collectEvents`,
+ * `namedWidgets`) already takes a `widgets` array as a parameter and derives its output purely
+ * from "what's referenced by these widgets" — so scoping to one screen is just calling those
+ * with this narrower list, not a rewrite. */
+export function reachableWidgetsForScreen(uiDesign: UiDesignProject, screen: UiScreen): UiWidget[] {
+  const out: UiWidget[] = []
+  const seen = new Set<string>()
+  const visit = (widget: UiWidget) => {
+    if (seen.has(widget.id)) return
+    seen.add(widget.id)
+    out.push(widget)
+    for (const child of children(uiDesign, widget)) visit(child)
+  }
+  const root = uiDesign.widgets[screen.rootWidgetId]
+  if (root) visit(root)
   return out
 }
 
@@ -756,12 +792,319 @@ function generateLvConf(): string {
 ${conf}`
 }
 
-/** The single entry point — async because asset RGB565 decoding needs the browser's canvas
- * APIs. Reads only `project.uiDesign` (see the file-top comment) — including
- * `project.uiDesign.display`, UI Design Mode's own display config, for KiboUIConfig.h's
- * size/shape/rotation macros, and `project.uiDesign.script`, the Logic tab's behavior script.
- * `project.display` (Eye Studio's) is never touched. */
-export async function generateLvglExport(project: Project): Promise<LvglExportFile[]> {
+// ---------------------------------------------------------------------------------------------
+// "UI Screen Only" export — a standalone, dependency-free .h/.cpp pair for ONE screen, safe to
+// drop into any existing LVGL project. Deliberately NOT built on generateKiboUI()'s shared
+// KiboUI:: namespace/registry/ShowScreen dispatcher (those are inherently project-wide concerns
+// a single screen doesn't have) — uses the snake_case create_<screen>_screen()/
+// show_<screen>_screen() free-function naming this mode's own spec asked for verbatim
+// (deliberately different from the rest of this file's PascalCase `KiboUI::CreateXxxScreen()`
+// convention, which "Complete Project" mode keeps unchanged — see the file-top note on why).
+//
+// Deliberately excludes the Logic tab's script entirely (not just cross-screen event handlers):
+// codegen.ts's `timers`/`variables`/`functions`/`updateBindingsFn` output has no per-widget
+// attribution (CodegenTimer and top-level declarations aren't tied to any widget/screen at all —
+// only CodegenEventHandler carries a widgetId), so a partial include risks emitting a call to a
+// variable/function/timer that doesn't exist in this standalone file — a compile break in
+// exactly the kind of file this mode promises is dependency-free. Every widget on the screen
+// instead gets the same empty `// TODO` event stub the exporter already uses for script-free
+// widgets (collectEvents' fallback, called here with an empty scriptHandlers array) — real,
+// working per-widget stubs, just not pre-filled with script-derived bodies. Export "Complete
+// Project" for the real script-generated behavior.
+// ---------------------------------------------------------------------------------------------
+
+export interface UiScreenExportResult {
+  files: LvglExportFile[]
+  /** Non-fatal notes about what this mode deliberately leaves out (script) — surfaced in the
+   * validation panel, not just buried in this file's own doc comments. */
+  notes: string[]
+}
+
+/** Strips a redundant trailing "screen" (e.g. "Main Screen" or a user-typed "wifi_screen")
+ * before the `_screen` suffix generateUiScreenExport always appends — mirrors
+ * screenCreateFnName/screenShowFnName's identical dedup for the PascalCase naming "Complete
+ * Project" mode uses, so "Main Screen" becomes create_main_screen() rather than the redundant
+ * create_main_screen_screen(). Exported so LvglExportDialog.tsx can show the same derived
+ * filename as a live preview next to the custom-name field, without duplicating this logic. */
+export function deriveUiScreenSnakeName(name: string): string {
+  const snakeRaw = toSnakeCase(name)
+  return snakeRaw.replace(/_?screen$/, '') || snakeRaw
+}
+
+/** `customName`, when non-empty, overrides the screen's own name for filenames/function names
+ * only (`create_<name>_screen()`/`show_<name>_screen()`, `<name>_screen.h/.cpp`) — doc comments
+ * and USAGE.md still reference the screen's real name for semantic identity. Lets a user export
+ * the same screen under a name of their choosing (e.g. "wifi_setup") instead of always getting
+ * whatever the screen happens to be called in Kibo Eye Studio. */
+export async function generateUiScreenExport(project: Project, screenId: string, customName?: string): Promise<UiScreenExportResult> {
+  const uiDesign = project.uiDesign
+  const screen = uiDesign.screens.find((s) => s.id === screenId)
+  if (!screen) throw new Error(`Screen "${screenId}" not found.`)
+
+  const widgets = reachableWidgetsForScreen(uiDesign, screen)
+  const rules = usedCssRules(uiDesign, widgets)
+  const { header: assetsHeaderRaw, source: assetsSourceRaw, identByAssetId } = await exportLvglAssets(uiDesign, widgets, rules)
+  const stylesCode = exportLvglStyles(widgets, rules, identByAssetId)
+  const events = collectEvents(widgets, [] /* no script output — see the section comment above */)
+
+  const snake = deriveUiScreenSnakeName(customName?.trim() || screen.name)
+  const createFnName = `create_${snake}_screen`
+  const showFnName = `show_${snake}_screen`
+  const headerFilename = `${snake}_screen.h`
+  const sourceFilename = `${snake}_screen.cpp`
+  const assetsHeaderFilename = `${snake}_screen_assets.h`
+  const assetsSourceFilename = `${snake}_screen_assets.cpp`
+
+  const notes: string[] = []
+  if (uiDesign.script.trim()) {
+    notes.push(
+      'This screen-only export uses empty `// TODO` event callback stubs — the Logic tab\'s script isn\'t included here, since it may reference other screens\' widgets, global timers, or variables that wouldn\'t exist in this standalone file. Export "Complete Project" for real script-generated behavior.'
+    )
+  }
+
+  // ---- header ----
+  const h: string[] = [
+    `/*
+ * ${headerFilename}
+ *
+ * Generated by Kibo Eye Studio — UI/UX Design Mode ("${screen.name}" screen only).
+ *
+ * Standalone, dependency-free: no LVGL/display/SPI/board initialization anywhere in this file
+ * or its .cpp — call this from an existing LVGL project that already calls lv_init() and has a
+ * display registered. Do NOT hand-edit — re-export instead.
+ *
+ * Required: LVGL ${LVGL_VERSION}, already initialized by your own project.
+ *
+ * Usage:
+ *   #include "${headerFilename}"
+ *   ${showFnName}();   // creates + loads this screen
+ */
+#pragma once
+#include "lvgl.h"
+
+// Creates this screen's widget tree and returns the root lv_obj_t* (does NOT load it — see
+// ${showFnName}() below for that).
+lv_obj_t* ${createFnName}();
+
+// Creates and loads this screen as the active LVGL screen, deleting whatever screen was active
+// before.
+void ${showFnName}();
+`
+  ]
+
+  // ---- source ----
+  const c: string[] = [
+    `/*
+ * ${sourceFilename}
+ *
+ * Generated by Kibo Eye Studio — UI/UX Design Mode ("${screen.name}" screen only).
+ * Do NOT hand-edit — re-export instead; the exception is the \`// TODO\` callback bodies below,
+ * which are safe to fill in (a re-export preserves the stub declarations, not any body you've
+ * typed into one — move logic you want to keep into your own file instead).
+ */
+#include "${headerFilename}"`
+  ]
+  if (identByAssetId.size > 0) c.push(`#include "${assetsHeaderFilename}"`)
+  c.push('')
+  c.push(stylesCode)
+  c.push('')
+
+  if (widgets.length > 0) {
+    c.push('// ---- Widget objects ----')
+    const declared = new Set<string>()
+    for (const w of widgets) {
+      const v = widgetVarName(w)
+      if (!declared.has(v)) {
+        declared.add(v)
+        c.push(`static lv_obj_t* ${v} = nullptr;`)
+      }
+      if (w.type === 'button') c.push(`static lv_obj_t* ${v}_label = nullptr;`)
+    }
+    c.push('')
+  }
+
+  if (events.length > 0) {
+    c.push('// ---- Event callbacks — fill in the TODO bodies with your own logic. ----')
+    for (const ev of events) {
+      c.push(`static void ${ev.handlerName}(lv_event_t* e) {`)
+      c.push(`  // TODO: handle the "${ev.trigger}" event for "${ev.widget.tagId}" here.`)
+      c.push('}')
+      c.push('')
+    }
+  }
+
+  // Named-widget sub-functions + the main create function — mirrors generateKiboUI's emitWidget
+  // recursion, but writes into one flat file (no separate registry/lookup mechanism needed,
+  // since nothing outside this file ever references these widgets by id).
+  const namedFnBuffers: string[][] = []
+  const emittedFnNames = new Set<string>([createFnName, showFnName])
+  const uniqueFnName = (base: string): string => {
+    if (!emittedFnNames.has(base)) {
+      emittedFnNames.add(base)
+      return base
+    }
+    let i = 2
+    while (emittedFnNames.has(`${base}${i}`)) i++
+    emittedFnNames.add(`${base}${i}`)
+    return `${base}${i}`
+  }
+  const emitWidget = (widget: UiWidget, parentVar: string, buffer: string[], indent: string) => {
+    const varName = widgetVarName(widget)
+    if (widget.tagId) {
+      const fnName = uniqueFnName(widgetCreateFnName(widget))
+      const fnBuffer: string[] = []
+      fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, '  '))
+      fnBuffer.push(...styleApplyCalls(widget, rules, varName, '  '))
+      for (const ev of events) {
+        if (ev.widget.id === widget.id) fnBuffer.push(`  lv_obj_add_event_cb(${varName}, ${ev.handlerName}, ${ev.lvglEvent}, NULL);`)
+      }
+      for (const child of children(uiDesign, widget)) emitWidget(child, varName, fnBuffer, '  ')
+      fnBuffer.push(`  return ${varName};`)
+      namedFnBuffers.push([`static lv_obj_t* ${fnName}(lv_obj_t* parent) {`, ...fnBuffer, '}'])
+      buffer.push(`${indent}${fnName}(${parentVar});`)
+    } else {
+      buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, indent))
+      buffer.push(...styleApplyCalls(widget, rules, varName, indent))
+      for (const child of children(uiDesign, widget)) emitWidget(child, varName, buffer, indent)
+    }
+  }
+
+  const rootWidget = uiDesign.widgets[screen.rootWidgetId]
+  const bodyBuffer: string[] = []
+  if (rootWidget) {
+    for (const child of children(uiDesign, rootWidget)) emitWidget(child, 'screen', bodyBuffer, '  ')
+  }
+
+  if (namedFnBuffers.length > 0) {
+    c.push('// ---- Named widget builders ----')
+    for (const fn of namedFnBuffers) {
+      c.push(fn.join('\n'))
+      c.push('')
+    }
+  }
+
+  c.push(`lv_obj_t* ${createFnName}() {`)
+  c.push('  lv_obj_t* screen = lv_obj_create(NULL);')
+  c.push(...bodyBuffer)
+  c.push('  return screen;')
+  c.push('}')
+  c.push('')
+  c.push(`void ${showFnName}() {`)
+  c.push(`  lv_obj_t* screen = ${createFnName}();`)
+  c.push('  lv_obj_t* old_screen = lv_screen_active();')
+  c.push('  lv_screen_load(screen);')
+  c.push('  lv_refr_now(NULL);')
+  c.push('  if (old_screen != NULL && old_screen != screen) {')
+  c.push('    lv_obj_delete(old_screen);')
+  c.push('  }')
+  c.push('}')
+  c.push('')
+
+  const files: LvglExportFile[] = [
+    { name: headerFilename, content: h.join('\n') },
+    { name: sourceFilename, content: c.join('\n') }
+  ]
+  if (identByAssetId.size > 0) {
+    files.push({ name: assetsHeaderFilename, content: assetsHeaderRaw.replace(/KiboUIAssets\.h/g, assetsHeaderFilename) })
+    files.push({ name: assetsSourceFilename, content: assetsSourceRaw.replace('#include "KiboUIAssets.h"', `#include "${assetsHeaderFilename}"`) })
+  }
+  files.push({ name: 'USAGE.md', content: generateUsageMd(project, screen, snake, createFnName, showFnName, identByAssetId.size > 0, notes) })
+
+  return { files, notes }
+}
+
+function generateUsageMd(project: Project, screen: UiScreen, snake: string, createFnName: string, showFnName: string, hasAssets: boolean, notes: string[]): string {
+  return `# ${screen.name} — Standalone LVGL Screen
+
+Generated by **Kibo Eye Studio — UI/UX Design Mode**, "UI Screen Only" export from project
+"${project.name}". This is just this one screen — no LVGL/display/SPI/board initialization
+anywhere in \`${snake}_screen.h\`/\`${snake}_screen.cpp\`${hasAssets ? `/\`${snake}_screen_assets.*\`` : ''}.
+Drop these file(s) into any existing LVGL ${LVGL_VERSION} project that already calls \`lv_init()\`
+and has a display registered.
+
+## Usage
+
+\`\`\`cpp
+#include "${snake}_screen.h"
+
+void setup() {
+  // ... your existing lv_init() / display registration ...
+
+  ${showFnName}();   // creates and shows this screen
+}
+\`\`\`
+
+Call \`${createFnName}()\` instead of \`${showFnName}()\` if you want to build the screen without
+immediately showing it (e.g. to pre-create it at startup and show it later).
+
+## Event callbacks
+
+Every interactive widget on this screen got an empty \`// TODO\` callback stub in
+\`${snake}_screen.cpp\` — fill those in with your own logic.
+${notes.length > 0 ? `\n## Notes\n\n${notes.map((n) => `- ${n}`).join('\n')}\n` : ''}`
+}
+
+function generateUiCpp(screenFiles: KiboUIParts['screenFiles']): string {
+  const lines = [
+    `/*
+ * ui.cpp
+ *
+ * Generated by Kibo Eye Studio — UI/UX Design Mode ("Complete Project" export).
+ * Just the #include chain that pulls the generated pieces together into one translation unit —
+ * do NOT hand-edit; re-export instead. See KiboUICore.h for the actual TODOs.
+ */
+#include "ui.h"
+
+#include "components/KiboUIStyles.h"
+#include "components/KiboUICore.h"`
+  ]
+  for (const { filename } of screenFiles) lines.push(`#include "screens/${filename}.h"`)
+  lines.push('')
+  return lines.join('\n')
+}
+
+// Arduino sketches do NOT auto-recurse into a `src/` subfolder the way libraries do — a plain
+// `.ino` only ever sees files sitting directly next to it, so `src/ui.h` etc. would silently
+// fail to resolve, leaving `#include "ui.h"` unable to find anything and every `KiboUI::*` call
+// in the sketch un-declared (confirmed by a real compile attempt — this was a bug in an earlier
+// version of this exporter, not a theoretical concern). PlatformIO's `src/` handling is genuinely
+// reliable (it always compiles everything under `src/` and adds `src/`/`include/` to the search
+// path), so PlatformIO format keeps the nested `src/{components,screens,assets}` layout; Arduino
+// format instead gets everything flattened into one directory next to `KiboExport.ino` — matching
+// how the real Kibo firmware project this whole feature is modeled on is itself laid out (plain
+// headers, no subfolders, compiled as one translation unit via #include). Every `#include "..."`
+// with a `../`, `components/`, `screens/`, or `assets/` prefix is rewritten to a bare filename —
+// safe because every one of those paths was only ever pointing at another file in this same
+// export (never a real external path), and `usedScreenFilenames` above is already seeded with
+// the shared component/asset basenames so flattening can't introduce a same-name collision.
+function flattenForArduino(files: LvglExportFile[]): LvglExportFile[] {
+  const includeRewrite = /#include "((?:\.\.\/)?(?:components\/|screens\/|assets\/)?)([^"]+)"/g
+  // Cosmetic-only: the doc-comment prose inside each generated file (not the #include lines
+  // themselves, already handled above) still says "src/ui.cpp"/"src/screens/*.h"/etc. — tidy
+  // those up too so a reader of the flattened output isn't told to look in a src/ folder that
+  // doesn't exist in this format.
+  const proseRewrite: [RegExp | string, string][] = [
+    [/\bsrc\/ui\.cpp\b/g, 'ui.cpp'],
+    [/\bsrc\/screens\/\*\.h\b/g, 'the per-screen .h files'],
+    [/\bcomponents\/(KiboUICore\.h|KiboUIStyles\.h)\b/g, '$1']
+  ]
+  return files.map((f) => {
+    let content = f.content.replace(includeRewrite, '#include "$2"')
+    for (const [pattern, replacement] of proseRewrite) content = content.replace(pattern, replacement)
+    return { name: f.name.startsWith('src/') ? f.name.slice('src/'.length).split('/').pop()! : f.name, content }
+  })
+}
+
+/** "Complete Project" mode's entry point — async because asset RGB565 decoding needs the
+ * browser's canvas APIs. Reads only `project.uiDesign` (see the file-top comment) plus the
+ * export-time `target` config (board/display/pins/format — never read from or written to the
+ * project, see exportTarget.ts). Builds the `KiboExport/` folder as a nested `src/{ui.h,ui.cpp,
+ * components/*, screens/*, assets/*}` layout (+ `include/KiboUIConfig.h`/`include/lv_conf.h` +
+ * `platformio.ini`) for PlatformIO, then — for Arduino format — flattens everything into one
+ * directory next to `KiboExport.ino` via flattenForArduino(), since a plain Arduino sketch (as
+ * opposed to a library) never recurses into a `src/` subfolder; `README.md`/`libraries.txt` are
+ * generated last, after the format is known. */
+export async function generateLvglExport(project: Project, target: ExportTarget): Promise<LvglExportFile[]> {
   const uiDesign = project.uiDesign
   const widgets = allReachableWidgets(uiDesign)
   const rules = usedCssRules(uiDesign, widgets)
@@ -771,50 +1114,70 @@ export async function generateLvglExport(project: Project): Promise<LvglExportFi
   const events = collectEvents(widgets, codegen.eventHandlers)
   const named = namedWidgets(widgets)
 
-  const config = generateKiboUIConfig(uiDesign.display)
+  const config = generateKiboUIConfig(uiDesign.display, target)
   const lvConf = generateLvConf()
-  const { header: kiboUiHeader, source: kiboUiSource } = generateKiboUI(uiDesign, widgets, rules, identByAssetId, events, named, stylesCode, codegen)
-  const example = generateExampleIno()
-  const readme = generateReadme(project, widgets, rules, events, codegen)
+  const parts = generateKiboUIParts(uiDesign, widgets, rules, identByAssetId, events, named, stylesCode, codegen)
+  const mainShowFnName = uiDesign.screens[0] ? screenShowFnName(uiDesign.screens[0].name) : null
+  const entryFilename = target.format === 'arduino' ? 'KiboExport.ino' : 'src/main.cpp'
+  const mainEntry = generateMainEntry(mainShowFnName, target, target.format === 'arduino' ? 'KiboExport.ino' : 'main.cpp')
+  const readme = generateReadme(project, widgets, rules, events, codegen, target)
+  const librariesTxt = generateLibrariesTxt(target)
 
-  return [
-    { name: 'KiboUI.h', content: kiboUiHeader },
-    { name: 'KiboUI.cpp', content: kiboUiSource },
-    { name: 'KiboUIAssets.h', content: assetsHeader },
-    { name: 'KiboUIAssets.cpp', content: assetsSource },
-    { name: 'KiboUIConfig.h', content: config },
-    { name: 'lv_conf.h', content: lvConf },
-    { name: 'Example.ino', content: example },
-    { name: 'README.md', content: readme }
+  const configPath = target.format === 'arduino' ? 'KiboUIConfig.h' : 'include/KiboUIConfig.h'
+  const lvConfPath = target.format === 'arduino' ? 'lv_conf.h' : 'include/lv_conf.h'
+
+  const files: LvglExportFile[] = [
+    { name: entryFilename, content: mainEntry },
+    { name: 'src/ui.h', content: parts.publicHeader },
+    { name: 'src/ui.cpp', content: generateUiCpp(parts.screenFiles) },
+    { name: 'src/components/KiboUIStyles.h', content: parts.stylesHeader },
+    { name: 'src/components/KiboUICore.h', content: parts.coreHeader }
   ]
+  for (const { filename, header } of parts.screenFiles) {
+    files.push({ name: `src/screens/${filename}.h`, content: header })
+  }
+  files.push(
+    { name: 'src/assets/KiboUIAssets.h', content: assetsHeader },
+    { name: 'src/assets/KiboUIAssets.cpp', content: assetsSource },
+    { name: configPath, content: config },
+    { name: lvConfPath, content: lvConf },
+    { name: 'README.md', content: readme },
+    { name: 'libraries.txt', content: librariesTxt }
+  )
+  if (target.format === 'platformio') {
+    files.push({ name: 'platformio.ini', content: generatePlatformioIni(target) })
+  }
+
+  return target.format === 'arduino' ? flattenForArduino(files) : files
 }
 
 // ---------------------------------------------------------------------------------------------
 // KiboUIConfig.h
 // ---------------------------------------------------------------------------------------------
 
-function generateKiboUIConfig(display: UiDisplaySettings): string {
+function generateKiboUIConfig(display: UiDisplaySettings, target: ExportTarget): string {
+  const pinLine = (macro: string, value: number): string => (value >= 0 ? `#define ${macro} ${value}` : `// #define ${macro} -1  // EDIT ME`)
   return `/*
  * KiboUIConfig.h
  *
  * Generated by Kibo Eye Studio — UI/UX Design Mode.
  *
- * This file contains editable hardware/display settings. You SHOULD edit this file for your
- * own board — nothing else in this export needs manual edits (see KiboUI.h's header comment).
+ * This file contains editable hardware/display settings — pins/resolution come from the board
+ * and display model chosen in the Export dialog. You SHOULD edit this file for your own board —
+ * nothing else in this export needs manual edits (see ui.h's header comment).
  *
  * Required: ESP32 Arduino Core, LVGL ${LVGL_VERSION}, a supported display driver.
  */
 #pragma once
 
-// Display resolution and shape, from the Display Settings panel in UI/UX Design Mode
-// (independent of Eye Studio's own Display panel — this is the LVGL screen's own config).
-// Edit these ONLY if your physical panel differs from what the project was designed for.
-#define KIBO_DISPLAY_WIDTH  ${Math.round(display.width)}
-#define KIBO_DISPLAY_HEIGHT ${Math.round(display.height)}
+// Display resolution/shape — from the board/display model chosen in the Export dialog.
+// Edit these ONLY if your physical panel differs from what you selected there.
+#define KIBO_DISPLAY_WIDTH  ${Math.round(target.width)}
+#define KIBO_DISPLAY_HEIGHT ${Math.round(target.height)}
 #define KIBO_DISPLAY_ORIENTATION_${display.orientation.toUpperCase()} 1
 
 ${
-  display.shape === 'round'
+  target.shape === 'round'
     ? '// This design targets a round display — LVGL widgets are clipped to the visible circle in\n// the studio preview; make sure your display driver reports a matching circular/round panel\n// if it has round-aware behavior (e.g. lv_display_set_antialiasing, round-display chroma tricks).\n#define KIBO_DISPLAY_ROUND 1'
     : '// #define KIBO_DISPLAY_ROUND 1  // uncomment if you switch to a round panel'
 }
@@ -830,21 +1193,22 @@ ${
 #define KIBO_LVGL_COLOR_DEPTH 16
 
 // Number of horizontal lines in the LVGL draw buffer. 20-40 lines is a reasonable starting
-// point for a ${Math.round(display.width)}x${Math.round(display.height)} panel; raise it (uses more RAM) if you see tearing, lower it
+// point for a ${Math.round(target.width)}x${Math.round(target.height)} panel; raise it (uses more RAM) if you see tearing, lower it
 // (uses less RAM) if you're tight on memory. See README.md's "Display buffer size" section.
 #define KIBO_DRAW_BUFFER_LINES 20
 
 // ---------------------------------------------------------------------------------------------
-// Display wiring — Kibo Eye Studio does not know your physical GPIO pins (no board/pinout was
-// selected in the project), so these are placeholders. EDIT THEM to match your wiring, or
-// remove them entirely if your display driver library configures pins elsewhere (e.g. via
-// User_Setup.h for TFT_eSPI, or a board-defs header for esp32_smartdisplay).
+// Display wiring — from the display model chosen in the Export dialog (${DISPLAY_MODEL_LABELS[target.displayModel]}).
+// EDIT THESE if your wiring differs, or remove them entirely if your display driver library
+// configures pins elsewhere (e.g. via User_Setup.h for TFT_eSPI).
 // ---------------------------------------------------------------------------------------------
-// #define KIBO_TFT_CS   -1  // EDIT ME
-// #define KIBO_TFT_DC   -1  // EDIT ME
-// #define KIBO_TFT_RST  -1  // EDIT ME
-// #define KIBO_TFT_SCLK -1  // EDIT ME
-// #define KIBO_TFT_MOSI -1  // EDIT ME
+${pinLine('KIBO_TFT_CS', target.pins.cs)}
+${pinLine('KIBO_TFT_DC', target.pins.dc)}
+${pinLine('KIBO_TFT_RST', target.pins.rst)}
+${pinLine('KIBO_TFT_SCLK', target.pins.sclk)}
+${pinLine('KIBO_TFT_MOSI', target.pins.mosi)}
+${pinLine('KIBO_TFT_MISO', target.pins.miso)}
+${pinLine('KIBO_TFT_BL', target.pins.bl)}
 `
 }
 
@@ -852,7 +1216,7 @@ ${
 // KiboUI.h / KiboUI.cpp
 // ---------------------------------------------------------------------------------------------
 
-function fileHeaderComment(filename: string, whatItContains: string, editable: boolean): string {
+function fileHeaderComment(filename: string, whatItContains: string, editable: boolean, mainShowFnName: string | null): string {
   return `/*
  * ${filename}
  *
@@ -873,7 +1237,7 @@ function fileHeaderComment(filename: string, whatItContains: string, editable: b
  *       InitializeDisplay();   // your own display driver init — see Example.ino
  *       InitializeLVGL();      // your own lv_init()/driver-registration — see Example.ino
  *       KiboUI::Begin();
- *       KiboUI::ShowMainScreen();
+ *       ${mainShowFnName ? `KiboUI::${mainShowFnName}();` : '// (no screens yet — add one in UI/UX Design Mode)'}
  *   }
  *
  *   void loop() {
@@ -891,7 +1255,28 @@ function fileHeaderComment(filename: string, whatItContains: string, editable: b
 `
 }
 
-function generateKiboUI(
+interface KiboUIParts {
+  publicHeader: string
+  stylesHeader: string
+  coreHeader: string
+  screenFiles: { screen: UiScreen; filename: string; header: string }[]
+}
+
+/** Builds "Complete Project" mode's KiboUI:: implementation as separate parts instead of one
+ * flat file — `src/ui.h` (public API, unchanged content/naming from before this mode split
+ * existed), `src/components/KiboUIStyles.h` (style objects), `src/components/KiboUICore.h`
+ * (registry, widget-object statics, script globals, event callbacks, and the public API's
+ * *implementation* — everything that can be referenced from more than one screen), and one
+ * `src/screens/<Name>.h` per screen (that screen's own widget-creation code). All of these are
+ * header-only (function bodies inline, `#pragma once` guarded) and included exactly once, in
+ * that order, from a single `src/ui.cpp` — matching this exact codebase's own convention for
+ * multi-file Arduino sketches (see the real Kibo firmware project's Display.h/Screen.h/etc.,
+ * which use the identical "plain headers, one #include chain, one translation unit" pattern)
+ * rather than a real multi-TU C++ project with extern-linked globals, which the ESP32 Arduino
+ * build model this exports to doesn't need. `KiboUICore.h` forward-declares each screen's
+ * `Create<Screen>Screen()` (defined in that screen's own file, included afterward) since
+ * `KiboUI::Begin()` — implemented in KiboUICore.h — calls all of them. */
+function generateKiboUIParts(
   uiDesign: UiDesignProject,
   widgets: UiWidget[],
   rules: CssRuleExport[],
@@ -900,13 +1285,14 @@ function generateKiboUI(
   named: UiWidget[],
   stylesCode: string,
   codegen: CodegenResult
-): { header: string; source: string } {
+): KiboUIParts {
   const screenFns = uiDesign.screens.map((s) => ({ screen: s, fnName: screenCreateFnName(s.name), showFnName: screenShowFnName(s.name) }))
+  const mainShowFnName = screenFns[0]?.showFnName ?? null
   const hasBindings = codegen.updateBindingsFn.length > 0
   const updateBindingsCall = hasBindings ? '  KiboUI_UpdateBindings();' : null
 
-  // ---- header ----
-  const h: string[] = [fileHeaderComment('KiboUI.h', 'Public API for the generated UI — the only file your own code should #include.', false)]
+  // ---- src/ui.h (public API) ----
+  const h: string[] = [fileHeaderComment('ui.h', 'Public API for the generated UI — the only file your own code should #include.', false, mainShowFnName)]
   h.push('#pragma once')
   h.push('#include "lvgl.h"')
   h.push('')
@@ -940,176 +1326,257 @@ function generateKiboUI(
   h.push('} // namespace KiboUI')
   h.push('')
 
-  // ---- source ----
-  const c: string[] = [fileHeaderComment('KiboUI.cpp', 'Implementation of the generated UI — widget creation, styles, and the public API.', false)]
-  c.push('#include "KiboUI.h"')
-  c.push('#include "KiboUIAssets.h"')
-  c.push('#include "KiboUIConfig.h"')
-  c.push('#include <string.h>')
-  c.push('')
-  c.push(stylesCode)
-  c.push('')
+  // ---- src/components/KiboUIStyles.h ----
+  const s: string[] = [
+    `/*
+ * components/KiboUIStyles.h
+ *
+ * Generated by Kibo Eye Studio — UI/UX Design Mode. Style objects for every CSS rule/local
+ * override this UI uses. Included exactly once, from src/ui.cpp — do NOT hand-edit; re-export
+ * from Kibo Eye Studio instead.
+ */
+#pragma once
+#include "lvgl.h"
+#include "../assets/KiboUIAssets.h"
+`
+  ]
+  s.push(stylesCode)
+  s.push('')
 
-  // Registry
-  c.push('// ---- Widget registry (id -> lv_obj_t*), used by SetLabelText/SetWidgetVisible/SetWidgetValue/FindWidget ----')
-  c.push(`#define KIBO_UI_MAX_WIDGETS ${Math.max(1, named.length)}`)
-  c.push('static const char* s_widgetIds[KIBO_UI_MAX_WIDGETS];')
-  c.push('static lv_obj_t* s_widgetObjs[KIBO_UI_MAX_WIDGETS];')
-  c.push('static int s_widgetCount = 0;')
-  c.push('')
-  c.push('static void KiboUI_Register(const char* id, lv_obj_t* obj) {')
-  c.push('  if (s_widgetCount < KIBO_UI_MAX_WIDGETS) {')
-  c.push('    s_widgetIds[s_widgetCount] = id;')
-  c.push('    s_widgetObjs[s_widgetCount] = obj;')
-  c.push('    s_widgetCount++;')
-  c.push('  }')
-  c.push('}')
-  c.push('')
-  c.push('lv_obj_t* KiboUI::FindWidget(const char* widgetId) {')
-  c.push('  for (int i = 0; i < s_widgetCount; i++) {')
-  c.push('    if (strcmp(s_widgetIds[i], widgetId) == 0) return s_widgetObjs[i];')
-  c.push('  }')
-  c.push('  return nullptr;')
-  c.push('}')
-  c.push('')
+  // ---- src/components/KiboUICore.h ----
+  const core: string[] = [
+    `/*
+ * components/KiboUICore.h
+ *
+ * Generated by Kibo Eye Studio — UI/UX Design Mode. Shared scaffolding: the widget registry,
+ * widget-object statics, any Logic-tab-script globals (variables, functions, timers, data
+ * bindings, event callback bodies), and the KiboUI:: public API's implementation — everything
+ * that can be referenced from more than one screen. Included exactly once, from src/ui.cpp,
+ * BEFORE src/screens/*.h (which define the screen-create functions forward-declared below, since
+ * KiboUI::Begin() here needs to call all of them). Do NOT hand-edit this file — re-export
+ * instead; the exception is the \`// TODO\` event callback bodies, which are safe to fill in.
+ */
+#pragma once
+#include "../ui.h"
+#include "../assets/KiboUIAssets.h"
+#include <string.h>
 
-  // Widget object statics — every widget's lv_obj_t* is file-scope (not a Create-function-local)
-  // so the Logic tab's script (compiled to plain top-level C++ functions — event callbacks,
-  // timer callbacks, custom functions) can reference ANY widget by its variable name from
-  // anywhere in this file, e.g. a button's click handler setting a different progress bar's
-  // value. Button widgets also get a `_label` static for their text child (see
-  // widgetCreateCalls' button case) since script text-setting targets that, not the button
-  // object itself.
+// Forward declarations — implemented in src/screens/*.h, included after this file by ui.cpp.
+`
+  ]
+  for (const { fnName } of screenFns) core.push(`static lv_obj_t* ${fnName}();`)
+  core.push('')
+  if (screenFns.length > 0) {
+    core.push('// Screen instance pointers, set once in Begin().')
+    for (const { screen } of screenFns) core.push(`static lv_obj_t* s_screen_${toCIdentifier(screen.id)} = nullptr;`)
+    core.push('')
+  }
+
+  core.push('// ---- Widget registry (id -> lv_obj_t*), used by SetLabelText/SetWidgetVisible/SetWidgetValue/FindWidget ----')
+  core.push(`#define KIBO_UI_MAX_WIDGETS ${Math.max(1, named.length)}`)
+  core.push('static const char* s_widgetIds[KIBO_UI_MAX_WIDGETS];')
+  core.push('static lv_obj_t* s_widgetObjs[KIBO_UI_MAX_WIDGETS];')
+  core.push('static int s_widgetCount = 0;')
+  core.push('')
+  core.push('static void KiboUI_Register(const char* id, lv_obj_t* obj) {')
+  core.push('  if (s_widgetCount < KIBO_UI_MAX_WIDGETS) {')
+  core.push('    s_widgetIds[s_widgetCount] = id;')
+  core.push('    s_widgetObjs[s_widgetCount] = obj;')
+  core.push('    s_widgetCount++;')
+  core.push('  }')
+  core.push('}')
+  core.push('')
+  core.push('lv_obj_t* KiboUI::FindWidget(const char* widgetId) {')
+  core.push('  for (int i = 0; i < s_widgetCount; i++) {')
+  core.push('    if (strcmp(s_widgetIds[i], widgetId) == 0) return s_widgetObjs[i];')
+  core.push('  }')
+  core.push('  return nullptr;')
+  core.push('}')
+  core.push('')
+
+  // Widget object statics — every widget's lv_obj_t* lives here (not inside its own screen's
+  // file) so the Logic tab's script (compiled to plain top-level C++ functions — event
+  // callbacks, timer callbacks, custom functions, all also emitted into this same file) can
+  // reference ANY widget by its variable name, e.g. a button's click handler setting a
+  // different screen's progress bar value. Button widgets also get a `_label` static for their
+  // text child (see widgetCreateCalls' button case) since script text-setting targets that, not
+  // the button object itself.
   if (widgets.length > 0) {
-    c.push('// ---- Widget objects — do not rename; the Logic tab\'s script compiles to code that')
-    c.push('// references these exact variable names. ----')
+    core.push('// ---- Widget objects — do not rename; the Logic tab\'s script compiles to code that')
+    core.push('// references these exact variable names. Declared here (not in each screen\'s own')
+    core.push('// file) so a script handler/timer attached to one screen can reference a widget on')
+    core.push('// a different screen. ----')
     const declared = new Set<string>()
     for (const w of widgets) {
       const v = widgetVarName(w)
       if (!declared.has(v)) {
         declared.add(v)
-        c.push(`static lv_obj_t* ${v} = nullptr;`)
+        core.push(`static lv_obj_t* ${v} = nullptr;`)
       }
-      if (w.type === 'button') c.push(`static lv_obj_t* ${v}_label = nullptr;`)
+      if (w.type === 'button') core.push(`static lv_obj_t* ${v}_label = nullptr;`)
     }
-    c.push('')
+    core.push('')
   }
 
-  // Screen history — backs ui.goBack() in the script; every generated Show<Screen>() pushes the
-  // previously-active screen here first (see the per-screen Show functions further down).
-  c.push('// ---- Screen navigation history (for GoBack()) ----')
-  c.push('#define KIBO_UI_MAX_SCREEN_HISTORY 8')
-  c.push('static lv_obj_t* s_screenHistory[KIBO_UI_MAX_SCREEN_HISTORY];')
-  c.push('static int s_screenHistoryCount = 0;')
-  c.push('static lv_obj_t* s_currentScreen = nullptr;')
-  c.push('')
-  c.push('void KiboUI::GoBack() {')
-  c.push('  if (s_screenHistoryCount <= 0) return;')
-  c.push('  lv_obj_t* prev = s_screenHistory[--s_screenHistoryCount];')
-  c.push('  if (prev) { lv_screen_load(prev); s_currentScreen = prev; }')
-  c.push('}')
-  c.push('')
+  core.push('// ---- Screen navigation history (for GoBack()) ----')
+  core.push('#define KIBO_UI_MAX_SCREEN_HISTORY 8')
+  core.push('static lv_obj_t* s_screenHistory[KIBO_UI_MAX_SCREEN_HISTORY];')
+  core.push('static int s_screenHistoryCount = 0;')
+  core.push('static lv_obj_t* s_currentScreen = nullptr;')
+  core.push('')
+  core.push('void KiboUI::GoBack() {')
+  core.push('  if (s_screenHistoryCount <= 0) return;')
+  core.push('  lv_obj_t* prev = s_screenHistory[--s_screenHistoryCount];')
+  core.push('  if (prev) { lv_screen_load(prev); s_currentScreen = prev; }')
+  core.push('}')
+  core.push('')
 
-  // Script variables + forward-declared/implemented functions (from top-level let/const and
-  // `function` declarations in the Logic tab's script — see scriptLang/codegen.ts).
   if (codegen.variables.length > 0 || codegen.functions.length > 0) {
-    c.push('// ---- Script variables & functions (from the Logic tab) ----')
-    for (const v of codegen.variables) c.push(`static ${v}`)
-    if (codegen.variables.length > 0) c.push('')
-    for (const p of codegen.functionPrototypes) c.push(`static ${p}`)
-    if (codegen.functionPrototypes.length > 0) c.push('')
+    core.push('// ---- Script variables & functions (from the Logic tab) ----')
+    for (const v of codegen.variables) core.push(`static ${v}`)
+    if (codegen.variables.length > 0) core.push('')
+    for (const p of codegen.functionPrototypes) core.push(`static ${p}`)
+    if (codegen.functionPrototypes.length > 0) core.push('')
     for (const fn of codegen.functions) {
-      c.push(`static ${fn}`)
-      c.push('')
+      core.push(`static ${fn}`)
+      core.push('')
     }
   }
 
-  // Hardware event stubs (hardware.onButtonPress/onEncoderRotate/onSensorChange/... in the
-  // script) — Kibo Eye Studio has no way to know your board's actual GPIO/sensor/radio wiring,
-  // so these are named stubs with a TODO comment; call them from your own polling/interrupt code.
   if (codegen.hardwareStubs.length > 0) {
-    c.push('// ---- Hardware event stubs (from the Logic tab\'s hardware.* calls) ----')
+    core.push('// ---- Hardware event stubs (from the Logic tab\'s hardware.* calls) ----')
     for (const stub of codegen.hardwareStubs) {
-      c.push(stub)
-      c.push('')
+      core.push(stub)
+      core.push('')
     }
   }
 
-  // Timers (ui.setInterval/setTimeout in the script) — declared once here; created wherever the
-  // script actually calls ui.setInterval/setTimeout (init, inside a function, or inside an
-  // event handler — see each call site below), matching real JS/LVGL timer semantics.
   if (codegen.timers.length > 0) {
-    c.push('// ---- Timers (from the Logic tab\'s ui.setInterval/setTimeout calls) ----')
+    core.push('// ---- Timers (from the Logic tab\'s ui.setInterval/setTimeout calls) ----')
     const declaredTimers = new Set<string>()
     for (const t of codegen.timers) {
       if (!declaredTimers.has(t.varName)) {
         declaredTimers.add(t.varName)
-        c.push(`static lv_timer_t* ${t.varName} = NULL;`)
+        core.push(`static lv_timer_t* ${t.varName} = NULL;`)
       }
     }
-    c.push('')
+    core.push('')
     for (const t of codegen.timers) {
-      // Deliberately unnamed parameter — naming it (even something LVGL-idiomatic like
-      // `timer`) would shadow a same-named user script variable inside this callback body
-      // (e.g. the flagship Progress Bar example's own `let timer = null;`), silently breaking
-      // `ui.clearInterval(timer)`/self-clear codegen: `timer = NULL` would clear the shadowing
-      // *parameter* instead of the outer static, leaving the real timer handle dangling.
-      c.push(`static void ${t.varName}_cb(lv_timer_t*) {`)
-      c.push(...t.bodyLines.map((l) => `  ${l}`))
-      if (t.repeatOnce) c.push(`  ${t.varName} = NULL; // one-shot (ui.setTimeout) — LVGL frees the timer itself after its repeat count is exhausted`)
-      if (updateBindingsCall) c.push(updateBindingsCall)
-      c.push('}')
-      c.push('')
+      core.push(`static void ${t.varName}_cb(lv_timer_t*) {`)
+      core.push(...t.bodyLines.map((l) => `  ${l}`))
+      if (t.repeatOnce) core.push(`  ${t.varName} = NULL; // one-shot (ui.setTimeout) — LVGL frees the timer itself after its repeat count is exhausted`)
+      if (updateBindingsCall) core.push(updateBindingsCall)
+      core.push('}')
+      core.push('')
     }
   }
 
-  // Data bindings (.bindText/.bindValue/.bindVisible in the script) — re-applied after every
-  // event/timer callback below, mirroring the live preview's own "re-check after every tick"
-  // model (see sandboxRuntime.ts's afterTick()).
   if (hasBindings) {
-    c.push('// ---- Data bindings (from the Logic tab\'s .bindText/.bindValue/.bindVisible calls) ----')
-    c.push('static void KiboUI_UpdateBindings() {')
-    c.push(...codegen.updateBindingsFn.map((l) => `  ${l}`))
-    c.push('}')
-    c.push('')
+    core.push('// ---- Data bindings (from the Logic tab\'s .bindText/.bindValue/.bindVisible calls) ----')
+    core.push('static void KiboUI_UpdateBindings() {')
+    core.push(...codegen.updateBindingsFn.map((l) => `  ${l}`))
+    core.push('}')
+    core.push('')
   }
 
-  // Event callbacks — a script-authored `widget.on(trigger, ...)` block (see the Logic tab)
-  // generates a real body here; anything else (the legacy per-widget Events list, or the
-  // default click stub every named button gets with no script handler at all) still gets an
-  // empty // TODO stub to hand-edit, exactly as before this feature existed.
   if (events.length > 0) {
-    c.push('// ---- Event callbacks. Bodies generated from the Logic tab\'s script are regenerated')
-    c.push('// on every export — edit the script, not this file, to change them. Empty // TODO stubs')
-    c.push('// (no script handler for that trigger) are safe to hand-edit; re-exporting preserves')
-    c.push('// stub declarations but not any body you\'ve typed into one — move logic you want to')
-    c.push('// keep into your own .cpp file calling KiboUI::FindWidget() instead. ----')
+    core.push('// ---- Event callbacks. Bodies generated from the Logic tab\'s script are regenerated')
+    core.push('// on every export — edit the script, not this file, to change them. Empty // TODO stubs')
+    core.push('// (no script handler for that trigger) are safe to hand-edit; re-exporting preserves')
+    core.push('// stub declarations but not any body you\'ve typed into one — move logic you want to')
+    core.push('// keep into your own .cpp file calling KiboUI::FindWidget() instead. ----')
     for (const ev of events) {
-      c.push(`static void ${ev.handlerName}(lv_event_t* e) {`)
+      core.push(`static void ${ev.handlerName}(lv_event_t* e) {`)
       if (ev.bodyLines === null) {
-        c.push(`  // TODO: handle the "${ev.trigger}" event for "${ev.widget.tagId}" here.`)
+        core.push(`  // TODO: handle the "${ev.trigger}" event for "${ev.widget.tagId}" here.`)
       } else {
         const body = ev.bodyLines.map((l) => `  ${l}`)
         if (ev.trigger === 'checked' || ev.trigger === 'unchecked') {
           const guard = ev.trigger === 'checked' ? '' : '!'
-          c.push(`  if (${guard}lv_obj_has_state(${ev.varName}, LV_STATE_CHECKED)) {`)
-          c.push(...body.map((l) => `  ${l}`))
-          c.push('  }')
+          core.push(`  if (${guard}lv_obj_has_state(${ev.varName}, LV_STATE_CHECKED)) {`)
+          core.push(...body.map((l) => `  ${l}`))
+          core.push('  }')
         } else {
-          c.push(...body)
+          core.push(...body)
         }
-        if (updateBindingsCall) c.push(updateBindingsCall)
+        if (updateBindingsCall) core.push(updateBindingsCall)
       }
-      c.push('}')
-      c.push('')
+      core.push('}')
+      core.push('')
     }
   }
 
-  // Per-named-widget Create functions + per-screen Create functions
-  const screenBuffers = new Map<string, string[]>()
-  const namedFnBuffers = new Map<string, string[]>()
-  const emittedFnNames = new Set<string>()
+  const hasScriptInit = codegen.initStatements.length > 0
+  if (hasScriptInit) {
+    core.push('// ---- Script init (top-level statements from the Logic tab\'s script) ----')
+    core.push('static void KiboUI_ScriptInit() {')
+    core.push(...codegen.initStatements.map((l) => `  ${l}`))
+    if (updateBindingsCall) core.push(updateBindingsCall)
+    core.push('}')
+    core.push('')
+  }
 
+  core.push('// ---- Public API ----')
+  core.push('void KiboUI::Begin() {')
+  core.push('  KiboUI_InitStyles();')
+  for (const { screen, fnName } of screenFns) {
+    core.push(`  s_screen_${toCIdentifier(screen.id)} = ${fnName}();`)
+  }
+  if (screenFns.length > 0) core.push(`  s_currentScreen = s_screen_${toCIdentifier(screenFns[0].screen.id)};`)
+  if (hasScriptInit) core.push('  KiboUI_ScriptInit();')
+  core.push('}')
+  core.push('')
+  core.push('void KiboUI::Update() {')
+  core.push('  lv_timer_handler(); // pumps LVGL — call lv_tick_inc() before this if you\'re not using an automatic tick source (see your .ino/main.cpp\'s loop())')
+  core.push('}')
+  core.push('')
+  for (const { screen, showFnName } of screenFns) {
+    core.push(`void KiboUI::${showFnName}() {`)
+    core.push(`  if (!s_screen_${toCIdentifier(screen.id)}) return;`)
+    core.push(`  if (s_currentScreen && s_currentScreen != s_screen_${toCIdentifier(screen.id)} && s_screenHistoryCount < KIBO_UI_MAX_SCREEN_HISTORY) s_screenHistory[s_screenHistoryCount++] = s_currentScreen;`)
+    core.push(`  lv_screen_load(s_screen_${toCIdentifier(screen.id)});`)
+    core.push(`  s_currentScreen = s_screen_${toCIdentifier(screen.id)};`)
+    core.push('}')
+    core.push('')
+  }
+  core.push('void KiboUI::ShowScreen(const char* screenName) {')
+  for (const { screen, showFnName } of screenFns) {
+    core.push(`  if (strcmp(screenName, ${JSON.stringify(screen.name)}) == 0) { ${showFnName}(); return; }`)
+  }
+  core.push('}')
+  core.push('')
+  core.push('void KiboUI::SetLabelText(const char* widgetId, const char* text) {')
+  core.push('  lv_obj_t* obj = FindWidget(widgetId);')
+  core.push('  if (!obj) return;')
+  core.push('  if (lv_obj_check_type(obj, &lv_label_class)) lv_label_set_text(obj, text);')
+  core.push('  else if (lv_obj_check_type(obj, &lv_checkbox_class)) lv_checkbox_set_text(obj, text);')
+  core.push('  else if (lv_obj_check_type(obj, &lv_textarea_class)) lv_textarea_set_text(obj, text);')
+  core.push('  else if (lv_obj_get_child_count(obj) > 0) lv_label_set_text(lv_obj_get_child(obj, 0), text); // e.g. a button\'s label child')
+  core.push('}')
+  core.push('')
+  core.push('void KiboUI::SetWidgetVisible(const char* widgetId, bool visible) {')
+  core.push('  lv_obj_t* obj = FindWidget(widgetId);')
+  core.push('  if (!obj) return;')
+  core.push('  if (visible) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);')
+  core.push('  else lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);')
+  core.push('}')
+  core.push('')
+  core.push('void KiboUI::SetWidgetValue(const char* widgetId, int32_t value) {')
+  core.push('  lv_obj_t* obj = FindWidget(widgetId);')
+  core.push('  if (!obj) return;')
+  core.push('  if (lv_obj_check_type(obj, &lv_slider_class)) lv_slider_set_value(obj, value, LV_ANIM_ON);')
+  core.push('  else if (lv_obj_check_type(obj, &lv_bar_class)) lv_bar_set_value(obj, value, LV_ANIM_ON);')
+  core.push('  else if (lv_obj_check_type(obj, &lv_arc_class)) lv_arc_set_value(obj, value);')
+  core.push('}')
+  core.push('')
+
+  // ---- src/screens/<Name>.h — one per screen: that screen's named-widget builders plus its own
+  // Create<Screen>Screen() factory (forward-declared in KiboUICore.h above, since Begin() calls
+  // it before this file is even included). `emittedFnNames` is shared across all screens (not
+  // reset per screen) so two screens' widgets can never generate colliding function names, and
+  // is seeded with every screen's own fnName as an extra safety net against a widget's name
+  // colliding with a screen's.
+  const emittedFnNames = new Set<string>(screenFns.map((f) => f.fnName))
   const uniqueFnName = (base: string): string => {
     if (!emittedFnNames.has(base)) {
       emittedFnNames.add(base)
@@ -1121,12 +1588,9 @@ function generateKiboUI(
     return `${base}${i}`
   }
 
-  function emitWidget(widget: UiWidget, parentVar: string, buffer: string[], indent: string) {
+  const emitWidget = (widget: UiWidget, parentVar: string, buffer: string[], indent: string, screenNamedBuffers: string[][]) => {
     const varName = widgetVarName(widget)
-    const isNamed = !!widget.tagId
-    if (isNamed && !namedFnBuffers.has(widget.id)) {
-      // Named widget gets its own Create<Name>(parent) function — called from the current
-      // buffer, with its own body (and its children) built into a fresh buffer.
+    if (widget.tagId) {
       const fnName = uniqueFnName(widgetCreateFnName(widget))
       const fnBuffer: string[] = []
       fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, '  '))
@@ -1137,161 +1601,160 @@ function generateKiboUI(
           fnBuffer.push(`  lv_obj_add_event_cb(${varName}, ${ev.handlerName}, ${ev.lvglEvent}, NULL);`)
         }
       }
-      for (const child of children(uiDesign, widget)) emitWidget(child, varName, fnBuffer, '  ')
+      for (const child of children(uiDesign, widget)) emitWidget(child, varName, fnBuffer, '  ', screenNamedBuffers)
       fnBuffer.push(`  return ${varName};`)
-      namedFnBuffers.set(widget.id, [`static lv_obj_t* ${fnName}(lv_obj_t* parent) {`, ...fnBuffer, '}'])
-      // No local declared here — ${varName} is a file-scope static (see the "Widget objects"
-      // block above), already assigned inside ${fnName}() itself.
+      screenNamedBuffers.push([`static lv_obj_t* ${fnName}(lv_obj_t* parent) {`, ...fnBuffer, '}'])
       buffer.push(`${indent}${fnName}(${parentVar});`)
     } else {
       buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, indent))
       buffer.push(...styleApplyCalls(widget, rules, varName, indent))
-      for (const child of children(uiDesign, widget)) emitWidget(child, varName, buffer, indent)
+      for (const child of children(uiDesign, widget)) emitWidget(child, varName, buffer, indent, screenNamedBuffers)
     }
   }
 
+  // Seeded with the shared components/assets filenames (case-insensitively, matching Windows'
+  // case-insensitive filesystem) so a screen named e.g. "UI" or "Kibo UI Core" can't collide with
+  // them once Arduino format flattens every file into one directory (see flattenForArduino).
+  const usedScreenFilenames = new Set<string>(['ui', 'kibouistyles', 'kibouicore', 'kibouiassets'])
+  const uniqueScreenFilename = (screenName: string): string => {
+    const base = toPascalCase(screenName)
+    if (!usedScreenFilenames.has(base.toLowerCase())) {
+      usedScreenFilenames.add(base.toLowerCase())
+      return base
+    }
+    let i = 2
+    while (usedScreenFilenames.has(`${base}${i}`.toLowerCase())) i++
+    usedScreenFilenames.add(`${base}${i}`.toLowerCase())
+    return `${base}${i}`
+  }
+
+  const screenFiles: KiboUIParts['screenFiles'] = []
   for (const { screen, fnName } of screenFns) {
     const root = uiDesign.widgets[screen.rootWidgetId]
-    const buffer: string[] = []
-    buffer.push(`static lv_obj_t* s_screen_${toCIdentifier(screen.id)} = nullptr;`)
-    buffer.push(`static lv_obj_t* ${fnName}() {`)
-    buffer.push(`  lv_obj_t* screen = lv_obj_create(NULL);`)
+    const screenNamedBuffers: string[][] = []
+    const bodyBuffer: string[] = []
     if (root) {
-      for (const child of children(uiDesign, root)) emitWidget(child, 'screen', buffer, '  ')
+      for (const child of children(uiDesign, root)) emitWidget(child, 'screen', bodyBuffer, '  ', screenNamedBuffers)
     }
-    buffer.push('  return screen;')
-    buffer.push('}')
-    screenBuffers.set(screen.id, buffer)
+
+    const filename = uniqueScreenFilename(screen.name)
+    const sc: string[] = [
+      `/*
+ * screens/${filename}.h
+ *
+ * Generated by Kibo Eye Studio — UI/UX Design Mode ("${screen.name}" screen).
+ * Do NOT hand-edit this file — re-export instead.
+ */
+#pragma once
+#include "../components/KiboUICore.h"
+#include "../components/KiboUIStyles.h"
+#include "../assets/KiboUIAssets.h"
+`
+    ]
+    if (screenNamedBuffers.length > 0) {
+      sc.push('// ---- Named widget builders ----')
+      for (const fn of screenNamedBuffers) {
+        sc.push(fn.join('\n'))
+        sc.push('')
+      }
+    }
+    sc.push(`static lv_obj_t* ${fnName}() {`)
+    sc.push('  lv_obj_t* screen = lv_obj_create(NULL);')
+    sc.push(...bodyBuffer)
+    sc.push('  return screen;')
+    sc.push('}')
+    sc.push('')
+
+    screenFiles.push({ screen, filename, header: sc.join('\n') })
   }
 
-  c.push('// ---- Named widget builders ----')
-  for (const fn of namedFnBuffers.values()) {
-    c.push(fn.join('\n'))
-    c.push('')
-  }
-
-  c.push('// ---- Screen builders ----')
-  for (const buffer of screenBuffers.values()) {
-    c.push(buffer.join('\n'))
-    c.push('')
-  }
-
-  // Script init — top-level statements from the Logic tab's script that aren't part of any
-  // function/event handler/timer (e.g. the Progress Bar example's `progress.setValue(0);`) run
-  // once here, after every screen (and therefore every widget the script might reference) has
-  // been created.
-  const hasScriptInit = codegen.initStatements.length > 0
-  if (hasScriptInit) {
-    c.push('// ---- Script init (top-level statements from the Logic tab\'s script) ----')
-    c.push('static void KiboUI_ScriptInit() {')
-    c.push(...codegen.initStatements.map((l) => `  ${l}`))
-    if (updateBindingsCall) c.push(updateBindingsCall)
-    c.push('}')
-    c.push('')
-  }
-
-  // Public API implementation
-  c.push('// ---- Public API ----')
-  c.push('void KiboUI::Begin() {')
-  c.push('  KiboUI_InitStyles();')
-  for (const { screen, fnName } of screenFns) {
-    c.push(`  s_screen_${toCIdentifier(screen.id)} = ${fnName}();`)
-  }
-  if (screenFns.length > 0) c.push(`  s_currentScreen = s_screen_${toCIdentifier(screenFns[0].screen.id)};`)
-  if (hasScriptInit) c.push('  KiboUI_ScriptInit();')
-  c.push('}')
-  c.push('')
-  c.push('void KiboUI::Update() {')
-  c.push('  lv_timer_handler(); // pumps LVGL — call lv_tick_inc() before this if you\'re not using an automatic tick source (see Example.ino\'s loop())')
-  c.push('}')
-  c.push('')
-  for (const { screen, showFnName } of screenFns) {
-    c.push(`void KiboUI::${showFnName}() {`)
-    c.push(`  if (!s_screen_${toCIdentifier(screen.id)}) return;`)
-    c.push(`  if (s_currentScreen && s_currentScreen != s_screen_${toCIdentifier(screen.id)} && s_screenHistoryCount < KIBO_UI_MAX_SCREEN_HISTORY) s_screenHistory[s_screenHistoryCount++] = s_currentScreen;`)
-    c.push(`  lv_screen_load(s_screen_${toCIdentifier(screen.id)});`)
-    c.push(`  s_currentScreen = s_screen_${toCIdentifier(screen.id)};`)
-    c.push('}')
-    c.push('')
-  }
-  c.push('void KiboUI::ShowScreen(const char* screenName) {')
-  for (const { screen, showFnName } of screenFns) {
-    c.push(`  if (strcmp(screenName, ${JSON.stringify(screen.name)}) == 0) { ${showFnName}(); return; }`)
-  }
-  c.push('}')
-  c.push('')
-  c.push('void KiboUI::SetLabelText(const char* widgetId, const char* text) {')
-  c.push('  lv_obj_t* obj = FindWidget(widgetId);')
-  c.push('  if (!obj) return;')
-  c.push('  if (lv_obj_check_type(obj, &lv_label_class)) lv_label_set_text(obj, text);')
-  c.push('  else if (lv_obj_check_type(obj, &lv_checkbox_class)) lv_checkbox_set_text(obj, text);')
-  c.push('  else if (lv_obj_check_type(obj, &lv_textarea_class)) lv_textarea_set_text(obj, text);')
-  c.push('  else if (lv_obj_get_child_count(obj) > 0) lv_label_set_text(lv_obj_get_child(obj, 0), text); // e.g. a button\'s label child')
-  c.push('}')
-  c.push('')
-  c.push('void KiboUI::SetWidgetVisible(const char* widgetId, bool visible) {')
-  c.push('  lv_obj_t* obj = FindWidget(widgetId);')
-  c.push('  if (!obj) return;')
-  c.push('  if (visible) lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);')
-  c.push('  else lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);')
-  c.push('}')
-  c.push('')
-  c.push('void KiboUI::SetWidgetValue(const char* widgetId, int32_t value) {')
-  c.push('  lv_obj_t* obj = FindWidget(widgetId);')
-  c.push('  if (!obj) return;')
-  c.push('  if (lv_obj_check_type(obj, &lv_slider_class)) lv_slider_set_value(obj, value, LV_ANIM_ON);')
-  c.push('  else if (lv_obj_check_type(obj, &lv_bar_class)) lv_bar_set_value(obj, value, LV_ANIM_ON);')
-  c.push('  else if (lv_obj_check_type(obj, &lv_arc_class)) lv_arc_set_value(obj, value);')
-  c.push('}')
-  c.push('')
-
-  return { header: h.join('\n'), source: c.join('\n') }
+  return { publicHeader: h.join('\n'), stylesHeader: s.join('\n'), coreHeader: core.join('\n'), screenFiles }
 }
 
 // ---------------------------------------------------------------------------------------------
-// Example.ino
+// The KiboExport.ino/src/main.cpp entry point "Complete Project" mode generates — target-aware:
+// a real, compiling flush callback for the GC9A01A preset, TODO-stubbed for everything else.
 // ---------------------------------------------------------------------------------------------
 
-function generateExampleIno(): string {
+/** The GC9A01A preset gets a real, compiling flush implementation — plain Adafruit_GC9A01A +
+ * Adafruit_GFX (not the Kibo firmware project's own GC9A01A_RoboEyesDisplay subclass, which is
+ * specific to its RoboEyes rendering and irrelevant to a UI-only export), same pins/SPI-begin/
+ * setRotation(0) shape as that project's own Display.h — the literal "reuse this project's
+ * ... display settings, pin configuration, and initialization logic" deliverable this export
+ * mode was asked for. Every other display model keeps the same TODO-stub shape "UI Screen Only"
+ * mode's Example.ino already uses, just with a driver-appropriate example comment. */
+function generateDisplayInitCode(target: ExportTarget): { includes: string[]; globals: string[]; flushFn: string[]; initDisplayFn: string[]; initLvglExtra: string[] } {
+  if (target.displayModel === 'gc9a01a') {
+    return {
+      includes: ['#include <SPI.h>', '#include <Adafruit_GFX.h>', '#include <Adafruit_GC9A01A.h>'],
+      globals: [`Adafruit_GC9A01A tft(KIBO_TFT_CS, KIBO_TFT_DC, KIBO_TFT_RST);`],
+      flushFn: [
+        'static void kibo_disp_flush(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {',
+        '  uint32_t w = lv_area_get_width(area);',
+        '  uint32_t h = lv_area_get_height(area);',
+        '  tft.drawRGBBitmap(area->x1, area->y1, (uint16_t*)px_map, w, h);',
+        '  lv_display_flush_ready(disp);',
+        '}'
+      ],
+      initDisplayFn: ['void InitializeDisplay() {', '  SPI.begin(KIBO_TFT_SCLK, -1, KIBO_TFT_MOSI, KIBO_TFT_CS);', '  tft.begin();', '  tft.setRotation(0);', '}'],
+      initLvglExtra: []
+    }
+  }
+  const driverHint =
+    target.displayModel === 'ili9341' || target.displayModel === 'st7789' ? 'TFT_eSPI or Adafruit_GFX (e.g. Adafruit_ILI9341/Adafruit_ST7789)' : 'your display driver library'
+  return {
+    includes: [],
+    globals: [],
+    flushFn: [
+      '// TODO: replace with your display driver\'s flush call (e.g. TFT_eSPI\'s pushColors, LovyanGFX\'s',
+      `// pushImage, or ${driverHint}\'s equivalent). This stub only marks the flush done so the`,
+      '// sketch compiles before you fill it in. `px_map` holds raw pixel bytes in KIBO_LVGL_COLOR_DEPTH',
+      '// format (RGB565 here) — cast to (uint16_t*)/(lv_color_t*) as your driver expects.',
+      'static void kibo_disp_flush(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {',
+      '  // Example shape (TFT_eSPI-style):',
+      '  // tft.startWrite();',
+      '  // tft.setAddrWindow(area->x1, area->y1, area->x2 - area->x1 + 1, area->y2 - area->y1 + 1);',
+      '  // tft.pushColors((uint16_t*)px_map, (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1), true);',
+      '  // tft.endWrite();',
+      '  lv_display_flush_ready(disp);',
+      '}'
+    ],
+    initDisplayFn: [
+      '// TODO: fill in with your display driver\'s begin()/init() call(s) and pin setup — see the',
+      '// KIBO_TFT_* pins in KiboUIConfig.h.',
+      'void InitializeDisplay() {',
+      '}'
+    ],
+    initLvglExtra: []
+  }
+}
+
+function generateMainEntry(mainShowFnName: string | null, target: ExportTarget, entryFilename: string): string {
+  const di = generateDisplayInitCode(target)
   return `/*
- * Example.ino
+ * ${entryFilename}
  *
- * Generated by Kibo Eye Studio — UI/UX Design Mode.
+ * Generated by Kibo Eye Studio — UI/UX Design Mode ("Complete Project" export).
  *
- * A starting point, not a finished sketch — you WILL need to edit the two TODO sections below
- * (InitializeDisplay/InitializeLVGL) to match your actual display driver and wiring
- * (see KiboUIConfig.h and README.md). Everything else (KiboUI::*) is generated and works as-is.
+ * ${target.displayModel === 'gc9a01a' ? 'InitializeDisplay()/kibo_disp_flush() below are real, working code for the GC9A01A preset — reusing the same driver, pins, and init sequence as the Kibo firmware project this preset is modeled on.' : 'You WILL need to fill in the TODO sections below (kibo_disp_flush/InitializeDisplay) for your display driver — see KiboUIConfig.h and README.md.'}
+ * Everything else (KiboUI::*) is generated and works as-is.
  *
- * Required libraries: LVGL ${LVGL_VERSION}, plus whatever display-driver library matches your
- * hardware (TFT_eSPI, LovyanGFX, Arduino_GFX, esp32_smartdisplay, ...).
+ * Required libraries: LVGL ${LVGL_VERSION}${di.includes.length > 0 ? ', Adafruit_GFX, Adafruit_GC9A01A' : ', plus whatever display-driver library matches your hardware'}.
  */
 #include <lvgl.h>
-#include "KiboUI.h"
+${di.includes.join('\n')}
+#include "ui.h"
 #include "KiboUIConfig.h"
 
 // #define KIBO_SERIAL_LOG // uncomment for basic serial logging below
 
 static lv_color_t s_buf1[KIBO_DISPLAY_WIDTH * KIBO_DRAW_BUFFER_LINES];
 static uint32_t s_lastTickMs = 0;
+${di.globals.length > 0 ? `\n${di.globals.join('\n')}` : ''}
 
-// TODO: replace with your display driver's flush call (e.g. TFT_eSPI's pushColors,
-// LovyanGFX's pushImage, or your board's equivalent). This stub only marks the flush done so
-// the sketch compiles before you fill it in. \`px_map\` holds raw pixel bytes in
-// KIBO_LVGL_COLOR_DEPTH format (RGB565 here) — cast to (uint16_t*)/(lv_color_t*) as your driver
-// expects.
-static void kibo_disp_flush(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
-  // Example shape (TFT_eSPI-style):
-  // tft.startWrite();
-  // tft.setAddrWindow(area->x1, area->y1, area->x2 - area->x1 + 1, area->y2 - area->y1 + 1);
-  // tft.pushColors((uint16_t*)px_map, (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1), true);
-  // tft.endWrite();
-  lv_display_flush_ready(disp);
-}
+${di.flushFn.join('\n')}
 
-// TODO: fill in with your display driver's begin()/init() call(s) and pin setup — see the
-// commented-out KIBO_TFT_* pins in KiboUIConfig.h.
-void InitializeDisplay() {
-}
+${di.initDisplayFn.join('\n')}
 
 void InitializeLVGL() {
   lv_init();
@@ -1317,10 +1780,10 @@ void setup() {
   InitializeLVGL();
 
   KiboUI::Begin();
-  KiboUI::ShowMainScreen();
+  ${mainShowFnName ? `KiboUI::${mainShowFnName}();` : '// (no screens yet — add one in UI/UX Design Mode)'}
 
-  // Basic event callback example — see the *_clicked() stubs generated in KiboUI.cpp for any
-  // named button in your design; fill in their bodies with your own logic.
+  // Basic event callback example — see the *_clicked() stubs generated in each screen's file for
+  // any named button in your design; fill in their bodies with your own logic.
 }
 
 void loop() {
@@ -1335,57 +1798,108 @@ void loop() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// libraries.txt / platformio.ini — "Complete Project" mode only.
+// ---------------------------------------------------------------------------------------------
+
+export function requiredLibraries(target: ExportTarget): string[] {
+  const libs = ['lvgl (LVGL 9.5.0)']
+  if (target.displayModel === 'gc9a01a') libs.push('Adafruit GFX Library', 'Adafruit GC9A01A')
+  else libs.push('(your display driver library — e.g. TFT_eSPI, LovyanGFX, Arduino_GFX)')
+  return libs
+}
+
+function generateLibrariesTxt(target: ExportTarget): string {
+  const lines = [
+    '# Required libraries for KiboExport',
+    '#',
+    '# Generated by Kibo Eye Studio — UI/UX Design Mode ("Complete Project" export).',
+    '# Arduino IDE: Sketch -> Include Library -> Manage Libraries..., search for each name below.',
+    '# PlatformIO: already listed in platformio.ini\'s lib_deps — this file is for reference.',
+    ''
+  ]
+  for (const lib of requiredLibraries(target)) lines.push(`- ${lib}`)
+  return lines.join('\n') + '\n'
+}
+
+function platformioLibDeps(target: ExportTarget): string[] {
+  const deps = ['lvgl/lvgl@^9.5.0']
+  if (target.displayModel === 'gc9a01a') deps.push('adafruit/Adafruit GFX Library@^1.11.9', 'adafruit/Adafruit GC9A01A@^1.0.5')
+  return deps
+}
+
+function generatePlatformioIni(target: ExportTarget): string {
+  const { platformioBoard } = boardIdFor(target)
+  return `; Generated by Kibo Eye Studio — UI/UX Design Mode ("Complete Project" export).
+[env:${platformioBoard}]
+platform = espressif32
+board = ${platformioBoard}
+framework = arduino
+lib_deps =
+${platformioLibDeps(target)
+  .map((d) => `    ${d}`)
+  .join('\n')}
+build_flags =
+    -Iinclude
+`
+}
+
+// ---------------------------------------------------------------------------------------------
 // README.md
 // ---------------------------------------------------------------------------------------------
 
-function generateReadme(project: Project, widgets: UiWidget[], rules: CssRuleExport[], events: EventExport[], codegen: CodegenResult): string {
+function generateReadme(project: Project, widgets: UiWidget[], rules: CssRuleExport[], events: EventExport[], codegen: CodegenResult, target: ExportTarget): string {
   const display = project.uiDesign.display
-  const w = Math.round(display.width)
-  const h = Math.round(display.height)
+  const w = Math.round(target.width)
+  const h = Math.round(target.height)
   const assetCount = usedAssets(project.uiDesign, widgets, rules).length
-  return `# ${project.name} — KiboUI LVGL Export
+  const isArduino = target.format === 'arduino'
+  const { arduinoFqbn, platformioBoard } = boardIdFor(target)
+  const entryFile = isArduino ? 'KiboExport.ino' : 'src/main.cpp'
+  const lvConfPath = isArduino ? 'lv_conf.h (project root)' : 'include/lv_conf.h'
+  const configPath = isArduino ? 'KiboUIConfig.h (project root)' : 'include/KiboUIConfig.h'
+
+  return `# ${project.name} — KiboUI LVGL Export (Complete Project)
 
 Generated by **Kibo Eye Studio — UI/UX Design Mode**. This export contains **only LVGL UI
 code** — no Eye Studio expressions, animations, stickers, or eye/pupil/eyelid rendering code
 is included anywhere in this folder.
 
+Target: **${boardLabel(target)}**, **${DISPLAY_MODEL_LABELS[target.displayModel]}** display
+(${w}x${h} ${target.shape}), **${isArduino ? 'Arduino IDE' : 'PlatformIO'}** project format.
+Change any of these in the Export dialog and re-export if this doesn't match your hardware.
+
 ## What's in this folder
 
 | File | Contents | Edit it? |
 | --- | --- | --- |
-| \`KiboUI.h\` | Public API (\`KiboUI::Begin()\`, \`Update()\`, \`ShowScreen()\`, ...) | No — re-export instead |
-| \`KiboUI.cpp\` | Widget creation, styles, event callback stubs | Only inside the \`// TODO\` callback bodies |
-| \`KiboUIAssets.h/.cpp\` | Image assets as \`lv_image_dsc_t\` | No — re-export instead |
-| \`KiboUIConfig.h\` | Display size/rotation/color depth/pins | **Yes** — edit for your hardware |
-| \`lv_conf.h\` | LVGL library configuration | Pre-configured, ready to use — edit only if your hardware needs differ (see below) |
-| \`Example.ino\` | A starting Arduino sketch | **Yes** — fill in the two TODOs |
+| \`${entryFile}\` | Entry point: display/LVGL init, \`setup()\`/\`loop()\` | **Yes** — this is the one file meant for your own app logic too |
+| \`${isArduino ? 'ui.h' : 'src/ui.h'}\` | Public API (\`KiboUI::Begin()\`, \`Update()\`, \`ShowScreen()\`, ...) | No — re-export instead |
+| \`${isArduino ? 'ui.cpp' : 'src/ui.cpp'}\` | Just the \`#include\` chain that pulls the pieces below together | No — re-export instead |
+| \`${isArduino ? 'KiboUIStyles.h' : 'src/components/KiboUIStyles.h'}\` | Style objects for every CSS rule/override | No — re-export instead |
+| \`${isArduino ? 'KiboUICore.h' : 'src/components/KiboUICore.h'}\` | Widget registry, script globals, event callback stubs, public API implementation | Only inside the \`// TODO\` callback bodies |
+| \`${isArduino ? '<ScreenName>.h' : 'src/screens/*.h'}\` | One file per screen — its widget creation code | No — re-export instead |
+| \`${isArduino ? 'KiboUIAssets.h/.cpp' : 'src/assets/KiboUIAssets.h/.cpp'}\` | Image assets as \`lv_image_dsc_t\` | No — re-export instead |
+| \`${configPath}\` | Display size/rotation/color depth/pins | **Yes** — edit for your hardware |
+| \`${lvConfPath}\` | LVGL library configuration | Pre-configured, ready to use — edit only if your hardware needs differ (see below) |
+| \`libraries.txt\` | Required library list | No — reference only |
 | \`README.md\` | This file | — |
-
+${!isArduino ? "| `platformio.ini` | Build configuration (board, lib_deps) | **Yes** — edit if you change board/libraries |\n" : ''}
 ## Required
 
 - ESP32 Arduino Core
 - **LVGL ${LVGL_VERSION}** (this export targets this version specifically — mixing LVGL 8 and
-  LVGL 9 APIs will not compile; if your project is on a different major version, install
-  LVGL ${LVGL_VERSION} alongside it or re-export once support for other versions is available)
-- A display driver library for your panel (TFT_eSPI, LovyanGFX, Arduino_GFX, esp32_smartdisplay, ...)
+  LVGL 9 APIs will not compile)
+${requiredLibraries(target)
+  .map((l) => `- ${l}`)
+  .join('\n')}
 
 ## Installing LVGL
 
 **Arduino IDE**: Sketch → Include Library → Manage Libraries... → search "lvgl" → install
 version ${LVGL_VERSION}.
 
-**PlatformIO**: add to \`platformio.ini\`:
-
-\`\`\`ini
-[env:esp32]
-platform = espressif32
-board = esp32dev            ; replace with your actual board
-framework = arduino
-lib_deps =
-    lvgl/lvgl@^9.5.0
-    ; add your display driver library here, e.g.:
-    ; bodmer/TFT_eSPI@^2.5.0
-\`\`\`
+**PlatformIO**: already listed in the generated \`platformio.ini\`'s \`lib_deps\` — nothing extra
+to do beyond \`pio run\`.
 
 ## Configuring \`lv_conf.h\`
 
@@ -1393,37 +1907,33 @@ lib_deps =
 real template with its "Content enable" guard already flipped on (LVGL ships that template
 disabled by default, so a plain hand-copy without this step is the single most common first
 compile failure — you don't need to worry about it here) and the built-in fonts this UI uses
-already turned on. Where it needs to live depends on your toolchain:
+already turned on.
 
-- **Arduino IDE**: nothing extra to do — as long as you follow the "Arduino IDE setup" steps
-  below (open \`Example.ino\` as your sketch, or copy this whole folder next to your existing
-  \`.ino\`), \`lv_conf.h\` ends up directly in your sketch folder, which the Arduino build always
-  adds to the compiler's include path. LVGL finds it there automatically; no separate copy step.
-- **PlatformIO**: move (don't copy alongside \`src/\`) \`lv_conf.h\` into your project's
-  \`include/\` folder (create it if it doesn't exist, as a sibling of \`platformio.ini\` and
-  \`src/\`). PlatformIO adds \`include/\` to the compiler's include path automatically, so LVGL's
-  own \`__has_include("lv_conf.h")\` check finds it there with no \`build_flags\` needed — put the
-  rest of this export's files (\`KiboUI.*\`, \`KiboUIAssets.*\`, \`KiboUIConfig.h\`) in \`src/\` as usual.
+- **Arduino IDE**: \`lv_conf.h\` is at this folder's root, next to \`KiboExport.ino\` — nothing
+  extra to do, since the Arduino build always adds the sketch folder to the compiler's include
+  path. LVGL finds it there automatically.
+- **PlatformIO**: \`lv_conf.h\` is already placed in \`include/\` — PlatformIO adds that folder to
+  the compiler's include path automatically, so LVGL's own \`__has_include("lv_conf.h")\` check
+  finds it there with no extra \`build_flags\` needed.
 
 You MAY edit \`lv_conf.h\` for your own hardware — it's the one generated file meant to be a
-starting point you own, not something to leave untouched:
+starting point you own, not something to leave untouched: \`LV_COLOR_DEPTH\` (16 by default,
+matching \`KIBO_LVGL_COLOR_DEPTH\`) must match whatever your display driver expects if it differs
+from RGB565; \`LV_MEM_SIZE\` (64KB by default) — raise it if you see allocation failures;
+\`LV_USE_LOG\` (off by default) — flip to \`1\` while bringing up your display driver.
 
-- \`LV_COLOR_DEPTH\` (16 by default, matching \`KIBO_LVGL_COLOR_DEPTH\` in \`KiboUIConfig.h\`) must
-  match whatever your display driver actually expects, if it differs from RGB565.
-- \`LV_MEM_SIZE\` (64KB by default) — raise it if you see allocation failures; ESP32 typically
-  has plenty of RAM to spare.
-- \`LV_USE_LOG\` (off by default) — flip to \`1\` while bringing up your display driver, for
-  LVGL's own diagnostic logging.
+This project's display is ${w}x${h} ${target.shape} (${display.orientation},
+${display.rotation}° rotation) — reflected in \`${configPath}\`, not \`lv_conf.h\` itself.
 
-This project's display is ${w}x${h} ${display.shape} (${display.orientation},
-${display.rotation}° rotation) — reflected in \`KiboUIConfig.h\`, not \`lv_conf.h\` itself.
-
-- **Display buffer size**: \`KiboUIConfig.h\`'s \`KIBO_DRAW_BUFFER_LINES\` (currently 20) times
+- **Display buffer size**: \`${configPath}\`'s \`KIBO_DRAW_BUFFER_LINES\` (currently 20) times
   \`KIBO_DISPLAY_WIDTH\` (${w}) is how many pixels the draw buffer holds — raise it for less
   tearing at the cost of RAM, lower it if you're memory-constrained.
-- **Draw buffer / flush callback**: see \`Example.ino\`'s \`InitializeLVGL()\`/\`kibo_disp_flush()\` —
-  the flush callback body is a TODO you must fill in for your specific display driver.
-- **Tick source**: LVGL 9 has no \`LV_TICK_CUSTOM\` config option — \`Example.ino\`'s \`loop()\`
+- **Draw buffer / flush callback**: see \`${entryFile}\`'s \`InitializeLVGL()\`/\`kibo_disp_flush()\`.${
+    target.displayModel === 'gc9a01a'
+      ? ' Already implemented for the GC9A01A preset — real, working code, reusing the same Adafruit_GFX-based driver and pin/init sequence as the Kibo firmware project this preset is modeled on.'
+      : ' The flush callback body is a TODO you must fill in for your specific display driver.'
+  }
+- **Tick source**: LVGL 9 has no \`LV_TICK_CUSTOM\` config option — \`${entryFile}\`'s \`loop()\`
   already calls \`lv_tick_inc()\` manually every iteration, which is the standard approach and
   needs no \`lv_conf.h\` setting.
 - **Input device**: if your panel has touch, create one with \`lv_indev_create()\` (set its type
@@ -1440,28 +1950,27 @@ ${display.rotation}° rotation) — reflected in \`KiboUIConfig.h\`, not \`lv_co
 ## Arduino IDE setup
 
 1. Install the ESP32 board package (Boards Manager) and the LVGL library (Library Manager, see above).
-2. Install your display driver library.
-3. Copy this whole folder next to your \`.ino\` sketch (or open \`Example.ino\` directly as your sketch).
-4. Edit \`KiboUIConfig.h\` for your pins, and \`Example.ino\`'s \`InitializeDisplay()\`/\`kibo_disp_flush()\` for your driver.
-5. Select your ESP32 board + port, and upload.
+2. Install your display driver library (see "Required" above)${target.displayModel === 'gc9a01a' ? ' — already wired up for this preset.' : '.'}
+3. Open \`KiboExport.ino\` as your sketch (or copy this whole folder's contents next to your existing \`.ino\`).
+4. Edit \`KiboUIConfig.h\` for your pins if they differ, and \`KiboExport.ino\`'s \`InitializeDisplay()\`/\`kibo_disp_flush()\` if you're not using the GC9A01A preset.
+5. Select **${arduinoFqbn}** (or your actual board) + port, and upload.
 
 ## PlatformIO setup
 
-See the \`platformio.ini\` example above. Build with \`pio run\`, upload with \`pio run -t upload\`.
+\`platformio.ini\` is already configured for **${platformioBoard}** with the required
+\`lib_deps\`. Build with \`pio run\`, upload with \`pio run -t upload\`.
 
 ## Regenerating safely
 
 Re-exporting from Kibo Eye Studio replaces every file in this folder except your own
-application code elsewhere in the project. Keep custom logic in your own \`.ino\`/\`.cpp\` files
-(calling \`KiboUI::FindWidget()\`/\`SetLabelText()\`/etc.) rather than editing inside
-\`KiboUI.cpp\`/\`KiboUI.h\`/\`KiboUIAssets.*\` directly — those get fully overwritten. The one
-exception is the \`// TODO\` callback bodies in \`KiboUI.cpp\`, which are generated as empty
-stubs but a re-export always regenerates the whole file — for logic you want to survive a
-re-export, keep it in your own file instead. \`lv_conf.h\` is also fully regenerated on every
-export — if you hand-edit it for your hardware (color depth, memory size, logging), either keep
-a copy of your edits to reapply after re-exporting, or move your customized \`lv_conf.h\` outside
-this folder (to your sketchbook root or PlatformIO \`include/\`, wherever your toolchain already
-finds it) once it's set up the way you want, so re-exporting this folder doesn't touch it.
+application code elsewhere in the project. Keep custom logic in your own files (calling
+\`KiboUI::FindWidget()\`/\`SetLabelText()\`/etc.) rather than editing inside \`${isArduino ? 'ui.*, KiboUIStyles.h, KiboUICore.h, <ScreenName>.h, or KiboUIAssets.*' : 'src/ui.*, src/components/*, src/screens/*, or src/assets/*'}\`
+directly — those get fully overwritten. The one exception is the \`// TODO\` callback bodies in
+\`${isArduino ? 'KiboUICore.h' : 'src/components/KiboUICore.h'}\`, which are generated as empty stubs but a re-export always regenerates the
+whole file — for logic you want to survive a re-export, keep it in your own file instead.
+\`lv_conf.h\` is also fully regenerated on every export — if you hand-edit it, keep a copy of your
+edits to reapply after re-exporting.
+${isArduino ? '\nNote: Arduino sketches only see files directly inside the sketch folder (they don\'t recurse into subfolders the way libraries do), so this export deliberately keeps everything flat — no `src/` subfolder — despite "Complete Project" mode\'s PlatformIO output using one.\n' : ''}
 
 ## Logic tab script
 
@@ -1477,6 +1986,10 @@ ${
 
 ${validationSummaryText(widgets, rules, events, codegen)}
 `
+}
+
+function boardLabel(target: ExportTarget): string {
+  return target.board === 'custom' ? target.boardFqbnCustom.trim() || 'Custom board' : boardIdFor(target).arduinoFqbn
 }
 
 function validationSummaryText(widgets: UiWidget[], rules: CssRuleExport[], events: EventExport[], codegen: CodegenResult): string {
