@@ -1,3 +1,5 @@
+import type { UiDesignProject } from './uiDesign'
+
 export interface EyeParams {
   width: number
   height: number
@@ -450,6 +452,10 @@ export interface Project {
   /** Stickers always visible regardless of active expression/animation — see StickerInstance
    * and effectiveStickers() above. */
   stickers: StickerInstance[]
+  /** UI Design Mode's data — a completely independent LVGL screen designer sharing this project
+   * file. See types/uiDesign.ts. Structurally separate from every field above it: nothing in
+   * the eye/expression/animation/sticker system reads or writes this. */
+  uiDesign: UiDesignProject
 }
 
 export type PlaybackMode = 'design' | 'animate' | 'idle'
@@ -701,3 +707,7 @@ export function expressionShapeDiverges(e: Expression): boolean {
 export function expressionColorsDiverge(e: Expression): boolean {
   return JSON.stringify(expressionLeftColors(e)) !== JSON.stringify(expressionRightColors(e))
 }
+
+// UI Design Mode's types live in their own file (this one is already 700+ lines) — re-exported
+// here so existing `from '@/types'` imports keep working uniformly across the app.
+export * from './uiDesign'

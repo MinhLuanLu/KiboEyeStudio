@@ -1,39 +1,17 @@
 import { useStore } from '@/state/store'
 import { PlaybackControls } from '@/components/Timeline/PlaybackControls'
+import { SaveStatusLabel } from './SaveStatusLabel'
 
+// Eye Studio's own top bar — mounted exclusively inside EyeStudioWorkspace.tsx, not shared with
+// UI Design Mode (which has its own, differently-composed UiDesignTopBar.tsx). The only things
+// genuinely shared between the two are the project-management actions passed in via `actions`
+// (New/Open/Save/Save As/Home — all owned by App.tsx) and the SaveStatusLabel leaf component.
 export interface ToolbarActions {
   newProject: () => void
   openProject: () => void
   saveProject: () => void
   saveProjectAs: () => void
-}
-
-function SaveStatusLabel() {
-  const dirty = useStore((s) => s.dirty)
-  const filePath = useStore((s) => s.filePath)
-  const saveStatus = useStore((s) => s.saveStatus)
-
-  if (saveStatus === 'saving') {
-    return <span className="text-xs text-studio-muted">Saving…</span>
-  }
-  if (saveStatus === 'error') {
-    return <span className="text-xs text-red-400">⚠ Save failed</span>
-  }
-  if (dirty) {
-    return (
-      <span className="flex items-center gap-1.5 text-xs text-studio-muted" title="Unsaved changes">
-        <span className="w-1.5 h-1.5 rounded-full bg-studio-warn" />
-        Unsaved changes
-      </span>
-    )
-  }
-  if (saveStatus === 'saved') {
-    return <span className="text-xs text-green-400">✓ Saved</span>
-  }
-  if (filePath) {
-    return <span className="text-xs text-studio-muted">All changes saved</span>
-  }
-  return <span className="text-xs text-studio-muted">Not saved yet</span>
+  goHome: () => void
 }
 
 export function Toolbar({ actions }: { actions: ToolbarActions }) {
@@ -52,7 +30,11 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
 
   return (
     <div className="flex items-center gap-3 px-3 py-2 border-b border-studio-border bg-studio-panel">
-      <span className="font-semibold text-sm tracking-wide text-studio-accent">Kibo Studio</span>
+      <button className="studio-btn" onClick={actions.goHome} title="Return to the Home Screen">
+        🏠 Home
+      </button>
+
+      <span className="font-semibold text-sm tracking-wide text-studio-accent">Expressions Design</span>
 
       <input
         className="bg-transparent border border-transparent hover:border-studio-border focus:border-studio-border rounded px-1.5 py-0.5 text-sm w-44"

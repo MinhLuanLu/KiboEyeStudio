@@ -23,9 +23,11 @@ export interface KiboApi {
   saveProjectAs: (json: string, suggestedName: string) => Promise<SaveResult>
   saveProjectToPath: (filePath: string, json: string) => Promise<{ ok: boolean }>
   openProject: () => Promise<OpenResult>
+  openProjectPath: (filePath: string) => Promise<{ ok: boolean; json?: string }>
   autosaveWrite: (json: string) => Promise<{ ok: boolean }>
   autosaveRead: () => Promise<AutosaveReadResult>
   exportSaveFile: (defaultName: string, contents: string, filters: ExtFilter[]) => Promise<SaveResult>
+  exportSaveBinaryFile: (defaultName: string, base64Contents: string, filters: ExtFilter[]) => Promise<SaveResult>
   importOpenJson: () => Promise<OpenResult>
   notifyDirty: (dirty: boolean) => void
   notifySaveThenCloseComplete: () => void

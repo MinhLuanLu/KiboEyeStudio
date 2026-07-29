@@ -19,7 +19,13 @@ import type {
   StickerAsset,
   StickerInstance,
   StickerLayer,
-  StickerScope
+  StickerScope,
+  UiCssRule,
+  UiDisplaySettings,
+  UiWidget,
+  UiWidgetStateName,
+  UiWidgetStyle,
+  UiWidgetType
 } from '@/types'
 import {
   DEFAULT_DISPLAY,
@@ -30,6 +36,7 @@ import {
   DEFAULT_TIMING,
   STYLE_EYE_COLOR_FIELDS,
   STYLE_EYE_PARAM_FIELDS,
+  UI_DISPLAY_PRESETS,
   applyStyleToColors,
   applyStyleToParams,
   computeStyleOverrides,
@@ -40,6 +47,7 @@ import { builtinExpressions } from '@/data/builtinExpressions'
 import { MIN_SEGMENT_MS, animationDuration, keyframeStartTimes } from '@/engine/interpolate'
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
 import { STICKER_PRESET_BUNDLES } from '@/data/stickerPresets'
+import { createDefaultUiDesign, createWidget } from '@/lib/uiDesign/widgetDefaults'
 
 const HISTORY_LIMIT = 60
 const FRAME_STEP_MS = 1000 / 30
@@ -85,7 +93,8 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     visualReference,
     customPupilShapes: [],
     stickerAssets: [...BUILTIN_STICKER_ASSETS],
-    stickers: []
+    stickers: [],
+    uiDesign: createDefaultUiDesign()
   }
 }
 
@@ -99,6 +108,14 @@ export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
 export type LeftTab = 'animations' | 'expressions'
 export type RightTab = 'controls' | 'colors' | 'display' | 'personality' | 'visual-reference' | 'stickers'
+/** Which top-level screen is showing. 'home' is the landing screen shown at launch; 'eyeStudio'
+ * is everything that existed before UI Design Mode (the panel tree in EyeStudioWorkspace.tsx);
+ * 'uiDesign' is the structurally separate LVGL screen designer. These three are never tabs or a
+ * switcher within a shared shell — each renders as its own fully separate component tree (see
+ * AppShell.tsx) with its own top bar, so the two editors can't share layout or accidentally
+ * interfere with each other. Session-only (like leftTab/rightTab): never persisted, always
+ * resets to 'home' on launch/load, so it can't affect save files or undo/redo. */
+export type Workspace = 'home' | 'eyeStudio' | 'uiDesign'
 
 export interface ApplyVisualReferenceOptions {
   scope: 'all' | 'expressions' | 'animations' | 'selected'
@@ -110,6 +127,7 @@ interface StoreState {
   project: Project
   filePath: string | null
   dirty: boolean
+  workspace: Workspace
   /** Purely a UI hint for the toolbar's saved-status readout — never persisted, and not
    * itself the source of truth for whether a save happened (`dirty`/`filePath` are). */
   saveStatus: SaveStatus
@@ -134,7 +152,12 @@ interface StoreState {
   devModeOpen: boolean
   devStats: DevStats
   exportDialogOpen: boolean
+  /** Separate from exportDialogOpen — UI Design Mode's own LVGL export dialog is a distinct
+   * component (LvglExportDialog.tsx), not a tab within the Eye Studio ExportDialog, matching
+   * this app's "no shared editor between workspaces" architecture. */
+  lvglExportDialogOpen: boolean
   guideOpen: boolean
+  settingsOpen: boolean
 
   /** Which top-level section the left library panel shows. Lives in the store (not local
    * component state) so actions like the toolbar's "Import Reference..." button can drive
@@ -245,6 +268,7 @@ interface StoreState {
 
   // playback
   setMode: (mode: PlaybackMode) => void
+  setWorkspace: (workspace: Workspace) => void
   play: () => void
   pause: () => void
   stop: () => void
@@ -259,7 +283,9 @@ interface StoreState {
   toggleDevMode: () => void
   setDevStats: (stats: DevStats) => void
   setExportDialogOpen: (open: boolean) => void
+  setLvglExportDialogOpen: (open: boolean) => void
   setGuideOpen: (open: boolean) => void
+  setSettingsOpen: (open: boolean) => void
   setLeftTab: (tab: LeftTab) => void
   setRightTab: (tab: RightTab) => void
 
@@ -286,6 +312,86 @@ interface StoreState {
    * established for pupil shapes. Returns the new asset's id. */
   addStickerAsset: (asset: Omit<StickerAsset, 'id' | 'kind'>) => string
   deleteStickerAsset: (id: string) => void
+
+  // UI Design Mode — see types/uiDesign.ts. Entirely independent of every action above:
+  // nothing here reads or writes project.eyeBase/animations/expressions/stickers/etc.
+  selectedWidgetId: string | null
+  selectUiWidget: (id: string | null) => void
+  /** Creates a widget of `type` as a child of `parentId` (typically the active screen's root)
+   * at (x, y), selects it, and returns its id. */
+  addUiWidget: (type: UiWidgetType, parentId: string, x: number, y: number) => string
+  moveUiWidget: (id: string, x: number, y: number) => void
+  updateUiWidgetStyle: (id: string, partial: Partial<UiWidgetStyle>) => void
+  updateUiWidgetText: (id: string, text: string) => void
+  deleteUiWidget: (id: string) => void
+  /** Deep-clones a widget (and its subtree) as a new sibling right after the original, offset
+   * slightly so the copy is visibly distinct rather than perfectly overlapping. Returns the
+   * new root widget's id. */
+  duplicateUiWidget: (id: string) => string | null
+  setUiWidgetVisible: (id: string, visible: boolean) => void
+  setUiWidgetLocked: (id: string, locked: boolean) => void
+  /** Swaps this widget with its neighbor in the given direction within its own parent's
+   * childIds — matches the Sticker Manager's "reorder within the same layer" list. */
+  reorderUiWidget: (id: string, direction: 'up' | 'down') => void
+  /** Sets a widget's HTML id (`tagId`, must be unique — used as the exported LVGL function
+   * name) and/or class list. Renamed away from "updateUiWidgetStyle" naming since these are
+   * structural/selector-relevant fields, not style. */
+  updateUiWidgetMeta: (id: string, partial: { tagId?: string | null; classNames?: string[]; allowOutsideBounds?: boolean }) => void
+
+  // UI Design Mode — CSS rules (see UiCssRule in types/uiDesign.ts + lib/uiDesign/cssCascade.ts
+  // for how they're applied at render time).
+  addUiCssRule: (selector: string) => string
+  updateUiCssRuleSelector: (id: string, selector: string) => void
+  updateUiCssRuleStyle: (id: string, partial: Partial<UiWidgetStyle>) => void
+  deleteUiCssRule: (id: string) => void
+  /** Replaces the active screen's entire widget map + root with a freshly-parsed tree (see
+   * lib/uiDesign/htmlSync.ts's htmlToWidgetTree) — the HTML editor's "commit on blur" action.
+   * Widgets belonging to *other* screens are left untouched. */
+  replaceActiveScreenWidgets: (widgets: Record<string, UiWidget>, rootId: string) => void
+  replaceUiCssRules: (rules: UiCssRule[]) => void
+  updateUiWidgetState: (id: string, state: UiWidgetStateName, partial: Partial<UiWidgetStyle> | null) => void
+
+  // UI Design Mode — asset library (see lib/import/uiAssetImport.ts). Same "asset, then place
+  // instances that reference it" split addCustomPupilShape()/addStickerAsset() established.
+  addUiAsset: (name: string, dataUrl: string, naturalWidth: number, naturalHeight: number, sourceFormat: string) => string
+  deleteUiAsset: (id: string) => void
+  renameUiAsset: (id: string, name: string) => void
+  /** Deep-copies an asset (new id, same image data) — for reusing an imported image as a
+   * starting point under a different name rather than re-importing the same file. */
+  duplicateUiAsset: (id: string) => string | null
+  /** Swaps an existing asset's image data in place (same id, so every widget/backgroundImage/
+   * CSS rule already referencing it picks up the new image automatically) — the Asset Manager's
+   * "Replace" action, for updating a logo/icon without having to reassign it everywhere it's used. */
+  replaceUiAsset: (id: string, dataUrl: string, naturalWidth: number, naturalHeight: number, sourceFormat: string) => void
+  setUiWidgetSrc: (id: string, assetId: string | null) => void
+
+  // UI Design Mode — script runtime support (see lib/uiDesign/scriptLang/). updateUiWidgetProps
+  // and setUiActiveScreen are also general-purpose, not just for the script sandbox.
+  updateUiWidgetProps: (id: string, partial: Record<string, string | number | boolean>) => void
+  setUiActiveScreen: (screenId: string) => void
+  /** Direct, non-undoable overwrite of every screen's widget map + activeScreenId — used ONLY
+   * to restore the pre-run snapshot when the script sandbox's Stop/Restart controls revert
+   * whatever live mutations (progress values, disabled states, screen navigation, ...) a
+   * running script made, so runtime-only changes never leak into the saved design. Not a design
+   * edit, so it deliberately does NOT go through checkpoint()/undo. */
+  restoreUiRuntimeSnapshot: (widgets: Record<string, UiWidget>, activeScreenId: string | null) => void
+  setUiScript: (script: string) => void
+
+  // UI Design Mode — display configuration (see UiDisplaySettings in types/uiDesign.ts).
+  // Entirely separate from project.display/setDisplay above — see that type's own comment for
+  // why the two workspaces must never share this.
+  /** Merges `partial` into project.uiDesign.display. When width/height actually change, every
+   * widget's numeric (not percent/auto) x/y/width/height is rescaled by the resize ratio, so
+   * existing layouts survive a display-size change proportionally instead of being clipped or
+   * left tiny in a corner — see updateUiDisplaySettings's own comment. */
+  setUiDisplaySettings: (partial: Partial<UiDisplaySettings>) => void
+  applyUiDisplayPreset: (presetId: string) => void
+  /** Session-only, never persisted — lets the Display panel's "Preview as..." show the canvas
+   * at a different size/shape without touching the saved project (see HomeScreenActions-style
+   * ephemeral fields elsewhere in this store, e.g. selectedWidgetId). Null = use the real
+   * project.uiDesign.display. */
+  uiPreviewDisplayOverride: UiDisplaySettings | null
+  setUiPreviewDisplayOverride: (display: UiDisplaySettings | null) => void
 }
 
 function activeAnimationOf(project: Project, id: string): Animation | undefined {
@@ -324,6 +430,7 @@ export const useStore = create<StoreState>()(
     filePath: null,
     dirty: false,
     saveStatus: 'idle',
+    workspace: 'home',
 
     activeAnimationId: '',
     selectedKeyframeId: null,
@@ -333,6 +440,8 @@ export const useStore = create<StoreState>()(
 
     stickerScope: 'project',
     selectedStickerId: null,
+    selectedWidgetId: null,
+    uiPreviewDisplayOverride: null,
 
     mode: 'design',
     playbackState: 'stopped',
@@ -341,7 +450,9 @@ export const useStore = create<StoreState>()(
     devModeOpen: false,
     devStats: { fps: 0, frame: 0, timeMs: 0 },
     exportDialogOpen: false,
+    lvglExportDialogOpen: false,
     guideOpen: false,
+    settingsOpen: false,
     leftTab: 'animations',
     rightTab: 'controls',
 
@@ -1092,9 +1203,12 @@ export const useStore = create<StoreState>()(
     toggleDevMode: () => set((s) => void (s.devModeOpen = !s.devModeOpen)),
     setDevStats: (stats) => set((s) => void (s.devStats = stats)),
     setExportDialogOpen: (open) => set((s) => void (s.exportDialogOpen = open)),
+    setLvglExportDialogOpen: (open) => set((s) => void (s.lvglExportDialogOpen = open)),
     setGuideOpen: (open) => set((s) => void (s.guideOpen = open)),
+    setSettingsOpen: (open) => set((s) => void (s.settingsOpen = open)),
     setLeftTab: (tab) => set((s) => void (s.leftTab = tab)),
     setRightTab: (tab) => set((s) => void (s.rightTab = tab)),
+    setWorkspace: (workspace) => set((s) => void (s.workspace = workspace)),
 
     setStickerScope: (scope) => set((s) => void (s.stickerScope = scope)),
     selectSticker: (id) => set((s) => void (s.selectedStickerId = id)),
@@ -1222,7 +1336,344 @@ export const useStore = create<StoreState>()(
       set((s) => {
         s.project.stickerAssets = s.project.stickerAssets.filter((a) => a.id !== id)
         s.dirty = true
+      }),
+
+    // UI Design Mode
+    selectUiWidget: (id) => set((s) => void (s.selectedWidgetId = id)),
+
+    addUiWidget: (type, parentId, x, y) => {
+      const widget = createWidget(type)
+      widget.parentId = parentId
+      widget.style.x = x
+      widget.style.y = y
+      set((s) => {
+        const parent = s.project.uiDesign.widgets[parentId]
+        if (!parent) return
+        s.project.uiDesign.widgets[widget.id] = widget
+        parent.childIds.push(widget.id)
+        s.selectedWidgetId = widget.id
+        s.dirty = true
       })
+      return widget.id
+    },
+
+    moveUiWidget: (id, x, y) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (!w) return
+        w.style.x = x
+        w.style.y = y
+        s.dirty = true
+      }),
+
+    updateUiWidgetStyle: (id, partial) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (!w) return
+        Object.assign(w.style, partial)
+        s.dirty = true
+      }),
+
+    updateUiWidgetText: (id, text) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (w) w.text = text
+        s.dirty = true
+      }),
+
+    deleteUiWidget: (id) =>
+      set((s) => {
+        const widgets = s.project.uiDesign.widgets
+        const w = widgets[id]
+        if (!w) return
+        // A screen widget is a screen's root — deleting it would leave that UiScreen dangling,
+        // so screens are removed via their own (future) screen-management action, not this one.
+        if (w.type === 'screen') return
+        const removeSubtree = (wid: string) => {
+          const node = widgets[wid]
+          if (!node) return
+          for (const childId of node.childIds) removeSubtree(childId)
+          delete widgets[wid]
+        }
+        if (w.parentId) {
+          const parent = widgets[w.parentId]
+          if (parent) parent.childIds = parent.childIds.filter((c) => c !== id)
+        }
+        removeSubtree(id)
+        if (s.selectedWidgetId === id) s.selectedWidgetId = null
+        s.dirty = true
+      }),
+
+    duplicateUiWidget: (id) => {
+      const widgets = useStore.getState().project.uiDesign.widgets
+      const original = widgets[id]
+      if (!original || original.type === 'screen' || !original.parentId) return null
+
+      // Re-ids every node in the cloned subtree (a plain deep-copy would collide with the
+      // original's ids, which are also referenced by parentId/childIds throughout the tree) and
+      // collects every clone (root + descendants) into a flat list to insert in one pass.
+      const clones: UiWidget[] = []
+      const cloneSubtree = (wid: string, newParentId: string | null): string => {
+        const node = widgets[wid]
+        const clone: UiWidget = JSON.parse(JSON.stringify(node))
+        clone.id = nanoid(10)
+        clone.parentId = newParentId
+        clone.childIds = node.childIds.map((childId) => cloneSubtree(childId, clone.id))
+        clones.push(clone)
+        return clone.id
+      }
+      const newRootId = cloneSubtree(id, original.parentId)
+      const rootClone = clones.find((c) => c.id === newRootId)!
+      if (typeof rootClone.style.x === 'number') rootClone.style.x += 12
+      if (typeof rootClone.style.y === 'number') rootClone.style.y += 12
+
+      set((s) => {
+        for (const clone of clones) s.project.uiDesign.widgets[clone.id] = clone
+        const parent = s.project.uiDesign.widgets[rootClone.parentId!]
+        if (parent) {
+          const idx = parent.childIds.indexOf(id)
+          parent.childIds.splice(idx + 1, 0, rootClone.id)
+        }
+        s.selectedWidgetId = rootClone.id
+        s.dirty = true
+      })
+      return rootClone.id
+    },
+
+    setUiWidgetVisible: (id, visible) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (w) w.visible = visible
+        s.dirty = true
+      }),
+
+    setUiWidgetLocked: (id, locked) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (w) w.locked = locked
+        s.dirty = true
+      }),
+
+    reorderUiWidget: (id, direction) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (!w || !w.parentId) return
+        const parent = s.project.uiDesign.widgets[w.parentId]
+        if (!parent) return
+        const idx = parent.childIds.indexOf(id)
+        const swapWith = direction === 'up' ? idx - 1 : idx + 1
+        if (idx === -1 || swapWith < 0 || swapWith >= parent.childIds.length) return
+        ;[parent.childIds[idx], parent.childIds[swapWith]] = [parent.childIds[swapWith], parent.childIds[idx]]
+        s.dirty = true
+      }),
+
+    updateUiWidgetMeta: (id, partial) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (!w) return
+        if (partial.tagId !== undefined) w.tagId = partial.tagId ?? undefined
+        if (partial.classNames !== undefined) w.classNames = partial.classNames
+        if (partial.allowOutsideBounds !== undefined) w.allowOutsideBounds = partial.allowOutsideBounds
+        s.dirty = true
+      }),
+
+    addUiCssRule: (selector) => {
+      const id = nanoid(10)
+      set((s) => {
+        s.project.uiDesign.css.push({ id, selector, style: {}, states: {} })
+        s.dirty = true
+      })
+      return id
+    },
+
+    updateUiCssRuleSelector: (id, selector) =>
+      set((s) => {
+        const rule = s.project.uiDesign.css.find((r) => r.id === id)
+        if (rule) rule.selector = selector
+        s.dirty = true
+      }),
+
+    updateUiCssRuleStyle: (id, partial) =>
+      set((s) => {
+        const rule = s.project.uiDesign.css.find((r) => r.id === id)
+        if (!rule) return
+        Object.assign(rule.style, partial)
+        s.dirty = true
+      }),
+
+    deleteUiCssRule: (id) =>
+      set((s) => {
+        s.project.uiDesign.css = s.project.uiDesign.css.filter((r) => r.id !== id)
+        s.dirty = true
+      }),
+
+    replaceActiveScreenWidgets: (widgets, rootId) =>
+      set((s) => {
+        const ud = s.project.uiDesign
+        const screen = ud.screens.find((sc) => sc.id === ud.activeScreenId) ?? ud.screens[0]
+        if (!screen) return
+        // Drop this screen's old subtree (widgets belonging to other screens are untouched —
+        // screens' subtrees never overlap, so anything reachable from the old root is safe to
+        // remove wholesale) and splice in the freshly-parsed tree in its place.
+        const otherScreensWidgets: Record<string, UiWidget> = {}
+        const oldRoot = ud.widgets[screen.rootWidgetId]
+        if (oldRoot) {
+          const toDrop = new Set<string>()
+          const collect = (wid: string) => {
+            toDrop.add(wid)
+            const w = ud.widgets[wid]
+            if (w) for (const c of w.childIds) collect(c)
+          }
+          collect(screen.rootWidgetId)
+          for (const [wid, w] of Object.entries(ud.widgets)) {
+            if (!toDrop.has(wid)) otherScreensWidgets[wid] = w
+          }
+        }
+        ud.widgets = { ...otherScreensWidgets, ...widgets }
+        screen.rootWidgetId = rootId
+        ud.htmlSource = ''
+        s.selectedWidgetId = null
+        s.dirty = true
+      }),
+
+    replaceUiCssRules: (rules) =>
+      set((s) => {
+        s.project.uiDesign.css = rules
+        s.project.uiDesign.cssSource = ''
+        s.dirty = true
+      }),
+
+    updateUiWidgetState: (id, state, partial) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (!w) return
+        if (partial === null) delete w.states[state]
+        else w.states[state] = { ...w.states[state], ...partial }
+        s.dirty = true
+      }),
+
+    addUiAsset: (name, dataUrl, naturalWidth, naturalHeight, sourceFormat) => {
+      const id = nanoid(10)
+      set((s) => {
+        s.project.uiDesign.assets.push({ id, name, dataUrl, naturalWidth, naturalHeight, sourceFormat })
+        s.dirty = true
+      })
+      return id
+    },
+
+    deleteUiAsset: (id) =>
+      set((s) => {
+        s.project.uiDesign.assets = s.project.uiDesign.assets.filter((a) => a.id !== id)
+        for (const w of Object.values(s.project.uiDesign.widgets)) {
+          if (w.src === id) w.src = undefined
+          if (w.style.backgroundImage === id) w.style.backgroundImage = undefined
+          for (const stateStyle of Object.values(w.states)) {
+            if (stateStyle && stateStyle.backgroundImage === id) stateStyle.backgroundImage = undefined
+          }
+        }
+        for (const rule of s.project.uiDesign.css) {
+          if (rule.style.backgroundImage === id) rule.style.backgroundImage = undefined
+          for (const stateStyle of Object.values(rule.states)) {
+            if (stateStyle && stateStyle.backgroundImage === id) stateStyle.backgroundImage = undefined
+          }
+        }
+        s.dirty = true
+      }),
+
+    renameUiAsset: (id, name) =>
+      set((s) => {
+        const asset = s.project.uiDesign.assets.find((a) => a.id === id)
+        if (asset) asset.name = name
+        s.dirty = true
+      }),
+
+    duplicateUiAsset: (id) => {
+      const source = useStore.getState().project.uiDesign.assets.find((a) => a.id === id)
+      if (!source) return null
+      const newId = nanoid(10)
+      set((s) => {
+        s.project.uiDesign.assets.push({ ...source, id: newId, name: `${source.name} copy` })
+        s.dirty = true
+      })
+      return newId
+    },
+
+    replaceUiAsset: (id, dataUrl, naturalWidth, naturalHeight, sourceFormat) =>
+      set((s) => {
+        const asset = s.project.uiDesign.assets.find((a) => a.id === id)
+        if (!asset) return
+        asset.dataUrl = dataUrl
+        asset.naturalWidth = naturalWidth
+        asset.naturalHeight = naturalHeight
+        asset.sourceFormat = sourceFormat
+        s.dirty = true
+      }),
+
+    setUiWidgetSrc: (id, assetId) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (w) w.src = assetId ?? undefined
+        s.dirty = true
+      }),
+
+    updateUiWidgetProps: (id, partial) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (w) Object.assign(w.props, partial)
+        s.dirty = true
+      }),
+
+    setUiActiveScreen: (screenId) =>
+      set((s) => {
+        const ud = s.project.uiDesign
+        if (ud.screens.some((sc) => sc.id === screenId)) ud.activeScreenId = screenId
+      }),
+
+    restoreUiRuntimeSnapshot: (widgets, activeScreenId) =>
+      set((s) => {
+        s.project.uiDesign.widgets = widgets
+        if (activeScreenId) s.project.uiDesign.activeScreenId = activeScreenId
+      }),
+
+    setUiScript: (script) =>
+      set((s) => {
+        s.project.uiDesign.script = script
+        s.dirty = true
+      }),
+
+    // Merges `partial` into the display config; when width and/or height actually change,
+    // every widget's numeric x/y/width/height is rescaled by the resize ratio (percentage/auto
+    // sizes are left alone — they're already responsive) so an existing layout keeps its
+    // proportions on the new canvas instead of overflowing or shrinking to a corner. This is
+    // the concrete, bounded piece of "reposition responsive widgets when appropriate" this pass
+    // implements — a full anchor/constraint system is a separate, much larger feature (not
+    // built here, see the UI Design Mode plan's deferred-scope notes).
+    setUiDisplaySettings: (partial) =>
+      set((s) => {
+        const display = s.project.uiDesign.display
+        const nextWidth = partial.width ?? display.width
+        const nextHeight = partial.height ?? display.height
+        const scaleX = nextWidth / display.width
+        const scaleY = nextHeight / display.height
+        if (scaleX !== 1 || scaleY !== 1) {
+          for (const w of Object.values(s.project.uiDesign.widgets)) {
+            if (typeof w.style.x === 'number') w.style.x = Math.round(w.style.x * scaleX)
+            if (typeof w.style.y === 'number') w.style.y = Math.round(w.style.y * scaleY)
+            if (typeof w.style.width === 'number') w.style.width = Math.max(1, Math.round(w.style.width * scaleX))
+            if (typeof w.style.height === 'number') w.style.height = Math.max(1, Math.round(w.style.height * scaleY))
+          }
+        }
+        Object.assign(display, partial)
+        s.dirty = true
+      }),
+
+    applyUiDisplayPreset: (presetId) => {
+      const preset = UI_DISPLAY_PRESETS.find((p) => p.id === presetId)
+      if (!preset) return
+      useStore.getState().setUiDisplaySettings({ width: preset.width, height: preset.height, shape: preset.shape })
+    },
+
+    setUiPreviewDisplayOverride: (display) => set((s) => void (s.uiPreviewDisplayOverride = display))
   }))
 )
 

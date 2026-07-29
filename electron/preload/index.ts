@@ -27,10 +27,13 @@ const kiboApi = {
   saveProjectToPath: (filePath: string, json: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('project:save-to-path', filePath, json),
   openProject: (): Promise<OpenResult> => ipcRenderer.invoke('project:open'),
+  openProjectPath: (filePath: string): Promise<{ ok: boolean; json?: string }> => ipcRenderer.invoke('project:open-path', filePath),
   autosaveWrite: (json: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('project:autosave-write', json),
   autosaveRead: (): Promise<AutosaveReadResult> => ipcRenderer.invoke('project:autosave-read'),
   exportSaveFile: (defaultName: string, contents: string, filters: ExtFilter[]): Promise<SaveResult> =>
     ipcRenderer.invoke('export:save-file', defaultName, contents, filters),
+  exportSaveBinaryFile: (defaultName: string, base64Contents: string, filters: ExtFilter[]): Promise<SaveResult> =>
+    ipcRenderer.invoke('export:save-binary-file', defaultName, base64Contents, filters),
   importOpenJson: (): Promise<OpenResult> => ipcRenderer.invoke('import:open-json'),
   // One-way notifications the main process uses to decide whether it's safe to close the
   // window without asking, and to know when a save it requested (via

@@ -3,7 +3,7 @@ import { useStore } from '@/state/store'
 import type { EditorState } from '@/types'
 import { AppShell } from '@/components/Layout/AppShell'
 import { useKeyboardShortcuts } from '@/lib/shortcuts'
-import { autosaveRead, autosaveWrite, openProjectDialog, saveProjectAs, saveProjectToPath } from '@/state/persistence'
+import { autosaveRead, autosaveWrite, openProjectDialog, openProjectFromPath, removeRecentProject, saveProjectAs, saveProjectToPath } from '@/state/persistence'
 import { getShowGuideOnStartup } from '@/components/Guide/UserGuideModal'
 
 const AUTOSAVE_INTERVAL_MS = 20000
@@ -40,6 +40,7 @@ export default function App() {
   const toggleDevMode = useStore((s) => s.toggleDevMode)
   const setExportDialogOpen = useStore((s) => s.setExportDialogOpen)
   const setGuideOpen = useStore((s) => s.setGuideOpen)
+  const setWorkspace = useStore((s) => s.setWorkspace)
   const selectedKeyframeId = useStore((s) => s.selectedKeyframeId)
   const activeAnimationId = useStore((s) => s.activeAnimationId)
   const duplicateKeyframe = useStore((s) => s.duplicateKeyframe)
@@ -165,9 +166,42 @@ export default function App() {
     }
   }
 
+  /** Home Screen's Recent Projects list — same dirty-check as handleOpenProject, but reopens
+   * a known path directly instead of showing a file-picker dialog. */
+  const handleOpenRecentProject = async (path: string) => {
+    if (dirty && !window.confirm('You have unsaved changes. Discard them and open a different project?')) return
+    const result = await openProjectFromPath(path)
+    if (result.status === 'ok') {
+      loadProject(result.project, result.editorState, result.filePath)
+    } else if (result.status === 'error') {
+      removeRecentProject(path)
+      window.alert(result.message)
+    }
+  }
+
   const handleNewProject = () => {
     if (dirty && !window.confirm('Discard unsaved changes and start a new project?')) return
     newProjectAction()
+  }
+
+  /** Home button handler for both workspaces — "Prompt to save if there are unsaved changes,
+   * close the current workspace, return to the Home Screen." Offers a real three-way choice
+   * (Save & leave / Discard & leave / stay) using two sequential native confirms, matching how
+   * every other unsaved-changes prompt in this app already uses window.confirm rather than a
+   * custom dialog component. */
+  const goHome = async () => {
+    if (!dirty) {
+      setWorkspace('home')
+      return
+    }
+    if (window.confirm('You have unsaved changes. Save before returning to the Home Screen?')) {
+      const saved = await handleSaveProject()
+      if (saved) setWorkspace('home')
+      return
+    }
+    if (window.confirm('Discard unsaved changes and return to the Home Screen?')) {
+      setWorkspace('home')
+    }
   }
 
   const playPause = () => {
@@ -204,8 +238,10 @@ export default function App() {
   const actions = {
     newProject: handleNewProject,
     openProject: handleOpenProject,
+    openRecentProject: handleOpenRecentProject,
     saveProject: handleSaveProject,
     saveProjectAs: handleSaveProjectAs,
+    goHome,
     exportDialog: () => setExportDialogOpen(true),
     undo,
     redo,
@@ -256,5 +292,5 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeAnimationId, selectedKeyframeId, filePath, dirty, project])
 
-  return <AppShell toolbarActions={actions} />
+  return <AppShell actions={actions} />
 }

@@ -2,9 +2,14 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
+    <!-- 'unsafe-eval' is required by UI Design Mode's Logic tab: the live preview runs the
+         user's own authored behavior script via `new Function(...)` (the real JS engine,
+         rather than a hand-rolled interpreter — see lib/uiDesign/scriptLang/sandboxRuntime.ts)
+         so preview semantics are trustworthy for free. The script being evaluated is always the
+         user's own local project data, never remote/network content. -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kibo  Studio</title>

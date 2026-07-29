@@ -26,9 +26,14 @@ import {
   defaultEditorState
 } from '@/types'
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
+import { createDefaultUiDesign } from '@/lib/uiDesign/widgetDefaults'
+import { DEFAULT_UI_DISPLAY } from '@/types'
+import type { UiAsset, UiCssRule, UiDesignProject, UiDisplayOrientation, UiDisplayRotation, UiDisplayShape, UiDisplaySettings, UiScreen, UiWidget } from '@/types'
 
 const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
 const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
+const RECENT_PROJECTS_KEY = 'kibo-eye-studio:recent-projects'
+const RECENT_PROJECTS_LIMIT = 8
 const PROJECT_FILE_EXTENSION = 'kiboeyes'
 
 /** Thrown by parseProjectFile for anything that isn't a readable Kibo Studio project —
@@ -36,8 +41,51 @@ const PROJECT_FILE_EXTENSION = 'kiboeyes'
  * than crashing or silently discarding their file. */
 export class ProjectFileError extends Error {}
 
-function hasElectron(): boolean {
+export function hasElectron(): boolean {
   return typeof window !== 'undefined' && !!window.kibo
+}
+
+export interface RecentProjectEntry {
+  path: string
+  name: string
+  openedAt: number
+}
+
+/** Recent-projects list shown on the Home Screen. Electron-only: a browser-fallback "save"
+ * downloads a file rather than writing to a stable, re-openable path, so there's nothing
+ * meaningful to record there — touchRecentProject() below no-ops outside Electron. Newest
+ * first, deduplicated by path, capped at RECENT_PROJECTS_LIMIT. */
+export function getRecentProjects(): RecentProjectEntry[] {
+  try {
+    const raw = localStorage.getItem(RECENT_PROJECTS_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(
+      (e): e is RecentProjectEntry => !!e && typeof e === 'object' && typeof e.path === 'string' && typeof e.name === 'string' && typeof e.openedAt === 'number'
+    )
+  } catch {
+    return []
+  }
+}
+
+export function touchRecentProject(path: string, name: string): void {
+  if (!hasElectron() || !path) return
+  try {
+    const entries = getRecentProjects().filter((e) => e.path !== path)
+    entries.unshift({ path, name, openedAt: Date.now() })
+    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(entries.slice(0, RECENT_PROJECTS_LIMIT)))
+  } catch {
+    // Best-effort — a full localStorage quota shouldn't block the save/open that triggered this.
+  }
+}
+
+export function removeRecentProject(path: string): void {
+  try {
+    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(getRecentProjects().filter((e) => e.path !== path)))
+  } catch {
+    // Ignore — worst case a stale entry lingers until the next successful prune.
+  }
 }
 
 function normalizeEyeParams(params: Partial<EyeParams> | undefined): EyeParams {
@@ -122,6 +170,110 @@ function normalizeCustomPupilShapes(raw: unknown): CustomPupilShape[] {
   })
 }
 
+/** Backfills project.uiDesign for saves written before UI Design Mode existed, and drops any
+ * individually malformed widget/screen/css-rule/asset entries (lenient like the other
+ * normalize* helpers) rather than letting a hand-edited file crash the workspace. Falls back
+ * to a fresh createDefaultUiDesign() if the field is missing entirely or has no usable
+ * widgets — mirroring how normalizeStickerAssets always re-seeds a valid starting point. */
+function normalizeUiDesign(raw: unknown): UiDesignProject {
+  if (!raw || typeof raw !== 'object') return createDefaultUiDesign()
+  const r = raw as Partial<UiDesignProject> & Record<string, unknown>
+
+  const widgets: Record<string, UiWidget> = {}
+  if (r.widgets && typeof r.widgets === 'object') {
+    for (const [id, w] of Object.entries(r.widgets as Record<string, unknown>)) {
+      if (!w || typeof w !== 'object') continue
+      const wr = w as Partial<UiWidget> & Record<string, unknown>
+      if (typeof wr.id !== 'string' || typeof wr.type !== 'string') continue
+      widgets[id] = {
+        id: wr.id,
+        type: wr.type as UiWidget['type'],
+        parentId: typeof wr.parentId === 'string' ? wr.parentId : null,
+        childIds: Array.isArray(wr.childIds) ? wr.childIds.filter((c): c is string => typeof c === 'string') : [],
+        tagId: typeof wr.tagId === 'string' ? wr.tagId : undefined,
+        classNames: Array.isArray(wr.classNames) ? wr.classNames.filter((c): c is string => typeof c === 'string') : [],
+        text: typeof wr.text === 'string' ? wr.text : undefined,
+        src: typeof wr.src === 'string' ? wr.src : undefined,
+        props: wr.props && typeof wr.props === 'object' ? (wr.props as UiWidget['props']) : {},
+        style: wr.style && typeof wr.style === 'object' ? (wr.style as UiWidget['style']) : {},
+        states: wr.states && typeof wr.states === 'object' ? (wr.states as UiWidget['states']) : {},
+        visible: wr.visible !== false,
+        locked: Boolean(wr.locked),
+        allowOutsideBounds: Boolean(wr.allowOutsideBounds),
+        events: Array.isArray(wr.events) ? (wr.events as UiWidget['events']) : []
+      }
+    }
+  }
+
+  const screens: UiScreen[] = Array.isArray(r.screens)
+    ? r.screens.filter(
+        (s): s is UiScreen =>
+          !!s &&
+          typeof s === 'object' &&
+          typeof (s as UiScreen).id === 'string' &&
+          typeof (s as UiScreen).rootWidgetId === 'string' &&
+          !!widgets[(s as UiScreen).rootWidgetId]
+      )
+    : []
+
+  if (Object.keys(widgets).length === 0 || screens.length === 0) return createDefaultUiDesign()
+
+  const css: UiCssRule[] = Array.isArray(r.css)
+    ? r.css.filter(
+        (c): c is UiCssRule => !!c && typeof c === 'object' && typeof (c as UiCssRule).id === 'string' && typeof (c as UiCssRule).selector === 'string'
+      )
+    : []
+  const assets: UiAsset[] = Array.isArray(r.assets)
+    ? (r.assets as unknown[])
+        .filter((a): a is Record<string, unknown> => !!a && typeof a === 'object' && typeof (a as Record<string, unknown>).id === 'string' && typeof (a as Record<string, unknown>).dataUrl === 'string')
+        .map((a) => ({
+          id: a.id as string,
+          name: typeof a.name === 'string' ? a.name : 'Untitled Asset',
+          dataUrl: a.dataUrl as string,
+          naturalWidth: typeof a.naturalWidth === 'number' ? a.naturalWidth : 0,
+          naturalHeight: typeof a.naturalHeight === 'number' ? a.naturalHeight : 0,
+          // Saves from before UiAsset tracked this default to "PNG" — every asset is already
+          // normalized to a PNG data URL internally regardless (see decodeUiImageAsset), so
+          // that's the truthful fallback, not a guess.
+          sourceFormat: typeof a.sourceFormat === 'string' ? a.sourceFormat : 'PNG'
+        }))
+    : []
+
+  const activeScreenId = typeof r.activeScreenId === 'string' && screens.some((s) => s.id === r.activeScreenId) ? r.activeScreenId : screens[0].id
+
+  return {
+    widgets,
+    screens,
+    activeScreenId,
+    css,
+    assets,
+    display: normalizeUiDisplay(r.display),
+    htmlSource: typeof r.htmlSource === 'string' ? r.htmlSource : '',
+    cssSource: typeof r.cssSource === 'string' ? r.cssSource : '',
+    script: typeof r.script === 'string' ? r.script : ''
+  }
+}
+
+const UI_DISPLAY_SHAPES: UiDisplayShape[] = ['round', 'square', 'rectangle', 'custom']
+const UI_DISPLAY_ORIENTATIONS: UiDisplayOrientation[] = ['portrait', 'landscape']
+const UI_DISPLAY_ROTATIONS: UiDisplayRotation[] = [0, 90, 180, 270]
+
+/** Backfills project.uiDesign.display — added after UI Design Mode's own display config
+ * existed as a separate setting from project.display (Eye Studio's) — same lenient
+ * spread-over-defaults idiom as normalizeEyeParams, so a save from before this field existed
+ * (or a hand-edited file with a missing/invalid value) just gets sane defaults per-field
+ * rather than the whole object being discarded. */
+function normalizeUiDisplay(raw: unknown): UiDisplaySettings {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Partial<UiDisplaySettings> & Record<string, unknown>
+  return {
+    width: typeof r.width === 'number' && r.width > 0 ? r.width : DEFAULT_UI_DISPLAY.width,
+    height: typeof r.height === 'number' && r.height > 0 ? r.height : DEFAULT_UI_DISPLAY.height,
+    shape: UI_DISPLAY_SHAPES.includes(r.shape as UiDisplayShape) ? (r.shape as UiDisplayShape) : DEFAULT_UI_DISPLAY.shape,
+    orientation: UI_DISPLAY_ORIENTATIONS.includes(r.orientation as UiDisplayOrientation) ? (r.orientation as UiDisplayOrientation) : DEFAULT_UI_DISPLAY.orientation,
+    rotation: UI_DISPLAY_ROTATIONS.includes(r.rotation as UiDisplayRotation) ? (r.rotation as UiDisplayRotation) : DEFAULT_UI_DISPLAY.rotation
+  }
+}
+
 /** Backfills fields added after a project/autosave was written (e.g. the old scalar
  * `irisSize`/`pupilSize` becoming `irisWidth`/`irisHeight`/`pupilWidth`/`pupilHeight`, or
  * the whole `colors`/`display` themes, or the per-eye override fields added for the Eye
@@ -194,7 +346,8 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     visualReference,
     customPupilShapes: normalizeCustomPupilShapes(raw.customPupilShapes),
     stickerAssets: normalizeStickerAssets((raw as unknown as Record<string, unknown>).stickerAssets),
-    stickers: normalizeStickerInstances((raw as unknown as Record<string, unknown>).stickers)
+    stickers: normalizeStickerInstances((raw as unknown as Record<string, unknown>).stickers),
+    uiDesign: normalizeUiDesign((raw as unknown as Record<string, unknown>).uiDesign)
   }
 }
 
@@ -276,7 +429,9 @@ export async function saveProjectAs(project: Project, editorState: EditorState):
   const suggested = suggestedFileName(project)
   if (hasElectron()) {
     const result = await window.kibo!.saveProjectAs(json, suggested)
-    return result.canceled ? null : (result.filePath ?? null)
+    if (result.canceled || !result.filePath) return null
+    touchRecentProject(result.filePath, project.name)
+    return result.filePath
   }
   downloadTextFile(json, suggested)
   return suggested
@@ -286,6 +441,7 @@ export async function saveProjectToPath(filePath: string, project: Project, edit
   const json = serializeProjectFile(project, editorState)
   if (hasElectron()) {
     await window.kibo!.saveProjectToPath(filePath, json)
+    touchRecentProject(filePath, project.name)
     return
   }
   localStorage.setItem(LOCAL_STORAGE_PATH_KEY, filePath)
@@ -303,12 +459,32 @@ export async function openProjectDialog(): Promise<OpenProjectOutcome> {
     if (result.canceled || !result.json) return { status: 'canceled' }
     try {
       const file = parseProjectFile(result.json)
+      if (result.filePath) touchRecentProject(result.filePath, file.project.name)
       return { status: 'ok', project: file.project, editorState: file.editorState, filePath: result.filePath ?? '' }
     } catch (err) {
       return { status: 'error', message: err instanceof ProjectFileError ? err.message : 'This file could not be opened.' }
     }
   }
   return openProjectFilePicker()
+}
+
+/** Reopens a project directly by path (Electron-only — no file-picker dialog), used by the
+ * Home Screen's Recent Projects list. Mirrors openProjectDialog's outcome shape/error handling
+ * so callers can treat both the same way; on failure (file moved/deleted since it was last
+ * opened) the caller is expected to also call removeRecentProject(filePath). */
+export async function openProjectFromPath(filePath: string): Promise<OpenProjectOutcome> {
+  if (!hasElectron()) return { status: 'error', message: 'Reopening a project by path is only available in the desktop app.' }
+  const result = await window.kibo!.openProjectPath(filePath)
+  if (!result.ok || !result.json) {
+    return { status: 'error', message: 'This project could not be found. It may have been moved or deleted.' }
+  }
+  try {
+    const file = parseProjectFile(result.json)
+    touchRecentProject(filePath, file.project.name)
+    return { status: 'ok', project: file.project, editorState: file.editorState, filePath }
+  } catch (err) {
+    return { status: 'error', message: err instanceof ProjectFileError ? err.message : 'This file could not be opened.' }
+  }
 }
 
 function openProjectFilePicker(): Promise<OpenProjectOutcome> {
@@ -379,6 +555,26 @@ export async function exportFile(defaultName: string, contents: string, extensio
   return true
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const CHUNK = 8192
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  }
+  return btoa(binary)
+}
+
+/** Binary counterpart of exportFile — used for the UI Design Mode LVGL export's downloadable
+ * .zip (a real zip archive, not text, so it can't reuse the string-based path above). */
+export async function exportBinaryFile(defaultName: string, bytes: Uint8Array, extensions: string[]): Promise<boolean> {
+  if (hasElectron()) {
+    const result = await window.kibo!.exportSaveBinaryFile(defaultName, bytesToBase64(bytes), [{ name: 'Export', extensions }])
+    return !result.canceled
+  }
+  downloadBinaryFile(bytes, defaultName)
+  return true
+}
+
 export async function importJsonDialog(): Promise<string | null> {
   if (hasElectron()) {
     const result = await window.kibo!.importOpenJson()
@@ -390,6 +586,16 @@ export async function importJsonDialog(): Promise<string | null> {
 
 function downloadTextFile(contents: string, filename: string): void {
   const blob = new Blob([contents], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function downloadBinaryFile(bytes: Uint8Array, filename: string): void {
+  const blob = new Blob([bytes as BlobPart], { type: 'application/octet-stream' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url

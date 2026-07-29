@@ -32,10 +32,10 @@ function legacyAutosavePath(): string {
  * existing project file half-written/corrupted — the rename is atomic on both POSIX and
  * Windows, so the destination is either the old contents or the fully-written new contents,
  * never something in between. */
-async function atomicWriteFile(filePath: string, contents: string): Promise<void> {
+async function atomicWriteFile(filePath: string, contents: string, encoding: 'utf-8' | 'base64' = 'utf-8'): Promise<void> {
   const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`
   try {
-    await writeFile(tmpPath, contents, 'utf-8')
+    await writeFile(tmpPath, contents, encoding)
     await rename(tmpPath, filePath)
   } catch (err) {
     try {
@@ -199,6 +199,15 @@ ipcMain.handle('project:open', async () => {
   return { canceled: false, filePath, json }
 })
 
+ipcMain.handle('project:open-path', async (_e, filePath: string) => {
+  try {
+    const json = await readFile(filePath, 'utf-8')
+    return { ok: true, json }
+  } catch {
+    return { ok: false }
+  }
+})
+
 ipcMain.handle('project:autosave-write', async (_e, json: string) => {
   await atomicWriteFile(autosavePath(), json)
   return { ok: true }
@@ -236,6 +245,23 @@ ipcMain.handle('export:save-file', async (_e, defaultName: string, contents: str
   })
   if (result.canceled || !result.filePath) return { canceled: true }
   await atomicWriteFile(result.filePath, contents)
+  return { canceled: false, filePath: result.filePath }
+})
+
+// Binary counterpart of export:save-file — used for the UI Design Mode LVGL export's
+// downloadable .zip. `base64Contents` arrives already base64-encoded from the renderer (a
+// Blob/Uint8Array can't cross the IPC boundary as cleanly as a string); writeFile with the
+// 'base64' encoding decodes it back to raw bytes before writing, so the file on disk is the
+// real zip, not base64 text.
+ipcMain.handle('export:save-binary-file', async (_e, defaultName: string, base64Contents: string, extFilters: { name: string; extensions: string[] }[]) => {
+  if (!mainWindow) return { canceled: true }
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export',
+    defaultPath: defaultName,
+    filters: extFilters
+  })
+  if (result.canceled || !result.filePath) return { canceled: true }
+  await atomicWriteFile(result.filePath, base64Contents, 'base64')
   return { canceled: false, filePath: result.filePath }
 })
 

@@ -13,6 +13,7 @@
     "dist": "electron-vite build && electron-builder"
   },
   "dependencies": {
+    "acorn": "^8.18.0",
     "framer-motion": "^11.11.17",
     "gifuct-js": "^2.1.2",
     "immer": "^10.1.1",

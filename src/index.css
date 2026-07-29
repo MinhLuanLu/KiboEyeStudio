@@ -24,6 +24,13 @@
   ::-webkit-scrollbar-thumb:hover {
     background: #4a4b54;
   }
+
+  /* UI Design Mode's Spinner widget preview — see WidgetRenderer.tsx */
+  @keyframes kibo-ui-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
 }
 
 @layer components {

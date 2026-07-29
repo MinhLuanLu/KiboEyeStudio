@@ -22,7 +22,7 @@ const STATUS_CLASS: Record<ValidationStatus, string> = {
  * checks below — same collapse-unless-something-failed behavior, same row layout, just a
  * different title/subtitle per item. Only rendered when there's at least one result, so
  * projects with nothing of that kind don't show an empty panel. */
-function ValidationPanel<T extends { status: ValidationStatus; messages: string[] }>({
+export function ValidationPanel<T extends { status: ValidationStatus; messages: string[] }>({
   title,
   results,
   itemKey,

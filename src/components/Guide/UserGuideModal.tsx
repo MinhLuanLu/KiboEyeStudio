@@ -13,7 +13,7 @@ export function getShowGuideOnStartup(): boolean {
   }
 }
 
-function setShowGuideOnStartup(value: boolean): void {
+export function setShowGuideOnStartup(value: boolean): void {
   try {
     localStorage.setItem(SHOW_ON_STARTUP_KEY, value ? 'true' : 'false')
   } catch {

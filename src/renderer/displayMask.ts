@@ -1,4 +1,13 @@
-import type { DisplayShape } from '@/types'
+import type { DisplayShape, UiDisplayShape } from '@/types'
+
+/** Adapts UI Design Mode's own shape enum ('round'|'square'|'rectangle'|'custom') to Eye
+ * Studio's ('circle'|'square'|'rounded') so rectFitsDisplayShape/clampRectToDisplayShape below
+ * can be reused as-is for UI Design Mode widgets — only a circle actually constrains a rect
+ * (see rectFitsDisplayShape's own comment), so 'square'/'rectangle'/'custom' all safely map to
+ * the same "unconstrained" bucket ('square') without needing a third code path. */
+export function uiDisplayShapeToDisplayShape(shape: UiDisplayShape): DisplayShape {
+  return shape === 'round' ? 'circle' : 'square'
+}
 
 export interface DisplayMaskOptions {
   width: number
@@ -74,4 +83,65 @@ export function fitDisplayToBox(display: DisplayMaskOptions, box: number): Displ
     cornerRadius: display.cornerRadius * scale,
     showBezel: false
   }
+}
+
+export interface DisplayRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** True if every corner of `rect` (in display-local px, origin at the display's top-left,
+ * same coordinate space UI Design Mode widgets are positioned in) falls inside the display's
+ * visible shape. Only 'circle'/'oval' actually constrain anything here — a rect already IS an
+ * axis-aligned box, so 'square'/'rounded' displays never reject a rect purely for being a
+ * rectangle (rounded corners aside, which this pass doesn't additionally constrain). */
+export function rectFitsDisplayShape(display: Pick<DisplayMaskOptions, 'width' | 'height' | 'shape'>, rect: DisplayRect): boolean {
+  if (display.shape !== 'circle') return true
+  const cx = display.width / 2
+  const cy = display.height / 2
+  const rx = display.width / 2
+  const ry = display.height / 2
+  const corners = [
+    [rect.x, rect.y],
+    [rect.x + rect.width, rect.y],
+    [rect.x, rect.y + rect.height],
+    [rect.x + rect.width, rect.y + rect.height]
+  ]
+  return corners.every(([px, py]) => {
+    const nx = rx > 0 ? (px - cx) / rx : 0
+    const ny = ry > 0 ? (py - cy) / ry : 0
+    return nx * nx + ny * ny <= 1
+  })
+}
+
+/** Soft-clamps a widget's position so it stays inside a circular display — used on
+ * drag/resize pointer-up (see UiDesign/WidgetRenderer.tsx), not enforced continuously, so a
+ * widget already placed outside (e.g. via `allowOutsideBounds`) never gets silently yanked
+ * back mid-render. Approximates the "keep every corner inside the ellipse" constraint by
+ * clamping the rect's *center* to an ellipse eroded by the rect's own half-width/height — exact
+ * for a circle, a reasonable approximation for a non-square oval, and standard technique for
+ * convex-region containment (Minkowski erosion). Width/height are never changed, only x/y.
+ * Returns the original rect's x/y unchanged if it already fits, or shape !== 'circle'. */
+export function clampRectToDisplayShape(display: Pick<DisplayMaskOptions, 'width' | 'height' | 'shape'>, rect: DisplayRect): { x: number; y: number } {
+  if (display.shape !== 'circle' || rectFitsDisplayShape(display, rect)) return { x: rect.x, y: rect.y }
+
+  const cx = display.width / 2
+  const cy = display.height / 2
+  const rx = Math.max(0, display.width / 2 - rect.width / 2)
+  const ry = Math.max(0, display.height / 2 - rect.height / 2)
+  const rectCx = rect.x + rect.width / 2
+  const rectCy = rect.y + rect.height / 2
+
+  if (rx === 0 || ry === 0) return { x: cx - rect.width / 2, y: cy - rect.height / 2 }
+
+  const nx = (rectCx - cx) / rx
+  const ny = (rectCy - cy) / ry
+  const dist = Math.sqrt(nx * nx + ny * ny)
+  if (dist <= 1) return { x: rect.x, y: rect.y }
+
+  const clampedCx = cx + (nx / dist) * rx
+  const clampedCy = cy + (ny / dist) * ry
+  return { x: clampedCx - rect.width / 2, y: clampedCy - rect.height / 2 }
 }
