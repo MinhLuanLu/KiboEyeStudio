@@ -23,6 +23,11 @@ function sticker(name: string, builtinId: string, layer: StickerLayer, x: number
     visible: true,
     locked: false,
     anim: { ...DEFAULT_STICKER_ANIM },
+    // Presets apply to a Project/Expression/Animation sticker scope (see applyStickerPreset in
+    // store.ts), never directly onto a specific timeline sticker Track — '' means "not yet
+    // assigned to a track", same as a freshly-imported/legacy sticker; the Sticker Manager
+    // and, for Animation scope, the Timeline let the user assign one afterward.
+    trackId: '',
     ...overrides
   }
 }

@@ -132,6 +132,26 @@ export function StickerManagerPanel() {
           </button>
         </div>
 
+        <div className="flex flex-col gap-1">
+          <span className="studio-label">Drag onto a Timeline sticker track</span>
+          <div className="flex gap-1.5 overflow-x-auto pb-1">
+            {project.stickerAssets.map((a) => (
+              <button
+                key={a.id}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData('application/x-kibo-sticker-asset', a.id)
+                  e.dataTransfer.effectAllowed = 'copy'
+                }}
+                className="shrink-0 cursor-grab active:cursor-grabbing"
+                title={`Drag "${a.name}" onto a sticker track to place it there`}
+              >
+                <StickerThumb asset={a} />
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="flex flex-col gap-1.5">
           <span className="studio-label">Presets</span>
           <div className="grid grid-cols-3 gap-1.5">

@@ -1,4 +1,5 @@
 import type { Animation, EyeParams, Keyframe } from '@/types'
+import { PUPIL_TRACK_FIELDS, EYELID_TRACK_FIELDS, SHAPE_TRACK_FIELDS } from '@/types'
 import { applyEasing } from './easing'
 
 const EYE_PARAM_KEYS = [
@@ -51,81 +52,129 @@ export function lerpParams(a: EyeParams, b: EyeParams, t: number): EyeParams {
   return out
 }
 
-/** Total playable duration of an animation in ms. The segment leaving the last
- * keyframe only plays when looping (it wraps back to keyframe 0). */
-export function animationDuration(anim: Animation): number {
-  if (anim.keyframes.length === 0) return 0
-  if (anim.keyframes.length === 1) return anim.keyframes[0].duration
-  const segments = anim.loop ? anim.keyframes.length : anim.keyframes.length - 1
-  let total = 0
-  for (let i = 0; i < segments; i++) total += anim.keyframes[i].duration
-  return total
-}
-
 export interface SampleResult {
   params: EyeParams
   segmentIndex: number
   segmentT: number
 }
 
-/** Samples an animation's eye params at `timeMs` elapsed since playback start.
- * `timeMs` is expected pre-clamped/wrapped by the caller for looping. */
-export function sampleAnimation(anim: Animation, timeMs: number): SampleResult {
-  const kfs = anim.keyframes
-  if (kfs.length === 0) {
-    throw new Error('Cannot sample an animation with no keyframes')
+/** Wraps elapsed time into [0, durationMs) for looping playback; clamps to the end otherwise.
+ * Pure version of wrapTime() below, usable by any track (not just the pose track). */
+export function wrapMs(timeMs: number, durationMs: number, loop: boolean): number {
+  if (durationMs <= 0) return 0
+  if (loop) {
+    const m = timeMs % durationMs
+    return m < 0 ? m + durationMs : m
   }
-  if (kfs.length === 1) {
-    return { params: kfs[0].params, segmentIndex: 0, segmentT: 0 }
-  }
+  return Math.min(Math.max(0, timeMs), durationMs)
+}
 
-  let remaining = Math.max(0, timeMs)
-  const segmentCount = anim.loop ? kfs.length : kfs.length - 1
+/** Samples one independently-timed keyframe track (any of Animation's pose/leftEye/rightEye/
+ * pupils/eyelids arrays) at `timeMs`. Returns `null` for an empty track — the caller (usually
+ * sampleAnimationEye) treats that as "this track contributes nothing, fully inherit the pose
+ * track's values for these fields" rather than an error, since an empty parametric track is
+ * the normal/default state for every animation that hasn't had that track authored yet. A
+ * single-keyframe track holds that one pose constant for the whole animation. `kfs` is assumed
+ * sorted by `timeMs` ascending — every store action that writes to a keyframe track re-sorts
+ * after mutating (see store.ts), so callers never need to sort defensively here. */
+export function sampleTrack(kfs: Keyframe[], loop: boolean, durationMs: number, timeMs: number): SampleResult | null {
+  if (kfs.length === 0) return null
+  if (kfs.length === 1) return { params: kfs[0].params, segmentIndex: 0, segmentT: 0 }
 
-  for (let i = 0; i < segmentCount; i++) {
-    const from = kfs[i]
-    const to = kfs[(i + 1) % kfs.length]
-    const dur = Math.max(1, from.duration)
-    if (remaining <= dur || i === segmentCount - 1) {
-      const t = Math.min(1, remaining / dur)
-      const eased = applyEasing(t, from.easing, from.customBezier)
-      return { params: lerpParams(from.params, to.params, eased), segmentIndex: i, segmentT: t }
-    }
-    remaining -= dur
-  }
-
+  const t = wrapMs(timeMs, durationMs, loop)
   const last = kfs[kfs.length - 1]
-  return { params: last.params, segmentIndex: kfs.length - 1, segmentT: 1 }
+
+  if (t <= kfs[0].timeMs) return { params: kfs[0].params, segmentIndex: 0, segmentT: 0 }
+
+  for (let i = 0; i < kfs.length - 1; i++) {
+    const from = kfs[i]
+    const to = kfs[i + 1]
+    if (t <= to.timeMs) {
+      const span = Math.max(1, to.timeMs - from.timeMs)
+      const localT = Math.min(1, Math.max(0, (t - from.timeMs) / span))
+      const eased = applyEasing(localT, from.easing, from.customBezier)
+      return { params: lerpParams(from.params, to.params, eased), segmentIndex: i, segmentT: localT }
+    }
+  }
+
+  if (!loop || durationMs <= last.timeMs) {
+    return { params: last.params, segmentIndex: kfs.length - 1, segmentT: 1 }
+  }
+
+  // Loop-back segment: from the last keyframe, wrapping past durationMs back to the first
+  // keyframe — generalizes the old "last keyframe's duration is the gap back to keyframe 0"
+  // rule now that duration-to-next no longer exists as stored data.
+  const span = Math.max(1, durationMs - last.timeMs)
+  const localT = Math.min(1, Math.max(0, (t - last.timeMs) / span))
+  const eased = applyEasing(localT, last.easing, last.customBezier)
+  return { params: lerpParams(last.params, kfs[0].params, eased), segmentIndex: kfs.length - 1, segmentT: localT }
+}
+
+/** Merges the pose track with the pupils/eyelids/left-or-right-eye tracks into one final
+ * EyeParams for the requested eye at `timeMs` — the one sampling entry point the live preview
+ * and the C++ export both use, so "what does this eye look like right now" is defined in
+ * exactly one place. Precedence, least to most specific: pose (baseline) -> pupils -> eyelids
+ * -> left/right eye shape. A track with zero keyframes contributes nothing (sampleTrack
+ * returns null) and the merge simply keeps the pose track's value for those fields — this is
+ * what makes an animation with no left/right/pupil/eyelid tracks authored yet (every pre-
+ * Phase-1 project) behave byte-identically to the old single-track model. */
+export function sampleAnimationEye(anim: Animation, timeMs: number, eye: 'left' | 'right'): EyeParams {
+  const pose = sampleTrack(anim.keyframes, anim.loop, anim.durationMs, timeMs)
+  if (!pose) {
+    throw new Error('Cannot sample an animation with no pose keyframes')
+  }
+  const merged = { ...pose.params }
+
+  const pupils = sampleTrack(anim.pupilKeyframes, anim.loop, anim.durationMs, timeMs)
+  if (pupils) {
+    for (const field of PUPIL_TRACK_FIELDS) (merged as unknown as Record<string, unknown>)[field] = (pupils.params as unknown as Record<string, unknown>)[field]
+  }
+  const eyelids = sampleTrack(anim.eyelidKeyframes, anim.loop, anim.durationMs, timeMs)
+  if (eyelids) {
+    for (const field of EYELID_TRACK_FIELDS) (merged as unknown as Record<string, unknown>)[field] = (eyelids.params as unknown as Record<string, unknown>)[field]
+  }
+  const sideKfs = eye === 'left' ? anim.leftEyeKeyframes : anim.rightEyeKeyframes
+  const side = sampleTrack(sideKfs, anim.loop, anim.durationMs, timeMs)
+  if (side) {
+    for (const field of SHAPE_TRACK_FIELDS) (merged as unknown as Record<string, unknown>)[field] = (side.params as unknown as Record<string, unknown>)[field]
+  }
+  return merged
+}
+
+/** Total playable duration of an animation in ms. Back-compat thin wrapper — `durationMs` is
+ * now authoritative stored data (kept in sync by every store action that edits the pose
+ * track's timing), not recomputed from keyframes. */
+export function animationDuration(anim: Animation): number {
+  return anim.durationMs
+}
+
+/** Samples the pose track only, at `timeMs`. Back-compat wrapper for any call site that only
+ * ever cared about one shared (mirrored) pose — prefer sampleAnimationEye for anything that
+ * should support left/right/pupil/eyelid divergence. */
+export function sampleAnimation(anim: Animation, timeMs: number): SampleResult {
+  const result = sampleTrack(anim.keyframes, anim.loop, anim.durationMs, timeMs)
+  if (!result) throw new Error('Cannot sample an animation with no keyframes')
+  return result
 }
 
 /** Wraps elapsed time into [0, duration) for looping playback; clamps to the end otherwise. */
 export function wrapTime(timeMs: number, anim: Animation): number {
-  const total = animationDuration(anim)
-  if (total <= 0) return 0
-  if (anim.loop) {
-    const m = timeMs % total
-    return m < 0 ? m + total : m
-  }
-  return Math.min(timeMs, total)
+  return wrapMs(timeMs, anim.durationMs, anim.loop)
 }
 
 export function findKeyframeAtOrAfter(anim: Animation, keyframeId: string): number {
   return anim.keyframes.findIndex((k) => k.id === keyframeId)
 }
 
+/** Back-compat wrapper — keyframes now store their own absolute `timeMs` directly, so this is
+ * just a projection rather than a prefix-sum computation. */
 export function keyframeStartTimes(anim: Animation): number[] {
-  const starts: number[] = []
-  let acc = 0
-  for (let i = 0; i < anim.keyframes.length; i++) {
-    starts.push(acc)
-    acc += anim.keyframes[i].duration
-  }
-  return starts
+  return anim.keyframes.map((k) => k.timeMs)
 }
 
-/** Smallest allowed segment duration (ms) between two adjacent keyframes — shared by the
- * Timeline's own drag-to-resize handling and the store's absolute-time/paste actions, so
- * "how close can two keyframes get" is defined in exactly one place. */
+/** Smallest allowed gap (ms) between two adjacent keyframes on the same track — shared by the
+ * Timeline's own drag/resize/split handling and the store's time-write actions, so "how close
+ * can two keyframes get" is defined in exactly one place. */
 export const MIN_SEGMENT_MS = 16
 
 export { EYE_PARAM_KEYS }

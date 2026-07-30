@@ -5,6 +5,7 @@ import { projectToJson, animationToJson } from '@/lib/export/jsonExport'
 import { generateCppHeader } from '@/lib/export/cppExport'
 import { validateStickerExport, type StickerValidationResult } from '@/lib/export/validateStickers'
 import { validatePupilShapeExport, type PupilShapeValidationResult } from '@/lib/export/validatePupilShapes'
+import { validateTimelineTiming, type TimelineTimingValidationResult } from '@/lib/export/validateTimelineTiming'
 import { parseAnimationJson } from '@/lib/import/jsonImport'
 import { exportFile, importJsonDialog } from '@/state/persistence'
 
@@ -105,6 +106,18 @@ function PupilShapeValidationPanel({ project }: { project: Parameters<typeof val
   )
 }
 
+function TimelineTimingValidationPanel({ project }: { project: Parameters<typeof validateTimelineTiming>[0] }) {
+  const results = useMemo(() => validateTimelineTiming(project), [project])
+  return (
+    <ValidationPanel<TimelineTimingValidationResult>
+      title="Timeline Timing Check"
+      results={results}
+      itemKey={(r, i) => `${r.animationId}-${i}`}
+      itemTitle={(r) => r.animationName}
+    />
+  )
+}
+
 export function ExportDialog() {
   const open = useStore((s) => s.exportDialogOpen)
   const setOpen = useStore((s) => s.setExportDialogOpen)
@@ -180,6 +193,7 @@ export function ExportDialog() {
             </button>
           </div>
 
+          {tab === 'cpp' && <TimelineTimingValidationPanel project={project} />}
           {tab === 'cpp' && <PupilShapeValidationPanel project={project} />}
           {tab === 'cpp' && <StickerValidationPanel project={project} />}
 

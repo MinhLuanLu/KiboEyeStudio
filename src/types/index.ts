@@ -91,9 +91,51 @@ export type EasingType =
   | 'elastic'
   | 'bezier'
 
+/** Which EyeParams fields each parametric timeline track "owns" when merging multiple tracks
+ * into one final pose (see sampleAnimationEye in engine/interpolate.ts). A field not listed in
+ * PUPIL_TRACK_FIELDS or EYELID_TRACK_FIELDS is a "shape" field, owned by the pose track and,
+ * when present, by the leftEye/rightEye tracks. Kept as flat literal lists (not derived from
+ * EYE_PARAM_RANGES, which omits pupilShape/pupilCustomShapeId) so this is the one place that
+ * needs updating if EyeParams ever gains a field. */
+export const PUPIL_TRACK_FIELDS: (keyof EyeParams)[] = [
+  'pupilWidth',
+  'pupilHeight',
+  'pupilX',
+  'pupilY',
+  'pupilRotation',
+  'pupilShape',
+  'pupilCustomShapeId'
+]
+export const EYELID_TRACK_FIELDS: (keyof EyeParams)[] = [
+  'upperEyelid',
+  'lowerEyelid',
+  'upperEyelidTilt',
+  'lowerEyelidTilt',
+  'upperEyelidCurvature',
+  'lowerEyelidCurvature'
+]
+export const SHAPE_TRACK_FIELDS: (keyof EyeParams)[] = [
+  'width',
+  'height',
+  'radius',
+  'distance',
+  'rotation',
+  'irisWidth',
+  'irisHeight',
+  'highlightX',
+  'highlightY',
+  'highlightSize'
+]
+
 export interface Keyframe {
   id: string
-  duration: number
+  /** Absolute ms from the owning track's t=0 (the animation's own start). Replaces the old
+   * "duration to next keyframe" model — see keyframeStartTimes()/normalizeProject() migration
+   * notes for why: with independent per-track timing (pose/leftEye/rightEye/pupils/eyelids),
+   * duration-to-next made every cross-track operation (multi-select drag, split-all-at-
+   * playhead, snap-to-another-track's-edge) require cascading recomputation of every
+   * downstream keyframe. Absolute time makes each of those a direct, independent write. */
+  timeMs: number
   easing: EasingType
   customBezier?: [number, number, number, number]
   params: EyeParams
@@ -102,15 +144,128 @@ export interface Keyframe {
    * Fields NOT listed here track the project's Visual Reference and get overwritten whenever
    * it's applied. See STYLE_EYE_PARAM_FIELDS and computeStyleOverrides below. */
   styleOverrides: string[]
+  /** Set only on pose-track keyframes created by dragging a saved Expression onto the
+   * Expression track. Identifies which Expression this clip represents; `linked: true` means
+   * it's still considered a live reference to that Expression (Phase 2 provides a "refresh
+   * from source" action) rather than a fully independent, detached keyframe. Editing the
+   * clip's timing never touches the source Expression either way. */
+  sourceExpressionId?: string
+  linked?: boolean
 }
+
+export type TrackKind = 'pose' | 'leftEye' | 'rightEye' | 'pupils' | 'eyelids' | 'sticker' | 'marker'
+
+/** UI/organizational metadata for one timeline lane. The 5 fixed keyframe-track kinds (pose/
+ * leftEye/rightEye/pupils/eyelids) and the single 'marker' track always exist, one each, for
+ * every Animation; 'sticker' tracks are user-created (Add Track), any number, purely to group
+ * StickerInstances visually — see StickerInstance.trackId. This type carries no actual
+ * keyframe/clip data itself (that still lives in Animation.keyframes/leftEyeKeyframes/etc. and
+ * StickerInstance) — it's deliberately just display order, name, and mute/lock state. */
+export interface Track {
+  id: string
+  kind: TrackKind
+  name: string
+  order: number
+  /** "Mute" — excluded from the sample/merge (keyframe tracks) or from rendering (sticker
+   * tracks) while false, without deleting any data. */
+  visible: boolean
+  /** Blocks drag/edit only — a locked track's contents still render/animate normally. */
+  locked: boolean
+  /** Only meaningful for kind:'sticker' — which compositing layer its instances draw on
+   * (mirrors StickerInstance.layer; every instance assigned to this track should share it). */
+  stickerLayer?: StickerLayer
+}
+
+/** A studio-only timeline annotation — a labeled point in time, purely for authoring/snapping
+ * (e.g. marking "beat 1", "loop point"). Never exported to C++ — see cppExport.ts's comment
+ * at the animation-export call site. */
+export interface Marker {
+  id: string
+  timeMs: number
+  label: string
+  color: string
+}
+
+/** The 5 fixed keyframe-track kinds plus 'marker' — one of each always exists on every
+ * Animation (see createDefaultTracks). 'sticker' tracks are the only user-created kind. */
+export const FIXED_TRACK_KINDS: { kind: TrackKind; name: string }[] = [
+  { kind: 'pose', name: 'Expression' },
+  { kind: 'leftEye', name: 'Left Eye' },
+  { kind: 'rightEye', name: 'Right Eye' },
+  { kind: 'pupils', name: 'Pupils' },
+  { kind: 'eyelids', name: 'Eyelids' },
+  { kind: 'marker', name: 'Markers' }
+]
+
+/** Builds the essential default tracks for a brand-new Animation: just the mandatory
+ * Expression (pose) track plus one Sticker track to drop stickers on immediately — Left Eye/
+ * Right Eye/Pupils/Eyelids/Markers stay out of the way until the user actually wants one (via
+ * the Timeline's "+ Track" control, or "+ Diverge from Expression" once added), so a fresh
+ * animation's timeline isn't cluttered with five empty rows nobody asked for. Takes an id
+ * factory rather than importing nanoid directly here, keeping this file dependency-free like
+ * the rest of types/index.ts. */
+export function createDefaultTracks(idFactory: () => string): Track[] {
+  return [
+    { id: idFactory(), kind: 'pose', name: 'Expression', order: 0, visible: true, locked: false },
+    { id: idFactory(), kind: 'sticker', name: 'Stickers', order: 1, visible: true, locked: false, stickerLayer: 'front' }
+  ]
+}
+
+/** Builds one additional track of `kind` — used by the Timeline's "+ Track" control (see
+ * addTrack() in state/store.ts) when the user explicitly wants a Left Eye/Right Eye/Pupils/
+ * Eyelids/Markers row, or another Sticker track. `order` is the caller's responsibility (append
+ * to the end of the current track list). */
+export function createTrack(idFactory: () => string, kind: TrackKind, order: number, name?: string, stickerLayer?: StickerLayer): Track {
+  const fixed = FIXED_TRACK_KINDS.find((f) => f.kind === kind)
+  return {
+    id: idFactory(),
+    kind,
+    name: name?.trim() || fixed?.name || 'Track',
+    order,
+    visible: true,
+    locked: false,
+    stickerLayer: kind === 'sticker' ? (stickerLayer ?? 'front') : undefined
+  }
+}
+
+export type SelectionItemKind = 'keyframe' | 'sticker' | 'marker'
+
+/** One uniformly-shaped selectable timeline item, letting the Timeline's selection/clipboard/
+ * drag code treat keyframes-on-any-track, sticker clips, and markers identically instead of
+ * needing a parallel selection model per kind. `trackId` is one of the 5 fixed keyframe-track
+ * kinds ('pose'/'leftEye'/'rightEye'/'pupils'/'eyelids'), a sticker Track.id, or 'marker'. */
+export interface SelectionItem {
+  kind: SelectionItemKind
+  trackId: string
+  id: string
+}
+export type Selection = SelectionItem[]
 
 export interface Animation {
   id: string
   name: string
   loop: boolean
+  /** Total timeline length in ms — drives the ruler, the loop-back segment, and lets every
+   * track (which may have different keyframe counts/gaps) agree on a shared end/loop point. */
+  durationMs: number
+  /** The pose / "Expression" track — every project's only keyframe track before this feature,
+   * and still the required fallback/baseline every other keyframe track's fields merge onto
+   * (see sampleAnimationEye). Name/role unchanged so most existing call sites keep compiling. */
   keyframes: Keyframe[]
+  /** Independently-timed parametric tracks. Empty array = this track contributes nothing and
+   * the corresponding fields fully inherit the pose track's values for their whole duration —
+   * this is what makes old projects (all four arrays backfilled to []) play back identically. */
+  leftEyeKeyframes: Keyframe[]
+  rightEyeKeyframes: Keyframe[]
+  pupilKeyframes: Keyframe[]
+  eyelidKeyframes: Keyframe[]
+  /** Display order/name/visibility/lock for every lane shown on this animation's timeline —
+   * the 5 fixed keyframe tracks + 'marker', plus one entry per user-created sticker track. */
+  tracks: Track[]
   /** Stickers visible only while this animation is playing — see StickerInstance below. */
   stickers: StickerInstance[]
+  /** Studio-only annotations — see Marker above. */
+  markers: Marker[]
 }
 
 /** Which eye(s) the Controls/Colors panels currently write to. Editor/session state rather
@@ -391,6 +546,11 @@ export interface StickerInstance {
   /** Blocks drag/edit only — a locked sticker still renders/animates normally. */
   locked: boolean
   anim: StickerAnimSettings
+  /** Which Track (kind:'sticker') lane this instance visually groups under on the timeline.
+   * Studio-UI bookkeeping only — effectiveStickers(), the renderer, and the C++ export never
+   * read this; they merge/sort purely by layer+order exactly as before. A dangling reference
+   * (no matching Track) is non-fatal — the Timeline falls back to an "Ungrouped" lane. */
+  trackId: string
 }
 
 export const DEFAULT_STICKER_ANIM: StickerAnimSettings = {

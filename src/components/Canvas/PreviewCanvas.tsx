@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useStore, getActiveAnimation } from '@/state/store'
 import { renderFace } from '@/renderer/faceRenderer'
-import { sampleAnimation, animationDuration, wrapTime } from '@/engine/interpolate'
+import { sampleAnimationEye, sampleTrack, animationDuration, wrapTime } from '@/engine/interpolate'
 import { IdleEngine } from '@/engine/idleEngine'
 import {
   clampFps,
@@ -31,10 +31,13 @@ export function PreviewCanvas() {
   // exactly like the exported firmware: eyesPlayAnimation() reads absolute millis(), so
   // throttling how often it's called doesn't change how fast an animation plays).
   const pendingDtRef = useRef(0)
-  // Stickers run on their own continuous real-time clock (drift/spin/pulse/GIF playback),
-  // deliberately decoupled from the eye animation's own scrubbable `timeMs` — a sticker's
-  // whole point is ambient decoration with its own independent speed/fps/loop controls, not
-  // something that pauses/scrubs/reverses along with the eye keyframe timeline.
+  // Stickers run on their own continuous real-time clock (drift/spin/pulse/GIF playback) in
+  // Design and Idle mode, where there's no scrubbable timeline to speak of — ambient
+  // decoration with its own independent speed/fps/loop controls. In Animate mode, though, a
+  // sticker's clip (StickerAnimSettings.startTimeMs/endTimeMs) is now a first-class Timeline
+  // item with its own visible start/end, so it must scrub, pause, and reverse together with
+  // the animation's own playback time — see the `isAnimateScrub` branch below, which feeds the
+  // animation's own `t` into drawSticker.ts's visibility/motion math instead of this clock.
   const stickerElapsedRef = useRef(0)
   // Latest effective sticker list, refreshed every drawn frame — read (not recomputed) by the
   // pointer handlers below so canvas-drag hit-testing always matches what's actually on
@@ -90,6 +93,9 @@ export function PreviewCanvas() {
       let timeMs = state.playbackTimeMs
       let activeExpression: Expression | null = null
       let activeAnimation: Animation | null = null
+      // True only while actually viewing/playing the Animate-mode timeline — gates whether
+      // stickers scrub with `timeMs` (see stickerElapsedRef's comment) below.
+      let isAnimateScrub = false
 
       if (state.rightTab === 'visual-reference') {
         // While the right panel's Visual Reference tab is open, this canvas shows the VR's
@@ -116,6 +122,7 @@ export function PreviewCanvas() {
         timeMs = 0
         activeExpression = state.project.expressions.find((e) => e.id === state.selectedExpressionId) ?? null
       } else if (state.mode === 'animate') {
+        isAnimateScrub = true
         const anim = getActiveAnimation()
         activeAnimation = anim ?? null
         if (anim && anim.keyframes.length > 0) {
@@ -131,10 +138,12 @@ export function PreviewCanvas() {
               state.tickPlayback(t, true)
             }
           }
-          const sample = sampleAnimation(anim, t)
-          params = sample.params
-          rightParams = params
-          frameIndex = sample.segmentIndex
+          // Per-eye sampling merges the pose track with the pupils/eyelids/leftEye-or-
+          // rightEye tracks (see sampleAnimationEye) — the one wiring change that makes the
+          // new independently-timed tracks actually take effect during playback/scrubbing.
+          params = sampleAnimationEye(anim, t, 'left')
+          rightParams = sampleAnimationEye(anim, t, 'right')
+          frameIndex = sampleTrack(anim.keyframes, anim.loop, anim.durationMs, t)?.segmentIndex ?? 0
           timeMs = t
         }
       } else {
@@ -149,7 +158,11 @@ export function PreviewCanvas() {
         timeMs = 0
       }
 
-      stickerElapsedRef.current += dt
+      // Animate mode: stickers scrub/pause/reverse with the animation's own playback time,
+      // so a sticker clip's start/end (and drift/spin/pulse/GIF-frame motion) reflects
+      // exactly what the Timeline shows at the current playhead. Design/Idle mode: no
+      // scrubbable timeline exists, so stickers keep running on their own free-running clock.
+      const stickerElapsedMs = isAnimateScrub ? timeMs : (stickerElapsedRef.current += dt)
       const stickers = effectiveStickers(state.project, activeExpression, activeAnimation)
       lastStickersRef.current = stickers
       renderFace(ctx!, params, {
@@ -160,7 +173,7 @@ export function PreviewCanvas() {
         customShapes: state.project.customPupilShapes,
         stickers,
         stickerAssets: state.project.stickerAssets,
-        stickerElapsedMs: stickerElapsedRef.current
+        stickerElapsedMs
       })
 
       const fpsAccum = fpsAccumRef.current

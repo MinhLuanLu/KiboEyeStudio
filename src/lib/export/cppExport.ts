@@ -23,6 +23,7 @@ import {
 } from '@/types'
 import { hexToRgb565, mixColors, shadeColor } from '@/lib/color'
 import { PUPIL_SHAPE_POLYGONS } from '@/renderer/pupilShapes'
+import { sampleAnimationEye } from '@/engine/interpolate'
 
 const EASING_ENUM: Record<EasingType, string> = {
   linear: 'EYE_EASE_LINEAR',
@@ -119,12 +120,88 @@ function eyeFrameLiteral(
   return `  { ${fields.join(', ')} }`
 }
 
-// Emits the raw keyframe array plus its count/loop flag (for anyone who wants direct/
+interface BakedFrame {
+  durationMs: number
+  easing: EasingType
+  customBezier?: [number, number, number, number]
+  leftParams: EyeParams
+  rightParams: EyeParams
+}
+
+/** Every keyframe time across all 5 of an Animation's independently-timed tracks (pose/
+ * leftEye/rightEye/pupils/eyelids), sorted/deduped, clamped to [0, durationMs] — the "sample
+ * points" bakeAnimationFrames() below flattens the whole animation down to. Between any two
+ * adjacent breakpoints, every track is guaranteed to be mid-segment (never mid-transition
+ * between two of its own keyframes), since a breakpoint exists at every point any track's
+ * segment could change — this is what keeps the pre-baked EyeFrame array numerically faithful
+ * to the studio preview's merged sampling for however many tracks were actually authored. */
+export function collectAnimationBreakpoints(anim: Animation): number[] {
+  const set = new Set<number>([0, anim.durationMs])
+  for (const k of anim.keyframes) set.add(k.timeMs)
+  for (const k of anim.leftEyeKeyframes) set.add(k.timeMs)
+  for (const k of anim.rightEyeKeyframes) set.add(k.timeMs)
+  for (const k of anim.pupilKeyframes) set.add(k.timeMs)
+  for (const k of anim.eyelidKeyframes) set.add(k.timeMs)
+  return Array.from(set)
+    .filter((t) => t >= 0 && t <= anim.durationMs)
+    .sort((a, b) => a - b)
+}
+
+/** Flattens an Animation's independently-timed tracks into the single duration-based EyeFrame
+ * array the firmware's eyesPlayAnimation() plays back (Phase 1 export strategy — see the
+ * Animation Editor's timeline plan: the merge/sample math runs once here rather than needing a
+ * multi-track-aware firmware runtime). Each breakpoint samples sampleAnimationEye() for both
+ * eyes; the per-frame easing/bezier is taken from whichever pose-track segment is active at
+ * that breakpoint (the pose track is the required baseline every other track merges onto — see
+ * sampleAnimationEye) — a segment where only a leftEye/rightEye/pupils/eyelids track actually
+ * changes will still transition smoothly (the breakpoint spacing captures that motion), but if
+ * that track's own authored easing differs from the pose track's, the exported firmware
+ * interpolates that field using the pose segment's easing instead of its own; a documented
+ * Phase-1 simplification, not a silent data loss (every field's actual authored *values* are
+ * preserved exactly at every breakpoint). */
+// Which pose-track keyframe a baked frame at exactly `t` should borrow its easing/bezier from
+// — deliberately NOT sampleTrack()'s own segmentIndex, whose boundary convention (at t exactly
+// equal to a keyframe's timeMs) picks the segment *ending* there, which is right for sampling a
+// pose value (identical either way) but wrong here: a baked frame at a breakpoint needs the
+// segment *departing* from it (i.e. governing the transition forward to the next breakpoint).
+// Finds the last pose keyframe at-or-before `t`, matching every keyframe track's own "duration
+// is this keyframe's own outgoing transition" convention.
+function poseSegmentAt(anim: Animation, t: number): { easing: EasingType; customBezier?: [number, number, number, number] } {
+  const kfs = anim.keyframes
+  if (kfs.length === 0) return { easing: 'linear' }
+  let idx = 0
+  for (let i = 0; i < kfs.length; i++) {
+    if (kfs[i].timeMs <= t) idx = i
+    else break
+  }
+  return { easing: kfs[idx].easing, customBezier: kfs[idx].customBezier }
+}
+
+function bakeAnimationFrames(anim: Animation): BakedFrame[] {
+  const breakpoints = collectAnimationBreakpoints(anim)
+  return breakpoints.map((t, i) => {
+    const segment = poseSegmentAt(anim, t)
+    const isLast = i === breakpoints.length - 1
+    const durationMs = isLast ? (anim.loop ? Math.max(0, anim.durationMs - t) : 0) : breakpoints[i + 1] - t
+    return {
+      durationMs,
+      easing: segment.easing,
+      customBezier: segment.customBezier,
+      leftParams: sampleAnimationEye(anim, t, 'left'),
+      rightParams: sampleAnimationEye(anim, t, 'right')
+    }
+  })
+}
+
+// Emits the baked keyframe array(s) plus count/loop flag (for anyone who wants direct/
 // low-level access), this animation's own sticker array (visible only while it's playing —
 // see the Stickers comment above), AND a single `EyeAnimation` wrapper bundling all of it —
 // that wrapper is what PlayAnimation() below takes, so playing an animation is just
 // `PlayAnimation(Anim_X)` instead of threading several separate globals through
-// eyesPlayAnimation() by hand.
+// eyesPlayAnimation() by hand. A second `_framesRight` array (and non-null `EyeAnimation.
+// framesRight`) is only emitted when this animation actually authored leftEye/rightEye track
+// keyframes — the overwhelmingly common case (no divergence) still exports exactly one shared
+// array, identical output to before this feature existed.
 function exportAnimation(
   anim: Animation,
   customShapes: CustomPupilShape[],
@@ -132,18 +209,32 @@ function exportAnimation(
   rasterIndexByAssetId: Map<string, number>
 ): string {
   const ident = toIdentifier(anim.name)
-  const lines = anim.keyframes.map((k) => eyeFrameLiteral(k.params, k.duration, k.easing, customShapes, k.customBezier))
+  const baked = bakeAnimationFrames(anim)
+  const diverges = anim.leftEyeKeyframes.length > 0 || anim.rightEyeKeyframes.length > 0
   const stickers = anim.stickers.filter((s) => s.visible)
-  return [
+
+  const lines = [
     `// ${anim.name}${anim.loop ? ' (loops)' : ' (plays once)'}`,
     `const EyeFrame Anim_${ident}_frames[] PROGMEM = {`,
-    lines.join(',\n'),
-    `};`,
-    `const uint16_t Anim_${ident}_count = ${anim.keyframes.length};`,
+    baked.map((f) => eyeFrameLiteral(f.leftParams, f.durationMs, f.easing, customShapes, f.customBezier)).join(',\n'),
+    `};`
+  ]
+  let framesRightIdent = 'nullptr'
+  if (diverges) {
+    framesRightIdent = `Anim_${ident}_framesRight`
+    lines.push(
+      `const EyeFrame ${framesRightIdent}[] PROGMEM = {`,
+      baked.map((f) => eyeFrameLiteral(f.rightParams, f.durationMs, f.easing, customShapes, f.customBezier)).join(',\n'),
+      `};`
+    )
+  }
+  lines.push(
+    `const uint16_t Anim_${ident}_count = ${baked.length};`,
     `const bool Anim_${ident}_loop = ${anim.loop ? 'true' : 'false'};`,
     ...stickerArrayLiteral(stickers, `Anim_${ident}_Stickers`, assetsById, rasterIndexByAssetId),
-    `const EyeAnimation Anim_${ident} = { Anim_${ident}_frames, Anim_${ident}_count, Anim_${ident}_loop, Anim_${ident}_Stickers, Anim_${ident}_Stickers_Count };`
-  ].join('\n')
+    `const EyeAnimation Anim_${ident} = { Anim_${ident}_frames, Anim_${ident}_count, Anim_${ident}_loop, ${framesRightIdent}, Anim_${ident}_Stickers, Anim_${ident}_Stickers_Count };`
+  )
+  return lines.join('\n')
 }
 
 // Expressions carry independent left/right *shape* only when they actually differ (Eye
@@ -1691,9 +1782,65 @@ inline bool eyesPlayAnimation(const EyeFrame frames[], uint16_t count, bool loop
 // Same as above, bundled into one EyeAnimation argument instead of three loose ones — what
 // PlayAnimation()/UpdateEyes() below use internally. Call this instead if you want manual
 // control (your own timing/state variables) without the SetExpression()/PlayAnimation()
-// convenience layer.
+// convenience layer. Only ever advances/reads \`anim.frames\` — see eyesPlayAnimationPair()
+// below for an animation that authored Left Eye/Right Eye track divergence.
 inline bool eyesPlayAnimation(const EyeAnimation& anim, unsigned long& startMillis, uint16_t& frameIndex, LiveEye& outLive) {
   return eyesPlayAnimation(anim.frames, anim.count, anim.loop, startMillis, frameIndex, outLive);
+}
+
+// Two-eye counterpart of eyesPlayAnimation() above — plays \`framesLeft\`/\`framesRight\` in
+// lockstep (same shared elapsed-time/segment resolution, since both arrays always have the
+// same per-frame durationMs — see the EyeAnimation comment) and fills both outLeft/outRight.
+// \`framesRight == nullptr\` mirrors framesLeft into outRight, matching EyeAnimation.framesRight's
+// own null convention. Deliberately a separate function (not a refactor of the single-eye
+// eyesPlayAnimation() above) so that existing single-eye call sites/behavior stay byte-for-byte
+// unchanged — this is purely additive.
+inline bool eyesPlayAnimationPair(const EyeFrame framesLeft[], const EyeFrame framesRight[], uint16_t count, bool loop,
+                                    unsigned long& startMillis, uint16_t& frameIndex, LiveEye& outLeft, LiveEye& outRight) {
+  if (count == 0) return false;
+  const EyeFrame* right = framesRight ? framesRight : framesLeft;
+  if (count == 1) {
+    outLeft = eyesLerpFrame(framesLeft[0], framesLeft[0], 0);
+    outRight = eyesLerpFrame(right[0], right[0], 0);
+    frameIndex = 0;
+    return false;
+  }
+
+  unsigned long elapsed = millis() - startMillis;
+  uint16_t segments = loop ? count : (count - 1);
+  unsigned long acc = 0;
+
+  for (uint16_t i = 0; i < segments; i++) {
+    unsigned long dur = framesLeft[i].durationMs;
+    if (dur == 0) dur = 1;
+    uint16_t next = (i + 1) % count;
+    bool lastSegment = (i == segments - 1);
+
+    if (elapsed <= acc + dur || lastSegment) {
+      float t = (float)(elapsed - acc) / (float)dur;
+      if (t > 1) t = 1;
+      if (t < 0) t = 0;
+      bool finished = !loop && lastSegment && elapsed >= acc + dur;
+      float eased = eyesEase(t, framesLeft[i].easing, framesLeft[i].bezierX1, framesLeft[i].bezierY1, framesLeft[i].bezierX2, framesLeft[i].bezierY2);
+      outLeft = eyesLerpFrame(framesLeft[i], framesLeft[next], eased);
+      outRight = eyesLerpFrame(right[i], right[next], eased);
+      frameIndex = i;
+      return !finished;
+    }
+    acc += dur;
+  }
+
+  if (loop) {
+    startMillis += acc;
+    return eyesPlayAnimationPair(framesLeft, framesRight, count, loop, startMillis, frameIndex, outLeft, outRight);
+  }
+  outLeft = eyesLerpFrame(framesLeft[count - 1], framesLeft[count - 1], 0);
+  outRight = eyesLerpFrame(right[count - 1], right[count - 1], 0);
+  return false;
+}
+
+inline bool eyesPlayAnimationPair(const EyeAnimation& anim, unsigned long& startMillis, uint16_t& frameIndex, LiveEye& outLeft, LiveEye& outRight) {
+  return eyesPlayAnimationPair(anim.frames, anim.framesRight, anim.count, anim.loop, startMillis, frameIndex, outLeft, outRight);
 }
 
 // ---- Easy player: SetExpression() / PlayAnimation() / UpdateEyes() -------------------
@@ -1714,13 +1861,19 @@ struct EyesPlayerState {
   unsigned long animStart;
   uint16_t frameIndex;
   LiveEye live;
+  // Right eye's pose, only ever different from \`live\` while playing an animation whose
+  // EyeAnimation.framesRight is non-null (see UpdateEyes()/UpdateEyesRight()) — mirrors \`live\`
+  // for static expressions, matching the studio's own "expressions/idle never diverge per eye
+  // during Animate playback" behavior (only Design mode's live pose and animations with an
+  // authored Left Eye/Right Eye track ever do).
+  LiveEye liveRight;
   LiveEye blendFrom;
   unsigned long blendStart;
   bool blending;
   EyeColorSet colorsLeft;
   EyeColorSet colorsRight;
 };
-static EyesPlayerState eyesPlayer = { false, nullptr, { nullptr, 0, false, nullptr, 0 }, 0, 0, {}, {}, 0, false, EYE_COLORS_LEFT, EYE_COLORS_RIGHT };
+static EyesPlayerState eyesPlayer = { false, nullptr, { nullptr, 0, false, nullptr, nullptr, 0 }, 0, 0, {}, {}, {}, 0, false, EYE_COLORS_LEFT, EYE_COLORS_RIGHT };
 
 // Shows a static expression, crossfading smoothly from whatever's currently on screen —
 // call it with any Expr_* constant, e.g. SetExpression(Expr_Happy). Also switches this
@@ -1749,19 +1902,31 @@ inline void PlayAnimation(const EyeAnimation& animation) {
 
 // Advances whatever's currently playing and returns the pose to draw this frame. Call this
 // once per loop(), after at least one SetExpression()/PlayAnimation() call in setup() —
-// with neither ever called, there's nothing to show yet.
+// with neither ever called, there's nothing to show yet. See UpdateEyesRight() for the right
+// eye's pose (identical unless the currently-playing animation authored real left/right
+// divergence).
 inline LiveEye UpdateEyes() {
   if (eyesPlayer.blending) {
     float t = (float)(millis() - eyesPlayer.blendStart) / (float)EYES_BLEND_MS;
     if (t >= 1.0f) { t = 1.0f; eyesPlayer.blending = false; }
     LiveEye target = eyesLerpFrame(*eyesPlayer.expression->frame, *eyesPlayer.expression->frame, 0);
     eyesPlayer.live = eyesLerpLive(eyesPlayer.blendFrom, target, t);
+    eyesPlayer.liveRight = eyesPlayer.live;
   } else if (eyesPlayer.playingAnimation) {
-    eyesPlayAnimation(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live);
+    eyesPlayAnimationPair(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live, eyesPlayer.liveRight);
   } else if (eyesPlayer.expression) {
     eyesPlayer.live = eyesLerpFrame(*eyesPlayer.expression->frame, *eyesPlayer.expression->frame, 0);
+    eyesPlayer.liveRight = eyesPlayer.live;
   }
   return eyesPlayer.live;
+}
+
+// The right eye's counterpart to UpdateEyes()'s return value — call after UpdateEyes() (which
+// does the actual advancing) to also get the right eye's pose for eyesDrawEyePair()'s two-
+// LiveEye overload. Identical to UpdateEyes()'s return value unless the currently-playing
+// animation authored real Left Eye/Right Eye track divergence in the studio.
+inline LiveEye UpdateEyesRight() {
+  return eyesPlayer.liveRight;
 }
 
 // ---- Drawing — flat-color layered render: border -> sclera -> iris -> pupil -> highlight -> ----
@@ -1941,9 +2106,11 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   eyesFillEyelid(gfx, cx, cy, w, h, radius, false, e.lowerEyelid, e.lowerEyelidTilt, e.lowerEyelidCurvature, bgColor);
 }
 
-// Draws both eyes from one shared LiveEye pose (the common case: animations always play
-// back mirrored), plus every currently-active sticker (behind-layer first, then the eyes,
-// then front-layer) — Project.stickers (always active) merged with whichever
+// Draws both eyes — from independent left/right LiveEye poses (only actually different when
+// the currently-playing animation authored real Left Eye/Right Eye track divergence in the
+// studio; UpdateEyes()/UpdateEyesRight() give you both — see the single-LiveEye overload below
+// for the plain mirrored case) — plus every currently-active sticker (behind-layer first, then
+// the eyes, then front-layer) — Project.stickers (always active) merged with whichever
 // Expression/Animation is currently active via eyesPlayer (see SetExpression()/
 // PlayAnimation() above), matching the studio's effectiveStickers(). So this one call is
 // genuinely everything needed to draw a frame, matching the "Minimal usage" example at the
@@ -1955,9 +2122,9 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
 // identical colors, EYE_COLORS_RIGHT is just a reference to EYE_COLORS_LEFT (see above), so
 // this always works whether or not the eyes actually differ.
 template <typename T>
-inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& e, uint16_t bgColor,
+inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& left, const LiveEye& right, uint16_t bgColor,
                              const EyeColorSet& leftColors, const EyeColorSet& rightColors) {
-  int16_t half = (int16_t)(e.distance / 2);
+  int16_t half = (int16_t)(left.distance / 2);
   unsigned long stickersMs = millis();
   const StickerDef* activeStickers = nullptr;
   uint8_t activeStickerCount = 0;
@@ -1970,10 +2137,20 @@ inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const Li
   }
   eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs, screenCx, screenCy);
   eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs, screenCx, screenCy);
-  eyesDrawEye(gfx, screenCx - half, screenCy, e, false, bgColor, leftColors);
-  eyesDrawEye(gfx, screenCx + half, screenCy, e, true, bgColor, rightColors);
+  eyesDrawEye(gfx, screenCx - half, screenCy, left, false, bgColor, leftColors);
+  eyesDrawEye(gfx, screenCx + half, screenCy, right, true, bgColor, rightColors);
   eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
   eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
+}
+
+// Single-LiveEye convenience overload — draws both eyes mirrored from one shared pose (the
+// original contract, kept byte-for-byte compatible for every existing sketch/example calling
+// it this way). Prefer the two-LiveEye overload above (with UpdateEyes()/UpdateEyesRight())
+// when playing an animation that authored real Left Eye/Right Eye track divergence.
+template <typename T>
+inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& e, uint16_t bgColor,
+                             const EyeColorSet& leftColors, const EyeColorSet& rightColors) {
+  eyesDrawEyePair(gfx, screenCx, screenCy, e, e, bgColor, leftColors, rightColors);
 }
 
 // ---- Optional: flicker-free buffered display for Adafruit_GC9A01A. Only defined if ----
@@ -2420,10 +2597,17 @@ ${stickersExport.code}
 // stickers/stickerCount are this animation's own Stickers-tab stickers (visible only while
 // it's playing — see the Stickers comment above); an animation with none still gets a valid
 // (empty, count 0) array here, never a null pointer.
+// framesRight is only non-null for an animation that actually authored Left Eye/Right Eye
+// track keyframes in the studio (Timeline eye-target divergence) — nullptr means "mirrors
+// frames", the same convention EYE_COLORS_LEFT/RIGHT's "shared reference when identical" idiom
+// uses. frames/framesRight always have the same \`count\` and matching per-frame durationMs
+// (they're baked from the same breakpoints — see the studio's bakeAnimationFrames()), so a
+// single frameIndex/elapsed-time computation drives both arrays in lockstep.
 struct EyeAnimation {
   const EyeFrame* frames;
   uint16_t count;
   bool loop;
+  const EyeFrame* framesRight;
   const StickerDef* stickers;
   uint8_t stickerCount;
 };

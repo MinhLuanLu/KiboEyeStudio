@@ -48,6 +48,11 @@ export default function App() {
   const copyKeyframe = useStore((s) => s.copyKeyframe)
   const pasteKeyframeAt = useStore((s) => s.pasteKeyframeAt)
   const checkpoint = useStore((s) => s.checkpoint)
+  const duplicateSelection = useStore((s) => s.duplicateSelection)
+  const deleteSelection = useStore((s) => s.deleteSelection)
+  const copySelection = useStore((s) => s.copySelection)
+  const pasteSelectionAt = useStore((s) => s.pasteSelectionAt)
+  const moveSelectionByDelta = useStore((s) => s.moveSelectionByDelta)
 
   const loadedAutosave = useRef(false)
   const saveStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -211,7 +216,16 @@ export default function App() {
     else play()
   }
 
+  // Every one of these prefers the Timeline's general multi-selection actions when there's an
+  // active timelineSelection (keyframes on any track, sticker clips, markers — possibly a
+  // mixed multi-selection), falling back to the legacy single-pose-keyframe actions otherwise
+  // so this still works from anywhere `selectedKeyframeId` alone is meaningful (e.g. a stray
+  // ControlsPanel-only selection with no Timeline selection recorded).
   const duplicateSelectedKeyframe = () => {
+    if (useStore.getState().timelineSelection.length > 0) {
+      duplicateSelection()
+      return
+    }
     if (selectedKeyframeId) {
       checkpoint()
       duplicateKeyframe(selectedKeyframeId)
@@ -219,6 +233,10 @@ export default function App() {
   }
 
   const deleteSelectedKeyframe = () => {
+    if (useStore.getState().timelineSelection.length > 0) {
+      deleteSelection()
+      return
+    }
     if (selectedKeyframeId) {
       checkpoint()
       deleteKeyframe(selectedKeyframeId)
@@ -226,13 +244,52 @@ export default function App() {
   }
 
   const copySelectedKeyframe = () => {
+    if (useStore.getState().timelineSelection.length > 0) {
+      copySelection()
+      return
+    }
     if (selectedKeyframeId) copyKeyframe(selectedKeyframeId)
   }
 
+  const cutSelection = () => {
+    if (useStore.getState().timelineSelection.length === 0) return
+    copySelection()
+    deleteSelection()
+  }
+
   const pasteKeyframeAtPlayhead = () => {
-    if (!useStore.getState().keyframeClipboard) return
+    const state = useStore.getState()
+    if (state.timelineClipboard.length > 0) {
+      pasteSelectionAt(state.playbackTimeMs)
+      return
+    }
+    if (!state.keyframeClipboard) return
     checkpoint()
-    pasteKeyframeAt(useStore.getState().playbackTimeMs)
+    pasteKeyframeAt(state.playbackTimeMs)
+  }
+
+  // Arrow keys nudge the Timeline's current selection by one frame (Shift = 10 frames) when
+  // there is one; otherwise they fall back to the pre-existing prev/next-frame playback step.
+  const moveSelectionLeft = (bigStep: boolean) => {
+    const state = useStore.getState()
+    if (state.timelineSelection.length === 0) {
+      prevFrame()
+      return
+    }
+    const frameMs = 1000 / state.project.display.fps
+    checkpoint()
+    moveSelectionByDelta(-(bigStep ? frameMs * 10 : frameMs))
+  }
+
+  const moveSelectionRight = (bigStep: boolean) => {
+    const state = useStore.getState()
+    if (state.timelineSelection.length === 0) {
+      nextFrame()
+      return
+    }
+    const frameMs = 1000 / state.project.display.fps
+    checkpoint()
+    moveSelectionByDelta(bigStep ? frameMs * 10 : frameMs)
   }
 
   const actions = {
@@ -254,6 +311,9 @@ export default function App() {
     deleteKeyframe: deleteSelectedKeyframe,
     copyKeyframe: copySelectedKeyframe,
     pasteKeyframe: pasteKeyframeAtPlayhead,
+    cutSelection,
+    moveSelectionLeft,
+    moveSelectionRight,
     toggleDevMode,
     openGuide: () => setGuideOpen(true)
   }

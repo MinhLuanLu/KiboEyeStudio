@@ -17,6 +17,13 @@ export interface ShortcutActions {
   deleteKeyframe: () => void
   copyKeyframe: () => void
   pasteKeyframe: () => void
+  /** Ctrl/Cmd+X — copies then deletes the current Timeline multi-selection; a no-op when
+   * nothing is selected there (there's no "cut" concept for the legacy single-keyframe path). */
+  cutSelection: () => void
+  /** Arrow-key handling: nudges the Timeline's current selection by one frame (bigStep = Shift,
+   * 10 frames) when there is one, otherwise falls back to prev/next-frame playback stepping. */
+  moveSelectionLeft: (bigStep: boolean) => void
+  moveSelectionRight: (bigStep: boolean) => void
   toggleDevMode: () => void
   openGuide: () => void
 }
@@ -95,6 +102,11 @@ export function useKeyboardShortcuts(actions: ShortcutActions): void {
         actions.pasteKeyframe()
         return
       }
+      if (mod && e.key.toLowerCase() === 'x' && !isEditableTarget(e.target)) {
+        e.preventDefault()
+        actions.cutSelection()
+        return
+      }
       if (mod && e.key === '.') {
         e.preventDefault()
         actions.toggleDevMode()
@@ -108,11 +120,11 @@ export function useKeyboardShortcuts(actions: ShortcutActions): void {
         return
       }
       if (e.key === 'ArrowRight' && !isEditableTarget(e.target)) {
-        actions.nextFrame()
+        actions.moveSelectionRight(e.shiftKey)
         return
       }
       if (e.key === 'ArrowLeft' && !isEditableTarget(e.target)) {
-        actions.prevFrame()
+        actions.moveSelectionLeft(e.shiftKey)
         return
       }
     }

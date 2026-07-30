@@ -12,14 +12,17 @@ import type {
   EyeSide,
   GlobalTiming,
   Keyframe,
+  Marker,
   Personality,
   PlaybackMode,
   PlaybackState,
   Project,
+  SelectionItem,
   StickerAsset,
   StickerInstance,
   StickerLayer,
   StickerScope,
+  TrackKind,
   UiCssRule,
   UiDisplaySettings,
   UiWidget,
@@ -40,11 +43,13 @@ import {
   applyStyleToColors,
   applyStyleToParams,
   computeStyleOverrides,
+  createDefaultTracks,
+  createTrack,
   defaultVisualReference
 } from '@/types'
 import { builtinAnimations } from '@/data/builtinAnimations'
 import { builtinExpressions } from '@/data/builtinExpressions'
-import { MIN_SEGMENT_MS, animationDuration, keyframeStartTimes } from '@/engine/interpolate'
+import { MIN_SEGMENT_MS, animationDuration, sampleAnimationEye, sampleTrack } from '@/engine/interpolate'
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
 import { STICKER_PRESET_BUNDLES } from '@/data/stickerPresets'
 import { createDefaultUiDesign, createWidget } from '@/lib/uiDesign/widgetDefaults'
@@ -67,7 +72,10 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
       ...k,
       id: nanoid(10),
       styleOverrides: computeStyleOverrides(k.params, null, visualReference)
-    }))
+    })),
+    // Builtin animations never author left/right/pupil/eyelid tracks or stickers, so these
+    // just need fresh ids, not any styleOverrides recomputation.
+    tracks: a.tracks.map((t) => ({ ...t, id: nanoid(10) }))
   }))
   const expressions: Expression[] = builtinExpressions.map((e) => ({
     ...e,
@@ -123,6 +131,23 @@ export interface ApplyVisualReferenceOptions {
   overrideMode: 'preserve' | 'replace'
 }
 
+/** The 5 independently-timed keyframe tracks an Animation can hold — 'pose' is the original/
+ * only track before this feature (still the required baseline every other track's fields
+ * merge onto, see sampleAnimationEye in engine/interpolate.ts). Distinct from the broader
+ * `TrackKind` (which also covers 'sticker'/'marker' — kinds with no `Keyframe[]` to resolve). */
+export type KeyframeTrackKind = 'pose' | 'leftEye' | 'rightEye' | 'pupils' | 'eyelids'
+
+/** One clipboard entry for the Timeline's Copy/Cut/Paste/Duplicate. Keeps enough context to
+ * reinsert correctly: which keyframe track a keyframe came from (so paste can put it back on
+ * an equivalent track, including in a different animation), or nothing extra for stickers/
+ * markers (a sticker already carries its own `layer`/`trackId`; pasting into a different
+ * animation just leaves `trackId` unresolved — see normalizeTracks()'s dangling-trackId
+ * handling in persistence.ts, same fallback). */
+export type TimelineClipboardEntry =
+  | { kind: 'keyframe'; trackKind: KeyframeTrackKind; data: Keyframe }
+  | { kind: 'sticker'; data: StickerInstance }
+  | { kind: 'marker'; data: Marker }
+
 interface StoreState {
   project: Project
   filePath: string | null
@@ -138,8 +163,29 @@ interface StoreState {
   /** Session-only clipboard for Copy/Paste Keyframe — a plain deep copy, not tied to the
    * animation it was copied from, so pasting into a different animation just works. Not part
    * of `project` (so it's outside undo/redo and never persisted), matching how
-   * `selectedKeyframeId` etc. are already handled. */
+   * `selectedKeyframeId` etc. are already handled. Kept alongside the newer, more general
+   * `timelineClipboard` below rather than replaced by it — this one only ever holds a single
+   * pose-track keyframe, for the legacy single-keyframe shortcut fallback (see
+   * lib/shortcuts.ts) used when the Timeline has no multi-selection active. */
   keyframeClipboard: Keyframe | null
+
+  /** Every currently-selected timeline item — keyframes (on any of the 5 keyframe tracks),
+   * sticker clips, or markers — uniformly, so drag/copy/paste/duplicate/delete can operate on
+   * a mixed multi-selection without needing a parallel selection model per kind. Session-only:
+   * outside `project`, never persisted, cleared on animation switch. Exactly one selected item
+   * is mirrored into `selectedKeyframeId`/`selectedStickerId` (see syncPrimarySelection) so
+   * existing single-target panels (ControlsPanel, StickerControls) keep working unmodified. */
+  timelineSelection: SelectionItem[]
+  /** Session-only clipboard for the Timeline's Copy/Cut/Paste/Duplicate — holds deep copies of
+   * whatever was selected (keyframes across tracks, sticker clips, markers) plus enough
+   * context (which keyframe track each one came from) to paste back correctly, including into
+   * a different animation. Never persisted; excluded from undo/redo, matching
+   * `keyframeClipboard`. */
+  timelineClipboard: TimelineClipboardEntry[]
+  /** Persistent (until toggled) snap-to setting for timeline drags — playhead/clip-edges/
+   * frame-boundaries. Holding Alt during a drag disables snapping for that gesture only,
+   * without touching this. Session-only, like the rest of this block. */
+  snappingEnabled: boolean
 
   /** Which eye(s) setEyeParam/setEyeParams/setColor currently write to. Switching this
    * alone never mutates the project — only a subsequent edit does. */
@@ -224,29 +270,20 @@ interface StoreState {
   setAnimationLoop: (id: string, loop: boolean) => void
   importAnimation: (animation: Animation) => void
 
-  // keyframes
+  // keyframes (pose track only — legacy single-keyframe API kept for ControlsPanel and the
+  // shortcut fallback path; see the "timeline (multi-track)" section below for the general,
+  // track-aware, multi-selection-capable actions the new Timeline UI drives)
   selectKeyframe: (id: string | null) => void
   addKeyframe: (afterKeyframeId?: string) => void
   updateKeyframeParams: (keyframeId: string, partial: Partial<EyeParams>) => void
-  updateKeyframeDuration: (keyframeId: string, duration: number) => void
-  /** Repositions a keyframe to land at an absolute time (ms) from the animation's start, by
-   * adjusting the *previous* keyframe's outgoing duration — the same mechanism dragging a
-   * keyframe on the timeline already uses (duration is "time to the next keyframe", so a
-   * keyframe's own absolute start time is entirely a function of every earlier keyframe's
-   * duration; there's no separate "absolute time" field to write). No-op for the first
-   * keyframe, which is always pinned at t=0. */
-  setKeyframeAbsoluteTime: (keyframeId: string, absoluteMs: number) => void
   updateKeyframeEasing: (keyframeId: string, easing: EasingType, customBezier?: [number, number, number, number]) => void
   duplicateKeyframe: (keyframeId: string) => void
   deleteKeyframe: (keyframeId: string) => void
-  reorderKeyframe: (keyframeId: string, newIndex: number) => void
   /** Deep-copies a keyframe into keyframeClipboard (session-only, see its own comment). */
   copyKeyframe: (keyframeId: string) => void
-  /** Inserts keyframeClipboard's contents as a new keyframe in the *active* animation at
-   * absoluteMs, splitting whichever segment it lands in (the surrounding keyframes' own
-   * positions are preserved — only the segment it's inserted into is divided) rather than
-   * shifting everything after it, matching "paste without disturbing the rest of the timeline"
-   * — a no-op if the clipboard is empty. */
+  /** Inserts keyframeClipboard's contents as a new keyframe in the *active* animation's pose
+   * track at absoluteMs (clamped against its new neighbors' MIN_SEGMENT_MS gap) — a no-op if
+   * the clipboard is empty. */
   pasteKeyframeAt: (absoluteMs: number) => void
   /** Copies fields from an existing Expression into a keyframe's pose. 'styleOnly' (the
    * default — see the Timeline UI) copies just the shared-appearance fields
@@ -258,6 +295,86 @@ interface StoreState {
    * (see the Timeline "Apply Expression" control's own comment for why a live-linked
    * reference isn't implemented in this pass). */
   applyExpressionToKeyframe: (keyframeId: string, expressionId: string, mode: 'replace' | 'styleOnly') => void
+
+  // timeline (multi-track, CapCut-style editing) — operates on whichever of the 5 keyframe
+  // tracks / sticker clips / markers the caller names, across the active animation, and (for
+  // moves/copy/paste/duplicate/delete) on the whole current multi-selection at once.
+  setTimelineSelection: (items: SelectionItem[]) => void
+  toggleTimelineSelection: (item: SelectionItem, additive: boolean) => void
+  clearTimelineSelection: () => void
+  setSnappingEnabled: (enabled: boolean) => void
+
+  /** Continuous-drag primitive (like the old updateKeyframeDuration) — callers checkpoint()
+   * once at drag-start, then call this on every pointermove. Clamps against MIN_SEGMENT_MS
+   * neighbor gaps; the pose track's first keyframe stays pinned at t=0. Dragging the pose
+   * track's last keyframe past the animation's current durationMs extends it. */
+  setKeyframeTime: (trackKind: KeyframeTrackKind, keyframeId: string, timeMs: number) => void
+  /** Same values-only editing updateKeyframeParams/updateKeyframeEasing do, generalized to any
+   * of the 5 keyframe tracks — for the Timeline's Keyframe Inspector. */
+  updateTrackKeyframeParams: (trackKind: KeyframeTrackKind, keyframeId: string, partial: Partial<EyeParams>) => void
+  updateTrackKeyframeEasing: (trackKind: KeyframeTrackKind, keyframeId: string, easing: EasingType, customBezier?: [number, number, number, number]) => void
+  /** Continuous-drag primitive for a sticker clip's start/end handle. */
+  resizeStickerClip: (stickerId: string, edge: 'start' | 'end', newMs: number) => void
+  /** Splits a keyframe-track segment (inserting a new keyframe with the interpolated pose at
+   * `atMs`) or a sticker clip (dividing it into two adjacent instances, preserving every other
+   * setting on both sides) — a no-op if `atMs` isn't at least MIN_SEGMENT_MS from both
+   * neighbors/edges. Self-checkpointing (one-shot, not a drag). */
+  splitClipAt: (item: SelectionItem, atMs: number) => void
+  /** Continuous-drag primitive: shifts every selected keyframe/sticker/marker by the same
+   * `deltaMs`, preserving their relative spacing, clamped so the earliest selected item never
+   * goes below t=0. The pose track's first keyframe (if selected) never moves. */
+  moveSelectionByDelta: (deltaMs: number) => void
+  /** Inserts a new keyframe on `trackKind` at `timeMs` (clamped away from neighbors by
+   * MIN_SEGMENT_MS), templated from whatever's currently showing at that time (so it starts
+   * matching the live pose rather than resetting to defaults) — the toolbar's "+ Keyframe"
+   * button and double-clicking an empty spot on a keyframe track both call this. Self-
+   * checkpointing. Selects the new keyframe. */
+  addKeyframeAt: (trackKind: KeyframeTrackKind, timeMs: number) => void
+
+  /** Adds one more track. For the 5 singleton fixed kinds (pose/leftEye/rightEye/pupils/
+   * eyelids/marker) this is idempotent — if one already exists, it's selected/returned as-is
+   * rather than creating a duplicate; 'sticker' always creates a new one (any number allowed).
+   * Self-checkpointing. Returns the track's id. */
+  addTrack: (kind: TrackKind, name?: string, layer?: StickerLayer) => string
+  /** Removes any non-pose track. The track's own content goes with it: a removed sticker
+   * track's stickers fall back to "Ungrouped" (trackId cleared, not deleted — matches the
+   * timing validator's non-fatal dangling-trackId warning); a removed keyframe/marker track's
+   * keyframes/markers are cleared, since there's nowhere left to show them. Self-checkpointing. */
+  removeTrack: (trackId: string) => void
+  renameTrack: (trackId: string, name: string) => void
+  reorderTrack: (trackId: string, newOrder: number) => void
+  setTrackVisible: (trackId: string, visible: boolean) => void
+  setTrackLocked: (trackId: string, locked: boolean) => void
+  assignStickerToTrack: (stickerId: string, trackId: string) => void
+  /** Phase-1 on-ramp for eye-target conversion: seeds an empty leftEye/rightEye/pupils/eyelids
+   * track from the pose track's own keyframe times/values, so the user has somewhere to start
+   * diverging from from (a no-op if the target track already has keyframes). */
+  detachTrackFromPose: (animId: string, trackKind: Exclude<KeyframeTrackKind, 'pose'>) => void
+  /** Creates a new sticker clip directly on `trackId` at `atMs` (the playhead, or a drag-drop
+   * position) — the Timeline's own "add a sticker" entry point, independent of the Sticker
+   * Manager panel's scope-based add. `trackId` must be an existing 'sticker' track (a no-op
+   * otherwise). Selects the new clip. Self-checkpointing. Returns the new sticker's id, or null
+   * if the track doesn't exist. */
+  addStickerToTrack: (trackId: string, assetId: string, atMs: number) => string | null
+  /** Adds a studio-only marker at `atMs` on the active animation's Markers track and selects
+   * it. Self-checkpointing. */
+  addMarker: (atMs: number, label?: string) => string
+  updateMarker: (markerId: string, partial: Partial<Pick<Marker, 'label' | 'color'>>) => void
+
+  /** Deep-copies the current timelineSelection into timelineClipboard. */
+  copySelection: () => void
+  /** Pastes timelineClipboard at `atMs`: the earliest copied item lands exactly at atMs, every
+   * other copied item preserves its original offset from that one. Appends rather than
+   * replacing/merging with anything already at that time/track (paste-conflict resolution
+   * dialogs are Phase 2). Self-checkpointing. */
+  pasteSelectionAt: (atMs: number) => void
+  /** Duplicates the current selection in place, immediately after the latest end-time in the
+   * group (preserving relative spacing), and selects the new copies. Self-checkpointing. */
+  duplicateSelection: () => void
+  /** Deletes every currently-selected keyframe/sticker/marker. Never empties the pose track
+   * entirely (matches the old deleteKeyframe's guard) — other tracks can go to empty (which
+   * just means "fully inherit the pose track" again). Self-checkpointing. */
+  deleteSelection: () => void
 
   // expressions
   addExpression: (name: string) => void
@@ -424,6 +541,122 @@ function findStickerOwner(project: Project, id: string): { list: StickerInstance
   return null
 }
 
+/** Resolves which of an Animation's 5 keyframe arrays a given track kind reads from — the one
+ * place that mapping is spelled out, so every timeline action agrees on it. Returns the live
+ * draft array reference (push/splice/sort on it mutates the project); for *reassigning* the
+ * whole array (e.g. filtering it down), use setKeyframeListFor instead, since writing through
+ * a returned reference can't replace which array a field points to. */
+function keyframeListFor(a: Animation, trackKind: KeyframeTrackKind): Keyframe[] {
+  switch (trackKind) {
+    case 'pose':
+      return a.keyframes
+    case 'leftEye':
+      return a.leftEyeKeyframes
+    case 'rightEye':
+      return a.rightEyeKeyframes
+    case 'pupils':
+      return a.pupilKeyframes
+    case 'eyelids':
+      return a.eyelidKeyframes
+  }
+}
+
+function setKeyframeListFor(a: Animation, trackKind: KeyframeTrackKind, list: Keyframe[]): void {
+  if (trackKind === 'pose') a.keyframes = list
+  else if (trackKind === 'leftEye') a.leftEyeKeyframes = list
+  else if (trackKind === 'rightEye') a.rightEyeKeyframes = list
+  else if (trackKind === 'pupils') a.pupilKeyframes = list
+  else a.eyelidKeyframes = list
+}
+
+/** Pushes a checkpoint onto the undo stack from inside an in-progress Immer producer — the
+ * same body `checkpoint()` (the standalone action) runs, just callable as a plain function so
+ * the ~15 new one-shot timeline actions can self-checkpoint (push once, then mutate, all in
+ * the same `set()` call) instead of requiring the UI to remember a separate checkpoint() call
+ * before each one, the single biggest error class with the old manual-everywhere pattern.
+ * Continuous-drag actions (setKeyframeTime, moveSelectionByDelta, resizeStickerClip) deliberately
+ * do NOT use this — those still rely on the UI calling checkpoint() once at drag-start, exactly
+ * like the pre-existing updateKeyframeDuration did, so a whole drag stays one undo entry. */
+function checkpointDraft(s: StoreState): void {
+  s.past.push(JSON.parse(JSON.stringify(s.project)))
+  if (s.past.length > HISTORY_LIMIT) s.past.shift()
+  s.future = []
+}
+
+/** Mirrors a single-item timelineSelection into the legacy single-id selectedKeyframeId/
+ * selectedStickerId fields (both cleared for an empty or multi-item selection) so existing
+ * single-target panels (ControlsPanel, StickerControls, EasingPicker) keep working unmodified
+ * against whichever one timeline item is selected, without needing to know multi-select exists. */
+function syncPrimarySelection(s: StoreState): void {
+  if (s.timelineSelection.length === 1) {
+    const item = s.timelineSelection[0]
+    s.selectedKeyframeId = item.kind === 'keyframe' ? item.id : null
+    s.selectedStickerId = item.kind === 'sticker' ? item.id : null
+  } else {
+    s.selectedKeyframeId = null
+    s.selectedStickerId = null
+  }
+}
+
+/** Deep-copies whatever `selection` currently points to into clipboard-entry shape — shared by
+ * copySelection (session clipboard) and duplicateSelection (which builds entries from the
+ * live selection directly, without touching whatever's already in the clipboard). */
+function collectClipboardEntries(project: Project, a: Animation, selection: SelectionItem[]): TimelineClipboardEntry[] {
+  const entries: TimelineClipboardEntry[] = []
+  for (const item of selection) {
+    if (item.kind === 'keyframe') {
+      const list = keyframeListFor(a, item.trackId as KeyframeTrackKind)
+      const kf = list.find((k) => k.id === item.id)
+      if (kf) entries.push({ kind: 'keyframe', trackKind: item.trackId as KeyframeTrackKind, data: JSON.parse(JSON.stringify(kf)) })
+    } else if (item.kind === 'sticker') {
+      const owner = findStickerOwner(project, item.id)
+      if (owner) entries.push({ kind: 'sticker', data: JSON.parse(JSON.stringify(owner.list[owner.index])) })
+    } else {
+      const m = a.markers.find((mk) => mk.id === item.id)
+      if (m) entries.push({ kind: 'marker', data: JSON.parse(JSON.stringify(m)) })
+    }
+  }
+  return entries
+}
+
+/** Inserts a set of clipboard entries into the active animation, anchored so the *earliest*
+ * entry lands exactly at `atMs` and every other entry keeps its original offset from that one
+ * — shared by pasteSelectionAt (entries = timelineClipboard) and duplicateSelection (entries =
+ * a fresh copy of the current selection, anchored just after the group's own end instead of
+ * the playhead). Returns the newly-inserted items as a ready-to-select SelectionItem[]. */
+function insertTimelineEntriesAt(a: Animation, entries: TimelineClipboardEntry[], atMs: number): SelectionItem[] {
+  if (entries.length === 0) return []
+  const timeOf = (e: TimelineClipboardEntry) => (e.kind === 'sticker' ? e.data.anim.startTimeMs : e.data.timeMs)
+  const anchor = Math.min(...entries.map(timeOf))
+  const delta = Math.max(0, Math.round(atMs)) - anchor
+  const newSelection: SelectionItem[] = []
+  for (const entry of entries) {
+    if (entry.kind === 'keyframe') {
+      const list = keyframeListFor(a, entry.trackKind)
+      const copy: Keyframe = { ...entry.data, id: nanoid(10) }
+      copy.timeMs = Math.max(0, copy.timeMs + delta)
+      list.push(copy)
+      list.sort((x, y) => x.timeMs - y.timeMs)
+      if (entry.trackKind === 'pose') a.durationMs = Math.max(a.durationMs, copy.timeMs)
+      newSelection.push({ kind: 'keyframe', trackId: entry.trackKind, id: copy.id })
+    } else if (entry.kind === 'sticker') {
+      const copy: StickerInstance = { ...entry.data, id: nanoid(8) }
+      const span = copy.anim.endTimeMs != null ? copy.anim.endTimeMs - copy.anim.startTimeMs : null
+      copy.anim.startTimeMs = Math.max(0, copy.anim.startTimeMs + delta)
+      copy.anim.endTimeMs = span != null ? copy.anim.startTimeMs + span : null
+      a.stickers.push(copy)
+      newSelection.push({ kind: 'sticker', trackId: copy.trackId, id: copy.id })
+    } else {
+      const copy: Marker = { ...entry.data, id: nanoid(8) }
+      copy.timeMs = Math.max(0, copy.timeMs + delta)
+      a.markers.push(copy)
+      a.markers.sort((x, y) => x.timeMs - y.timeMs)
+      newSelection.push({ kind: 'marker', trackId: 'marker', id: copy.id })
+    }
+  }
+  return newSelection
+}
+
 export const useStore = create<StoreState>()(
   immer((set) => ({
     project: createDefaultProject(),
@@ -436,6 +669,9 @@ export const useStore = create<StoreState>()(
     selectedKeyframeId: null,
     selectedExpressionId: null,
     keyframeClipboard: null,
+    timelineSelection: [],
+    timelineClipboard: [],
+    snappingEnabled: true,
     eyeTarget: 'both',
 
     stickerScope: 'project',
@@ -495,6 +731,7 @@ export const useStore = create<StoreState>()(
         s.activeAnimationId = s.project.animations[0]?.id ?? ''
         s.selectedKeyframeId = null
         s.selectedExpressionId = null
+        s.timelineSelection = []
         s.eyeTarget = 'both'
         s.mode = 'design'
         s.playbackState = 'stopped'
@@ -512,6 +749,7 @@ export const useStore = create<StoreState>()(
         s.activeAnimationId = editorState.activeAnimationId || (project.animations[0]?.id ?? '')
         s.selectedKeyframeId = null
         s.selectedExpressionId = editorState.selectedExpressionId
+        s.timelineSelection = []
         s.eyeTarget = editorState.eyeTarget
         s.mode = editorState.mode
         s.playbackState = 'stopped'
@@ -839,6 +1077,7 @@ export const useStore = create<StoreState>()(
       set((s) => {
         s.activeAnimationId = id
         s.selectedKeyframeId = null
+        s.timelineSelection = []
         s.playbackState = 'stopped'
         s.playbackTimeMs = 0
       }),
@@ -851,11 +1090,18 @@ export const useStore = create<StoreState>()(
           id,
           name,
           loop: false,
+          durationMs: 500,
           keyframes: [
-            { id: nanoid(10), duration: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, styleOverrides: overrides },
-            { id: nanoid(10), duration: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, styleOverrides: overrides }
+            { id: nanoid(10), timeMs: 0, easing: 'easeInOut', params: { ...s.project.eyeBase }, styleOverrides: overrides },
+            { id: nanoid(10), timeMs: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, styleOverrides: overrides }
           ],
-          stickers: []
+          leftEyeKeyframes: [],
+          rightEyeKeyframes: [],
+          pupilKeyframes: [],
+          eyelidKeyframes: [],
+          tracks: createDefaultTracks(() => nanoid(10)),
+          stickers: [],
+          markers: []
         })
         s.dirty = true
       })
@@ -870,7 +1116,21 @@ export const useStore = create<StoreState>()(
         const copy: Animation = JSON.parse(JSON.stringify(src))
         copy.id = newId
         copy.name = `${src.name} Copy`
+        // Every id inside this animation must be regenerated so it doesn't collide with the
+        // original — including track ids, since StickerInstance.trackId references them.
+        const trackIdMap = new Map<string, string>()
+        copy.tracks = copy.tracks.map((t) => {
+          const newTrackId = nanoid(10)
+          trackIdMap.set(t.id, newTrackId)
+          return { ...t, id: newTrackId }
+        })
         copy.keyframes = copy.keyframes.map((k) => ({ ...k, id: nanoid(10) }))
+        copy.leftEyeKeyframes = copy.leftEyeKeyframes.map((k) => ({ ...k, id: nanoid(10) }))
+        copy.rightEyeKeyframes = copy.rightEyeKeyframes.map((k) => ({ ...k, id: nanoid(10) }))
+        copy.pupilKeyframes = copy.pupilKeyframes.map((k) => ({ ...k, id: nanoid(10) }))
+        copy.eyelidKeyframes = copy.eyelidKeyframes.map((k) => ({ ...k, id: nanoid(10) }))
+        copy.markers = copy.markers.map((m) => ({ ...m, id: nanoid(10) }))
+        copy.stickers = copy.stickers.map((st) => ({ ...st, id: nanoid(8), trackId: trackIdMap.get(st.trackId) ?? '' }))
         s.project.animations.push(copy)
         s.dirty = true
       })
@@ -890,6 +1150,7 @@ export const useStore = create<StoreState>()(
         if (s.activeAnimationId === id) {
           s.activeAnimationId = s.project.animations[0]?.id ?? ''
           s.selectedKeyframeId = null
+          s.timelineSelection = []
         }
         s.dirty = true
       }),
@@ -903,7 +1164,13 @@ export const useStore = create<StoreState>()(
 
     importAnimation: (animation) =>
       set((s) => {
-        const copy = {
+        const trackIdMap = new Map<string, string>()
+        const tracks = animation.tracks.map((t) => {
+          const newTrackId = nanoid(10)
+          trackIdMap.set(t.id, newTrackId)
+          return { ...t, id: newTrackId }
+        })
+        const copy: Animation = {
           ...animation,
           id: nanoid(10),
           // Older/external animation JSON predates styleOverrides — fall back to computing
@@ -912,7 +1179,14 @@ export const useStore = create<StoreState>()(
             ...k,
             id: nanoid(10),
             styleOverrides: k.styleOverrides ?? computeStyleOverrides(k.params, null, s.project.visualReference)
-          }))
+          })),
+          leftEyeKeyframes: animation.leftEyeKeyframes.map((k) => ({ ...k, id: nanoid(10) })),
+          rightEyeKeyframes: animation.rightEyeKeyframes.map((k) => ({ ...k, id: nanoid(10) })),
+          pupilKeyframes: animation.pupilKeyframes.map((k) => ({ ...k, id: nanoid(10) })),
+          eyelidKeyframes: animation.eyelidKeyframes.map((k) => ({ ...k, id: nanoid(10) })),
+          tracks,
+          markers: animation.markers.map((m) => ({ ...m, id: nanoid(10) })),
+          stickers: animation.stickers.map((st) => ({ ...st, id: nanoid(8), trackId: trackIdMap.get(st.trackId) ?? '' }))
         }
         s.project.animations.push(copy)
         s.activeAnimationId = copy.id
@@ -925,18 +1199,24 @@ export const useStore = create<StoreState>()(
       set((s) => {
         const a = activeAnimationOf(s.project, s.activeAnimationId)
         if (!a) return
-        const insertAt = afterKeyframeId ? a.keyframes.findIndex((k) => k.id === afterKeyframeId) + 1 : a.keyframes.length
-        const template = a.keyframes[Math.max(0, insertAt - 1)]?.params ?? s.project.eyeBase
-        const newParams = { ...template }
+        const list = a.keyframes
+        const afterIdx = afterKeyframeId ? list.findIndex((k) => k.id === afterKeyframeId) : list.length - 1
+        const prev = list[Math.max(0, afterIdx)]
+        const next = list[Math.max(0, afterIdx) + 1]
+        const newParams = { ...(prev?.params ?? s.project.eyeBase) }
+        const timeMs = prev && next ? Math.round((prev.timeMs + next.timeMs) / 2) : prev ? prev.timeMs + 400 : 0
         const newKf: Keyframe = {
           id: nanoid(10),
-          duration: 400,
+          timeMs,
           easing: 'easeInOut',
           params: newParams,
           styleOverrides: computeStyleOverrides(newParams, null, s.project.visualReference)
         }
-        a.keyframes.splice(insertAt, 0, newKf)
+        list.push(newKf)
+        list.sort((x, y) => x.timeMs - y.timeMs)
+        if (timeMs > a.durationMs) a.durationMs = timeMs
         s.selectedKeyframeId = newKf.id
+        s.timelineSelection = [{ kind: 'keyframe', trackId: 'pose', id: newKf.id }]
         s.dirty = true
       }),
 
@@ -951,25 +1231,6 @@ export const useStore = create<StoreState>()(
           // Reference so the next Apply knows what to protect.
           kf.styleOverrides = computeStyleOverrides(kf.params, null, s.project.visualReference)
         }
-        s.dirty = true
-      }),
-
-    updateKeyframeDuration: (keyframeId, duration) =>
-      set((s) => {
-        const a = activeAnimationOf(s.project, s.activeAnimationId)
-        const kf = a?.keyframes.find((k) => k.id === keyframeId)
-        if (kf) kf.duration = Math.max(1, duration)
-        s.dirty = true
-      }),
-
-    setKeyframeAbsoluteTime: (keyframeId, absoluteMs) =>
-      set((s) => {
-        const a = activeAnimationOf(s.project, s.activeAnimationId)
-        if (!a) return
-        const idx = a.keyframes.findIndex((k) => k.id === keyframeId)
-        if (idx <= 0) return // first keyframe is always pinned at t=0, same as the drag handler
-        const prevStart = keyframeStartTimes(a)[idx - 1]
-        a.keyframes[idx - 1].duration = Math.max(MIN_SEGMENT_MS, Math.round(absoluteMs - prevStart))
         s.dirty = true
       }),
 
@@ -990,10 +1251,15 @@ export const useStore = create<StoreState>()(
         if (!a) return
         const idx = a.keyframes.findIndex((k) => k.id === keyframeId)
         if (idx === -1) return
-        const copy: Keyframe = JSON.parse(JSON.stringify(a.keyframes[idx]))
-        copy.id = nanoid(10)
-        a.keyframes.splice(idx + 1, 0, copy)
+        const original = a.keyframes[idx]
+        const next = a.keyframes[idx + 1]
+        const timeMs = Math.max(0, next ? Math.min(next.timeMs - MIN_SEGMENT_MS, original.timeMs + MIN_SEGMENT_MS) : original.timeMs + 200)
+        const copy: Keyframe = { ...JSON.parse(JSON.stringify(original)), id: nanoid(10), timeMs }
+        a.keyframes.push(copy)
+        a.keyframes.sort((x, y) => x.timeMs - y.timeMs)
+        if (timeMs > a.durationMs) a.durationMs = timeMs
         s.selectedKeyframeId = copy.id
+        s.timelineSelection = [{ kind: 'keyframe', trackId: 'pose', id: copy.id }]
         s.dirty = true
       }),
 
@@ -1003,18 +1269,7 @@ export const useStore = create<StoreState>()(
         if (!a || a.keyframes.length <= 1) return
         a.keyframes = a.keyframes.filter((k) => k.id !== keyframeId)
         if (s.selectedKeyframeId === keyframeId) s.selectedKeyframeId = null
-        s.dirty = true
-      }),
-
-    reorderKeyframe: (keyframeId, newIndex) =>
-      set((s) => {
-        const a = activeAnimationOf(s.project, s.activeAnimationId)
-        if (!a) return
-        const idx = a.keyframes.findIndex((k) => k.id === keyframeId)
-        if (idx === -1) return
-        const clamped = Math.max(0, Math.min(a.keyframes.length - 1, newIndex))
-        const [item] = a.keyframes.splice(idx, 1)
-        a.keyframes.splice(clamped, 0, item)
+        s.timelineSelection = s.timelineSelection.filter((i) => !(i.kind === 'keyframe' && i.trackId === 'pose' && i.id === keyframeId))
         s.dirty = true
       }),
 
@@ -1030,35 +1285,13 @@ export const useStore = create<StoreState>()(
         const a = activeAnimationOf(s.project, s.activeAnimationId)
         const clip = s.keyframeClipboard
         if (!a || !clip) return
-        const absoluteMs = Math.max(0, absoluteMsRaw)
-
-        const copy: Keyframe = JSON.parse(JSON.stringify(clip))
-        copy.id = nanoid(10)
-
-        const starts = keyframeStartTimes(a)
-        const lastIdx = a.keyframes.length - 1
-        if (a.keyframes.length === 0) {
-          a.keyframes.push(copy)
-        } else if (absoluteMs >= starts[lastIdx]) {
-          // Pasting at/after the last keyframe extends the timeline rather than splitting a
-          // segment — there's nothing after it to preserve the position of.
-          a.keyframes.push(copy)
-        } else {
-          // Find which segment [starts[i], starts[i+1]) absoluteMs falls in and split it: the
-          // earlier keyframe's own duration shrinks to reach the new keyframe, and the new
-          // keyframe's duration covers the remainder — every *other* keyframe's absolute time
-          // is unaffected, matching "paste without disturbing the rest of the timeline."
-          let i = 0
-          while (i < lastIdx && !(absoluteMs >= starts[i] && absoluteMs < starts[i + 1])) i++
-          const segStart = starts[i]
-          const segEnd = starts[i + 1]
-          const clampedMs = Math.max(segStart + MIN_SEGMENT_MS, Math.min(segEnd - MIN_SEGMENT_MS, absoluteMs))
-          copy.duration = Math.round(segEnd - clampedMs)
-          a.keyframes[i].duration = Math.round(clampedMs - segStart)
-          a.keyframes.splice(i + 1, 0, copy)
-        }
-
+        const copy: Keyframe = { ...JSON.parse(JSON.stringify(clip)), id: nanoid(10) }
+        copy.timeMs = Math.max(0, Math.round(absoluteMsRaw))
+        a.keyframes.push(copy)
+        a.keyframes.sort((x, y) => x.timeMs - y.timeMs)
+        if (copy.timeMs > a.durationMs) a.durationMs = copy.timeMs
         s.selectedKeyframeId = copy.id
+        s.timelineSelection = [{ kind: 'keyframe', trackId: 'pose', id: copy.id }]
         s.dirty = true
       }),
 
@@ -1076,6 +1309,441 @@ export const useStore = create<StoreState>()(
           for (const field of STYLE_EYE_PARAM_FIELDS) target[field] = source[field]
         }
         kf.styleOverrides = computeStyleOverrides(kf.params, null, s.project.visualReference)
+        s.dirty = true
+      }),
+
+    // ---- timeline (multi-track, CapCut-style editing) --------------------------------------
+
+    setTimelineSelection: (items) =>
+      set((s) => {
+        s.timelineSelection = items
+        syncPrimarySelection(s)
+      }),
+
+    toggleTimelineSelection: (item, additive) =>
+      set((s) => {
+        const idx = s.timelineSelection.findIndex((i) => i.kind === item.kind && i.trackId === item.trackId && i.id === item.id)
+        if (additive) {
+          if (idx >= 0) s.timelineSelection.splice(idx, 1)
+          else s.timelineSelection.push(item)
+        } else {
+          s.timelineSelection = idx >= 0 && s.timelineSelection.length === 1 ? [] : [item]
+        }
+        syncPrimarySelection(s)
+      }),
+
+    clearTimelineSelection: () =>
+      set((s) => {
+        s.timelineSelection = []
+        s.selectedKeyframeId = null
+        s.selectedStickerId = null
+      }),
+
+    setSnappingEnabled: (enabled) => set((s) => void (s.snappingEnabled = enabled)),
+
+    setKeyframeTime: (trackKind, keyframeId, timeMs) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        const list = keyframeListFor(a, trackKind)
+        const idx = list.findIndex((k) => k.id === keyframeId)
+        if (idx === -1) return
+        if (trackKind === 'pose' && idx === 0) return // pinned at t=0, matches historical behavior
+        const isLast = idx === list.length - 1
+        const minT = idx > 0 ? list[idx - 1].timeMs + MIN_SEGMENT_MS : 0
+        const maxT = isLast ? Infinity : list[idx + 1].timeMs - MIN_SEGMENT_MS
+        const clamped = Math.max(minT, Math.min(Math.max(minT, maxT), Math.round(timeMs)))
+        list[idx].timeMs = clamped
+        if (trackKind === 'pose' && isLast) a.durationMs = Math.max(a.durationMs, clamped)
+        s.dirty = true
+      }),
+
+    updateTrackKeyframeParams: (trackKind, keyframeId, partial) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        const kf = keyframeListFor(a, trackKind).find((k) => k.id === keyframeId)
+        if (!kf) return
+        Object.assign(kf.params, partial)
+        kf.styleOverrides = computeStyleOverrides(kf.params, null, s.project.visualReference)
+        s.dirty = true
+      }),
+
+    updateTrackKeyframeEasing: (trackKind, keyframeId, easing, customBezier) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        const kf = keyframeListFor(a, trackKind).find((k) => k.id === keyframeId)
+        if (!kf) return
+        kf.easing = easing
+        kf.customBezier = customBezier
+        s.dirty = true
+      }),
+
+    resizeStickerClip: (stickerId, edge, newMs) =>
+      set((s) => {
+        const owner = findStickerOwner(s.project, stickerId)
+        if (!owner) return
+        const sticker = owner.list[owner.index]
+        const clamped = Math.max(0, Math.round(newMs))
+        if (edge === 'start') {
+          const maxStart = sticker.anim.endTimeMs != null ? sticker.anim.endTimeMs - MIN_SEGMENT_MS : Infinity
+          sticker.anim.startTimeMs = Math.max(0, Math.min(maxStart, clamped))
+        } else {
+          const minEnd = sticker.anim.startTimeMs + MIN_SEGMENT_MS
+          sticker.anim.endTimeMs = Math.max(minEnd, clamped)
+        }
+        s.dirty = true
+      }),
+
+    splitClipAt: (item, atMs) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        const t = Math.round(atMs)
+
+        if (item.kind === 'sticker') {
+          const owner = findStickerOwner(s.project, item.id)
+          if (!owner) return
+          const original = owner.list[owner.index]
+          const start = original.anim.startTimeMs
+          const end = original.anim.endTimeMs ?? a.durationMs
+          if (t <= start + MIN_SEGMENT_MS || t >= end - MIN_SEGMENT_MS) return
+          checkpointDraft(s)
+          const copy: StickerInstance = JSON.parse(JSON.stringify(original))
+          copy.id = nanoid(8)
+          copy.anim.startTimeMs = t
+          // Preserve a "never ends" (null) endTimeMs on the second half — only the first half
+          // gets a real end at the split point.
+          original.anim.endTimeMs = t
+          owner.list.splice(owner.index + 1, 0, copy)
+          s.dirty = true
+          return
+        }
+
+        if (item.kind === 'keyframe') {
+          const trackKind = item.trackId as KeyframeTrackKind
+          const list = keyframeListFor(a, trackKind)
+          if (list.length < 2) return
+          if (t <= list[0].timeMs + MIN_SEGMENT_MS || t >= list[list.length - 1].timeMs - MIN_SEGMENT_MS) return
+          const sample = sampleTrack(list, false, a.durationMs, t)
+          if (!sample) return
+          checkpointDraft(s)
+          const from = list[sample.segmentIndex]
+          const newKf: Keyframe = {
+            id: nanoid(10),
+            timeMs: t,
+            easing: from.easing,
+            customBezier: from.customBezier,
+            params: sample.params,
+            styleOverrides: computeStyleOverrides(sample.params, null, s.project.visualReference)
+          }
+          list.push(newKf)
+          list.sort((x, y) => x.timeMs - y.timeMs)
+          s.dirty = true
+        }
+      }),
+
+    moveSelectionByDelta: (deltaMs) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a || s.timelineSelection.length === 0) return
+
+        let minTime = Infinity
+        for (const item of s.timelineSelection) {
+          if (item.kind === 'keyframe') {
+            const kf = keyframeListFor(a, item.trackId as KeyframeTrackKind).find((k) => k.id === item.id)
+            if (kf) minTime = Math.min(minTime, kf.timeMs)
+          } else if (item.kind === 'sticker') {
+            const owner = findStickerOwner(s.project, item.id)
+            if (owner) minTime = Math.min(minTime, owner.list[owner.index].anim.startTimeMs)
+          } else {
+            const marker = a.markers.find((m) => m.id === item.id)
+            if (marker) minTime = Math.min(minTime, marker.timeMs)
+          }
+        }
+        if (minTime === Infinity) return
+        const appliedDelta = Math.max(deltaMs, -minTime)
+        if (appliedDelta === 0) return
+
+        for (const item of s.timelineSelection) {
+          if (item.kind === 'keyframe') {
+            const trackKind = item.trackId as KeyframeTrackKind
+            const list = keyframeListFor(a, trackKind)
+            const kf = list.find((k) => k.id === item.id)
+            if (!kf) continue
+            if (trackKind === 'pose' && list[0]?.id === kf.id) continue // pinned at t=0
+            kf.timeMs = Math.max(0, kf.timeMs + appliedDelta)
+          } else if (item.kind === 'sticker') {
+            const owner = findStickerOwner(s.project, item.id)
+            if (!owner) continue
+            const sticker = owner.list[owner.index]
+            sticker.anim.startTimeMs = Math.max(0, sticker.anim.startTimeMs + appliedDelta)
+            if (sticker.anim.endTimeMs != null) sticker.anim.endTimeMs = Math.max(sticker.anim.startTimeMs, sticker.anim.endTimeMs + appliedDelta)
+          } else {
+            const marker = a.markers.find((m) => m.id === item.id)
+            if (marker) marker.timeMs = Math.max(0, marker.timeMs + appliedDelta)
+          }
+        }
+        a.keyframes.sort((x, y) => x.timeMs - y.timeMs)
+        a.leftEyeKeyframes.sort((x, y) => x.timeMs - y.timeMs)
+        a.rightEyeKeyframes.sort((x, y) => x.timeMs - y.timeMs)
+        a.pupilKeyframes.sort((x, y) => x.timeMs - y.timeMs)
+        a.eyelidKeyframes.sort((x, y) => x.timeMs - y.timeMs)
+        a.markers.sort((x, y) => x.timeMs - y.timeMs)
+        s.dirty = true
+      }),
+
+    addKeyframeAt: (trackKind, timeMs) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        checkpointDraft(s)
+        const list = keyframeListFor(a, trackKind)
+        const target = Math.max(0, Math.round(timeMs))
+
+        // Clamp away from existing neighbors by MIN_SEGMENT_MS, nudging right past anything
+        // already occupying (or too close to) the requested time.
+        const sorted = [...list].sort((x, y) => x.timeMs - y.timeMs)
+        let clamped = target
+        for (const k of sorted) {
+          if (Math.abs(k.timeMs - clamped) < MIN_SEGMENT_MS) clamped = k.timeMs + MIN_SEGMENT_MS
+        }
+
+        // Template the new keyframe's pose from whatever's currently showing at this time, so
+        // it starts matching the live preview instead of resetting to defaults — the merged
+        // sample for leftEye/rightEye/pupils/eyelids tracks (sampleAnimationEye), or the pose
+        // track's own sample for the pose track itself.
+        const eyeSide = trackKind === 'rightEye' ? 'right' : 'left'
+        const params: EyeParams =
+          trackKind === 'pose'
+            ? (sampleTrack(a.keyframes, a.loop, a.durationMs, clamped)?.params ?? { ...s.project.eyeBase })
+            : { ...sampleAnimationEye(a, clamped, eyeSide) }
+
+        const newKf: Keyframe = {
+          id: nanoid(10),
+          timeMs: clamped,
+          easing: 'easeInOut',
+          params,
+          styleOverrides: computeStyleOverrides(params, null, s.project.visualReference)
+        }
+        list.push(newKf)
+        list.sort((x, y) => x.timeMs - y.timeMs)
+        if (trackKind === 'pose' && clamped > a.durationMs) a.durationMs = clamped
+        s.timelineSelection = [{ kind: 'keyframe', trackId: trackKind, id: newKf.id }]
+        syncPrimarySelection(s)
+        s.dirty = true
+      }),
+
+    addTrack: (kind, name, layer) => {
+      let resultId = ''
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        if (kind !== 'sticker') {
+          // Singleton fixed kind — if one already exists, just select it rather than making a
+          // duplicate row (pose always exists already and is never created here).
+          const existing = a.tracks.find((t) => t.kind === kind)
+          if (existing) {
+            resultId = existing.id
+            return
+          }
+        }
+        checkpointDraft(s)
+        const order = a.tracks.length
+        const count = a.tracks.filter((t) => t.kind === 'sticker').length + 1
+        const track = createTrack(() => nanoid(8), kind, order, name ?? (kind === 'sticker' ? `Sticker Track ${count}` : undefined), layer)
+        a.tracks.push(track)
+        resultId = track.id
+        s.dirty = true
+      })
+      return resultId
+    },
+
+    removeTrack: (trackId) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const track = a?.tracks.find((t) => t.id === trackId)
+        if (!a || !track || track.kind === 'pose') return
+        checkpointDraft(s)
+        a.tracks = a.tracks.filter((t) => t.id !== trackId)
+        if (track.kind === 'sticker') {
+          // Stickers that were on this track fall back to "Ungrouped" (an unresolved trackId)
+          // rather than being deleted — matches the timing validator's dangling-trackId warning
+          // being non-fatal.
+          for (const st of a.stickers) {
+            if (st.trackId === trackId) st.trackId = ''
+          }
+        } else if (track.kind === 'marker') {
+          a.markers = []
+        } else {
+          setKeyframeListFor(a, track.kind as KeyframeTrackKind, [])
+        }
+        s.timelineSelection = s.timelineSelection.filter((i) => i.trackId !== trackId)
+        syncPrimarySelection(s)
+        s.dirty = true
+      }),
+
+    renameTrack: (trackId, name) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const t = a?.tracks.find((tr) => tr.id === trackId)
+        if (!t) return
+        checkpointDraft(s)
+        t.name = name
+        s.dirty = true
+      }),
+
+    reorderTrack: (trackId, newOrder) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        const sorted = [...a.tracks].sort((x, y) => x.order - y.order)
+        const idx = sorted.findIndex((t) => t.id === trackId)
+        if (idx === -1) return
+        checkpointDraft(s)
+        const clamped = Math.max(0, Math.min(sorted.length - 1, newOrder))
+        const [item] = sorted.splice(idx, 1)
+        sorted.splice(clamped, 0, item)
+        sorted.forEach((t, i) => (t.order = i))
+        a.tracks = sorted
+        s.dirty = true
+      }),
+
+    setTrackVisible: (trackId, visible) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const t = a?.tracks.find((tr) => tr.id === trackId)
+        if (!t) return
+        checkpointDraft(s)
+        t.visible = visible
+        s.dirty = true
+      }),
+
+    setTrackLocked: (trackId, locked) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const t = a?.tracks.find((tr) => tr.id === trackId)
+        if (!t) return
+        checkpointDraft(s)
+        t.locked = locked
+        s.dirty = true
+      }),
+
+    assignStickerToTrack: (stickerId, trackId) =>
+      set((s) => {
+        const owner = findStickerOwner(s.project, stickerId)
+        if (!owner) return
+        checkpointDraft(s)
+        const sticker = owner.list[owner.index]
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const track = a?.tracks.find((t) => t.id === trackId)
+        sticker.trackId = trackId
+        if (track?.stickerLayer) sticker.layer = track.stickerLayer
+        s.dirty = true
+      }),
+
+    detachTrackFromPose: (animId, trackKind) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, animId)
+        if (!a) return
+        const targetList = keyframeListFor(a, trackKind)
+        if (targetList.length > 0) return // already has its own keyframes
+        checkpointDraft(s)
+        const seeded: Keyframe[] = a.keyframes.map((k) => ({
+          id: nanoid(10),
+          timeMs: k.timeMs,
+          easing: k.easing,
+          customBezier: k.customBezier,
+          params: { ...k.params },
+          styleOverrides: [...k.styleOverrides]
+        }))
+        setKeyframeListFor(a, trackKind, seeded)
+        s.dirty = true
+      }),
+
+    addMarker: (atMs, label) => {
+      const id = nanoid(8)
+      set((s) => {
+        checkpointDraft(s)
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        const timeMs = Math.max(0, Math.round(atMs))
+        a.markers.push({ id, timeMs, label: label ?? `Marker ${a.markers.length + 1}`, color: '#f5c542' })
+        a.markers.sort((x, y) => x.timeMs - y.timeMs)
+        s.timelineSelection = [{ kind: 'marker', trackId: 'marker', id }]
+        syncPrimarySelection(s)
+        s.dirty = true
+      })
+      return id
+    },
+
+    updateMarker: (markerId, partial) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const m = a?.markers.find((mk) => mk.id === markerId)
+        if (!m) return
+        Object.assign(m, partial)
+        s.dirty = true
+      }),
+
+    copySelection: () =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        s.timelineClipboard = collectClipboardEntries(s.project, a, s.timelineSelection)
+      }),
+
+    pasteSelectionAt: (atMs) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a || s.timelineClipboard.length === 0) return
+        checkpointDraft(s)
+        const newSelection = insertTimelineEntriesAt(a, s.timelineClipboard, atMs)
+        s.timelineSelection = newSelection
+        syncPrimarySelection(s)
+        s.dirty = true
+      }),
+
+    duplicateSelection: () =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a || s.timelineSelection.length === 0) return
+        checkpointDraft(s)
+        const entries = collectClipboardEntries(s.project, a, s.timelineSelection)
+        if (entries.length === 0) return
+        const endTimeOf = (e: TimelineClipboardEntry) => (e.kind === 'sticker' ? (e.data.anim.endTimeMs ?? e.data.anim.startTimeMs) : e.data.timeMs)
+        const groupEnd = Math.max(...entries.map(endTimeOf))
+        const newSelection = insertTimelineEntriesAt(a, entries, groupEnd + MIN_SEGMENT_MS)
+        s.timelineSelection = newSelection
+        syncPrimarySelection(s)
+        s.dirty = true
+      }),
+
+    deleteSelection: () =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a || s.timelineSelection.length === 0) return
+        checkpointDraft(s)
+        for (const item of s.timelineSelection) {
+          if (item.kind === 'keyframe') {
+            const trackKind = item.trackId as KeyframeTrackKind
+            const list = keyframeListFor(a, trackKind)
+            // Never delete the pose track down to zero keyframes (matches the old
+            // deleteKeyframe's guard); other tracks can go empty (= fully inherit the pose
+            // track again).
+            if (trackKind === 'pose' && list.length <= 1) continue
+            setKeyframeListFor(a, trackKind, list.filter((k) => k.id !== item.id))
+          } else if (item.kind === 'sticker') {
+            const owner = findStickerOwner(s.project, item.id)
+            if (owner) owner.list.splice(owner.index, 1)
+          } else {
+            a.markers = a.markers.filter((m) => m.id !== item.id)
+          }
+        }
+        s.timelineSelection = []
+        s.selectedKeyframeId = null
+        s.selectedStickerId = null
         s.dirty = true
       }),
 
@@ -1220,8 +1888,68 @@ export const useStore = create<StoreState>()(
         const list = resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
         if (!list) return
         const asset = s.project.stickerAssets.find((a) => a.id === assetId)
-        const order = list.filter((st) => st.layer === layer).length
+        // Only Animation-scoped stickers land on a Timeline track — Project/Expression scope
+        // has no Track[] to resolve against, so trackId stays '' (Ungrouped) for those.
+        // Resolved to the first sticker track that exists (by display order), not filtered by
+        // layer — a track's stickerLayer is just its own default, not a hard requirement, so a
+        // sticker track created with one layer can still receive a sticker added with the
+        // other (this mismatch was the root cause of "can't add stickers to a sticker track").
+        // The sticker's own layer is aligned to the chosen track's, matching
+        // assignStickerToTrack()'s same convention, so behind/front draw order stays consistent
+        // with whichever track it visually lives on.
+        let trackId = ''
+        let effectiveLayer = layer
+        if (s.stickerScope === 'animation') {
+          const a = activeAnimationOf(s.project, s.activeAnimationId)
+          const track = a?.tracks.filter((t) => t.kind === 'sticker').sort((x, y) => x.order - y.order)[0]
+          if (track) {
+            trackId = track.id
+            effectiveLayer = track.stickerLayer ?? layer
+          }
+        }
+        const order = list.filter((st) => st.layer === effectiveLayer).length
         list.push({
+          id,
+          assetId,
+          name: asset?.name ?? 'Sticker',
+          layer: effectiveLayer,
+          order,
+          x: 0,
+          y: 0,
+          width: 48,
+          height: 48,
+          scale: 100,
+          rotation: 0,
+          opacity: 100,
+          tint: null,
+          flipH: false,
+          flipV: false,
+          visible: true,
+          locked: false,
+          anim: { ...DEFAULT_STICKER_ANIM },
+          trackId
+        })
+        s.selectedStickerId = id
+        s.dirty = true
+        added = true
+      })
+      return added ? id : null
+    },
+
+    addStickerToTrack: (trackId, assetId, atMs) => {
+      const id = nanoid(8)
+      let ok = false
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const track = a?.tracks.find((t) => t.id === trackId && t.kind === 'sticker')
+        if (!a || !track) return
+        checkpointDraft(s)
+        const asset = s.project.stickerAssets.find((ast) => ast.id === assetId)
+        const layer = track.stickerLayer ?? 'front'
+        const order = a.stickers.filter((st) => st.layer === layer).length
+        const startTimeMs = Math.max(0, Math.round(atMs))
+        const DEFAULT_CLIP_MS = 800
+        a.stickers.push({
           id,
           assetId,
           name: asset?.name ?? 'Sticker',
@@ -1239,13 +1967,16 @@ export const useStore = create<StoreState>()(
           flipV: false,
           visible: true,
           locked: false,
-          anim: { ...DEFAULT_STICKER_ANIM }
+          anim: { ...DEFAULT_STICKER_ANIM, startTimeMs, endTimeMs: startTimeMs + DEFAULT_CLIP_MS },
+          trackId
         })
+        s.timelineSelection = [{ kind: 'sticker', trackId, id }]
         s.selectedStickerId = id
+        s.stickerScope = 'animation'
         s.dirty = true
-        added = true
+        ok = true
       })
-      return added ? id : null
+      return ok ? id : null
     },
 
     duplicateSticker: (id) => {

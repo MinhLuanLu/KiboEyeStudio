@@ -1,5 +1,6 @@
 import type { Project } from '@/types'
 import { expressionShapeDiverges } from '@/types'
+import { collectAnimationBreakpoints } from './cppExport'
 
 // Matches sizeof(EyeFrame) from cppExport.ts's struct layout, with typical compiler
 // padding: 3x uint8 + 1x int8 + 1x uint8 + 2x uint8 (irisWidth/Height) + 2x uint8
@@ -53,7 +54,17 @@ export function estimateProjectSize(project: Project): SizeEstimate {
   // EyeFrame constants instead of one — count it as 2 "keyframe-equivalents" for the flash
   // estimate so per-eye divergence doesn't quietly under-report the exported size.
   const expressionFrameCount = project.expressions.reduce((sum, e) => sum + (expressionShapeDiverges(e) ? 2 : 1), 0)
-  const keyframeCount = project.animations.reduce((sum, a) => sum + a.keyframes.length, 0) + expressionFrameCount
+  // Matches exportAnimation()'s own bakeAnimationFrames() logic in cppExport.ts: every
+  // animation exports one EyeFrame per breakpoint (the union of all 5 tracks' keyframe times,
+  // not just the pose track's own count), doubled when it authored Left Eye/Right Eye track
+  // divergence (a second _framesRight array) — otherwise this would under-report flash usage
+  // for any animation using the new multi-track keyframing.
+  const animationFrameCount = project.animations.reduce((sum, a) => {
+    const breakpointCount = collectAnimationBreakpoints(a).length
+    const diverges = a.leftEyeKeyframes.length > 0 || a.rightEyeKeyframes.length > 0
+    return sum + breakpointCount * (diverges ? 2 : 1)
+  }, 0)
+  const keyframeCount = animationFrameCount + expressionFrameCount
   const pupilShapeBytes = BUILTIN_PUPIL_SHAPE_TABLE_BYTES + project.customPupilShapes.length * CUSTOM_PUPIL_SHAPE_TABLE_BYTES
 
   // Mirrors exportStickers()'s own "every scope's visible stickers, raster assets deduped by

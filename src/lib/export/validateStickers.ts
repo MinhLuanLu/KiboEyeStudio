@@ -1,4 +1,4 @@
-import type { Project, StickerAsset, StickerInstance } from '@/types'
+import type { Project, StickerAsset, StickerInstance, Track } from '@/types'
 import { STICKER_BUILTINS_WITH_FIRMWARE_DRAWER } from './cppExport'
 
 export type StickerValidationStatus = 'passed' | 'warning' | 'failed'
@@ -26,7 +26,7 @@ export function validateStickerExport(project: Project): StickerValidationResult
   const assetsById = new Map(project.stickerAssets.map((a) => [a.id, a]))
   const results: StickerValidationResult[] = []
 
-  function checkInstance(s: StickerInstance, scope: string) {
+  function checkInstance(s: StickerInstance, scope: string, animContext?: { durationMs: number; tracks: Track[] }) {
     const messages: string[] = []
     let status: StickerValidationStatus = 'passed'
 
@@ -87,6 +87,30 @@ export function validateStickerExport(project: Project): StickerValidationResult
       messages.push('Opacity is 0% — invisible until an animation (fade-in, pulse) raises it.')
     }
 
+    // Timing (Animation scope only — Project/Expression stickers have no timeline/durationMs
+    // to check start/end against, and no Track to dangle from). Directly answers "don't
+    // silently export a sticker as always-visible when its clip is only active for part of
+    // the animation": every instance gets an explicit message about which one it actually is.
+    if (animContext) {
+      const { durationMs, tracks } = animContext
+      if (s.anim.endTimeMs != null && s.anim.endTimeMs <= s.anim.startTimeMs) {
+        status = 'failed'
+        messages.push(`End time (${Math.round(s.anim.endTimeMs)}ms) is at or before start time (${Math.round(s.anim.startTimeMs)}ms) — this clip is never visible.`)
+      } else if (s.anim.startTimeMs > durationMs) {
+        status = status === 'failed' ? status : 'warning'
+        messages.push(`Starts at ${Math.round(s.anim.startTimeMs)}ms, after this animation's own ${Math.round(durationMs)}ms length — never visible during playback.`)
+      } else if (s.anim.endTimeMs == null) {
+        messages.push(`Visible from ${Math.round(s.anim.startTimeMs)}ms onward, for as long as "${scope}" stays active — not exported as permanently visible.`)
+      } else {
+        messages.push(`Visible ${Math.round(s.anim.startTimeMs)}ms–${Math.round(s.anim.endTimeMs)}ms into "${scope}" — not exported as permanently visible.`)
+      }
+
+      if (s.trackId && !tracks.some((t) => t.id === s.trackId)) {
+        status = status === 'failed' ? status : 'warning'
+        messages.push('Not assigned to any Timeline track (falls back to "Ungrouped") — this only affects the studio\'s own organization, not what exports.')
+      }
+    }
+
     if (status === 'passed') messages.push('Exports correctly and will render on real hardware.')
     results.push({ stickerId: s.id, stickerName: s.name, scope, messages, status })
   }
@@ -96,7 +120,7 @@ export function validateStickerExport(project: Project): StickerValidationResult
     for (const s of e.stickers) checkInstance(s, `Expression "${e.name}"`)
   }
   for (const a of project.animations) {
-    for (const s of a.stickers) checkInstance(s, `Animation "${a.name}"`)
+    for (const s of a.stickers) checkInstance(s, `Animation "${a.name}"`, { durationMs: a.durationMs, tracks: a.tracks })
   }
 
   return results

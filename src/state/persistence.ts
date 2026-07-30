@@ -2,16 +2,21 @@ import { nanoid } from 'nanoid'
 import type {
   Animation,
   CustomPupilShape,
+  EasingType,
   EditorState,
   Expression,
   EyeColors,
   EyeParams,
   EyeSide,
+  Keyframe,
+  Marker,
   PlaybackMode,
   Project,
   ProjectFile,
   StickerAsset,
   StickerInstance,
+  StickerLayer,
+  Track,
   VisualReferenceStyle
 } from '@/types'
 import {
@@ -21,6 +26,7 @@ import {
   DEFAULT_PERSONALITY,
   DEFAULT_STICKER_ANIM,
   DEFAULT_TIMING,
+  FIXED_TRACK_KINDS,
   PROJECT_FILE_VERSION,
   computeStyleOverrides,
   defaultEditorState
@@ -134,8 +140,136 @@ export function normalizeStickerInstances(raw: unknown): StickerInstance[] {
       flipV: Boolean(r.flipV),
       visible: r.visible !== false,
       locked: Boolean(r.locked),
-      anim: { ...DEFAULT_STICKER_ANIM, ...(r.anim ?? {}) }
+      anim: { ...DEFAULT_STICKER_ANIM, ...(r.anim ?? {}) },
+      // Resolved against the owning Animation's actual tracks by normalizeAnimationTiming()
+      // below (which knows the real track ids) — '' here just means "unresolved yet"; it's
+      // never treated as a real track id.
+      trackId: typeof r.trackId === 'string' ? r.trackId : ''
     })
+  }
+  return out
+}
+
+/** Migrates one Keyframe[] array (any of Animation's keyframes/leftEyeKeyframes/
+ * rightEyeKeyframes/pupilKeyframes/eyelidKeyframes) to the current absolute-`timeMs` shape.
+ * Detects the legacy "duration to next keyframe" shape (every entry has a numeric `duration`
+ * and no numeric `timeMs`) and converts via the same prefix-sum `keyframeStartTimes()` used to
+ * compute before this feature, so migrated timing is pixel/ms-identical to the old playback.
+ * Native Phase-1 saves (already `timeMs`-based) pass straight through, just backfilling
+ * defaults for any field added after the file was written. Always returns entries sorted by
+ * `timeMs` — every track consumer (sampleTrack, the Timeline) assumes that invariant. */
+function normalizeKeyframeList(raw: unknown, visualReference: VisualReferenceStyle): Keyframe[] {
+  if (!Array.isArray(raw)) return []
+  const isLegacy = raw.some((k) => k && typeof k === 'object' && typeof (k as Record<string, unknown>).duration === 'number' && typeof (k as Record<string, unknown>).timeMs !== 'number')
+  let acc = 0
+  const out = raw.map((kRaw) => {
+    const k = kRaw as Record<string, unknown>
+    const params = normalizeEyeParams(k.params as Partial<EyeParams> | undefined)
+    const styleOverrides = normalizeStyleOverrides(k.styleOverrides) ?? computeStyleOverrides(params, null, visualReference)
+    let timeMs: number
+    if (isLegacy) {
+      timeMs = acc
+      acc += typeof k.duration === 'number' ? k.duration : 0
+    } else {
+      timeMs = typeof k.timeMs === 'number' ? k.timeMs : acc
+    }
+    const customBezier = Array.isArray(k.customBezier) && k.customBezier.length === 4 ? (k.customBezier as [number, number, number, number]) : undefined
+    const keyframe: Keyframe = {
+      id: typeof k.id === 'string' ? k.id : nanoid(8),
+      timeMs,
+      easing: (typeof k.easing === 'string' ? k.easing : 'linear') as EasingType,
+      customBezier,
+      params,
+      styleOverrides
+    }
+    if (typeof k.sourceExpressionId === 'string') keyframe.sourceExpressionId = k.sourceExpressionId
+    if (typeof k.linked === 'boolean') keyframe.linked = k.linked
+    return keyframe
+  })
+  return out.sort((a, b) => a.timeMs - b.timeMs)
+}
+
+/** Old (pre-Phase-1) `animationDuration()` rule, applied only when the pose track's keyframes
+ * are actually being migrated from `duration` — recomputes the animation's total length so it
+ * matches exactly what the old prefix-sum-based playback would have produced, so migrating a
+ * saved project changes nothing about how it plays. Returns `null` when there's nothing to
+ * migrate (native Phase-1 saves already have a real `durationMs` field to use instead). */
+function migratedDurationMs(rawKeyframes: unknown, loop: boolean): number | null {
+  if (!Array.isArray(rawKeyframes) || rawKeyframes.length === 0) return null
+  const isLegacy = rawKeyframes.some((k) => k && typeof k === 'object' && typeof (k as Record<string, unknown>).duration === 'number' && typeof (k as Record<string, unknown>).timeMs !== 'number')
+  if (!isLegacy) return null
+  let total = 0
+  let lastGap = 0
+  for (const kRaw of rawKeyframes) {
+    const d = kRaw && typeof kRaw === 'object' && typeof (kRaw as Record<string, unknown>).duration === 'number' ? (kRaw as Record<string, unknown>).duration as number : 0
+    total += d
+    lastGap = d
+  }
+  return loop ? total : total - lastGap
+}
+
+function normalizeMarkers(raw: unknown): Marker[] {
+  if (!Array.isArray(raw)) return []
+  const out: Marker[] = []
+  for (const m of raw) {
+    if (!m || typeof m !== 'object') continue
+    const r = m as Record<string, unknown>
+    if (typeof r.id !== 'string' || typeof r.timeMs !== 'number') continue
+    out.push({
+      id: r.id,
+      timeMs: r.timeMs,
+      label: typeof r.label === 'string' ? r.label : '',
+      color: typeof r.color === 'string' ? r.color : '#f5c542'
+    })
+  }
+  return out
+}
+
+/** Backfills one Animation's `tracks` list: keeps any valid entries already on disk, then
+ * guarantees only the 'pose' (Expression) track always exists — the required baseline — plus
+ * whichever of leftEye/rightEye/pupils/eyelids/marker actually has real data (keyframes or
+ * markers) already saved, so a migrated file never *loses* a track its own data still needs,
+ * without cluttering the timeline with empty tracks the user never asked for (those are added
+ * on demand via the Timeline's "+ Track" control — see addTrack() in state/store.ts). Also —
+ * for legacy saves with no sticker tracks at all yet — synthesizes one 'sticker' track per
+ * distinct StickerLayer actually used by this animation's stickers, so every existing sticker
+ * has somewhere to visually land instead of an "Ungrouped" fallback. */
+function normalizeTracks(raw: unknown, stickerLayersInUse: Set<StickerLayer>, hasContent: Record<'leftEye' | 'rightEye' | 'pupils' | 'eyelids' | 'marker', boolean>): Track[] {
+  const out: Track[] = []
+  if (Array.isArray(raw)) {
+    for (const t of raw) {
+      if (!t || typeof t !== 'object') continue
+      const r = t as Record<string, unknown>
+      if (typeof r.id !== 'string' || typeof r.kind !== 'string') continue
+      out.push({
+        id: r.id,
+        kind: r.kind as Track['kind'],
+        name: typeof r.name === 'string' ? r.name : r.kind,
+        order: typeof r.order === 'number' ? r.order : out.length,
+        visible: r.visible !== false,
+        locked: Boolean(r.locked),
+        stickerLayer: r.stickerLayer === 'front' || r.stickerLayer === 'behind' ? r.stickerLayer : undefined
+      })
+    }
+  }
+  for (const fixed of FIXED_TRACK_KINDS) {
+    if (out.some((t) => t.kind === fixed.kind)) continue
+    if (fixed.kind !== 'pose' && !hasContent[fixed.kind as 'leftEye' | 'rightEye' | 'pupils' | 'eyelids' | 'marker']) continue
+    out.push({ id: nanoid(8), kind: fixed.kind, name: fixed.name, order: out.length, visible: true, locked: false })
+  }
+  const haveLayers = new Set(out.filter((t) => t.kind === 'sticker').map((t) => t.stickerLayer))
+  for (const layer of stickerLayersInUse) {
+    if (!haveLayers.has(layer)) {
+      out.push({
+        id: nanoid(8),
+        kind: 'sticker',
+        name: layer === 'behind' ? 'Stickers (Behind)' : 'Stickers (Front)',
+        order: out.length,
+        visible: true,
+        locked: false,
+        stickerLayer: layer
+      })
+    }
   }
   return out
 }
@@ -298,19 +432,49 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     colorsRightOverride: normalizeEyeColorsOverride(rawVr?.colorsRightOverride)
   }
 
-  const animations: Animation[] = (raw.animations ?? []).map((a) => ({
-    ...a,
-    keyframes: a.keyframes.map((k) => {
-      const params = normalizeEyeParams(k.params)
-      const rawStyleOverrides = (k as unknown as Record<string, unknown>).styleOverrides
-      return {
-        ...k,
-        params,
-        styleOverrides: normalizeStyleOverrides(rawStyleOverrides) ?? computeStyleOverrides(params, null, visualReference)
+  const animations: Animation[] = (raw.animations ?? []).map((aRaw) => {
+    const a = aRaw as unknown as Record<string, unknown>
+    const loop = Boolean(a.loop)
+    const poseKeyframes = normalizeKeyframeList(a.keyframes, visualReference)
+    const durationMs = migratedDurationMs(a.keyframes, loop) ?? (typeof a.durationMs === 'number' ? a.durationMs : poseKeyframes[poseKeyframes.length - 1]?.timeMs ?? 0)
+    const stickers = normalizeStickerInstances(a.stickers)
+    const leftEyeKeyframes = normalizeKeyframeList(a.leftEyeKeyframes, visualReference)
+    const rightEyeKeyframes = normalizeKeyframeList(a.rightEyeKeyframes, visualReference)
+    const pupilKeyframes = normalizeKeyframeList(a.pupilKeyframes, visualReference)
+    const eyelidKeyframes = normalizeKeyframeList(a.eyelidKeyframes, visualReference)
+    const markers = normalizeMarkers(a.markers)
+    const tracks = normalizeTracks(a.tracks, new Set(stickers.map((s) => s.layer)), {
+      leftEye: leftEyeKeyframes.length > 0,
+      rightEye: rightEyeKeyframes.length > 0,
+      pupils: pupilKeyframes.length > 0,
+      eyelids: eyelidKeyframes.length > 0,
+      marker: markers.length > 0
+    })
+    // Resolve any sticker whose trackId didn't survive (dropped track, or a layer that no
+    // longer has a matching track) to whichever sticker track exists — not layer-matched, since
+    // a track's stickerLayer is just its own default for newly-added stickers, not a hard
+    // constraint on what can live there (see assignStickerToTrack/addStickerToTrack).
+    const stickerTracks = tracks.filter((t) => t.kind === 'sticker').sort((x, y) => x.order - y.order)
+    for (const s of stickers) {
+      if (!s.trackId || !tracks.some((t) => t.id === s.trackId)) {
+        s.trackId = stickerTracks[0]?.id ?? ''
       }
-    }),
-    stickers: normalizeStickerInstances((a as unknown as Record<string, unknown>).stickers)
-  }))
+    }
+    return {
+      id: typeof a.id === 'string' ? a.id : nanoid(8),
+      name: typeof a.name === 'string' ? a.name : 'Untitled',
+      loop,
+      durationMs,
+      keyframes: poseKeyframes,
+      leftEyeKeyframes,
+      rightEyeKeyframes,
+      pupilKeyframes,
+      eyelidKeyframes,
+      tracks,
+      stickers,
+      markers
+    }
+  })
   const expressions: Expression[] = (raw.expressions ?? []).map((e) => {
     const params = normalizeEyeParams(e.params)
     const exprColors = { ...DEFAULT_EYE_COLORS, ...(e.colors ?? {}) }

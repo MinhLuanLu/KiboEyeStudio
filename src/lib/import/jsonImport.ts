@@ -1,5 +1,6 @@
-import type { Animation, EyeParams, PupilShapeId } from '@/types'
-import { DEFAULT_EYE_PARAMS, EYE_PARAM_RANGES } from '@/types'
+import { nanoid } from 'nanoid'
+import type { Animation, EyeParams, Keyframe, PupilShapeId } from '@/types'
+import { DEFAULT_EYE_PARAMS, EYE_PARAM_RANGES, createDefaultTracks } from '@/types'
 import { normalizeStickerInstances } from '@/state/persistence'
 
 const PUPIL_SHAPE_IDS: PupilShapeId[] = ['circle', 'oval', 'heart', 'star', 'diamond', 'square', 'triangle', 'custom']
@@ -42,15 +43,46 @@ export function parseAnimationJson(json: string): Animation {
       throw new Error('Each keyframe needs duration, easing, and a full params object')
     }
   }
+
+  // This interchange format still authors keyframes as "duration to next" (the format is
+  // meant to be hand-writable) — convert to the current absolute-timeMs Keyframe shape via
+  // the same prefix-sum rule normalizeProject()'s migration uses, so an imported animation's
+  // timing matches exactly what the old duration-based playback would have produced.
+  const loop = Boolean(data.loop)
+  let t = 0
+  let lastGap = 0
+  const keyframes: Keyframe[] = data.keyframes.map((kf: Record<string, unknown>) => {
+    const timeMs = t
+    const gap = typeof kf.duration === 'number' ? kf.duration : 0
+    t += gap
+    lastGap = gap
+    return {
+      id: typeof kf.id === 'string' ? kf.id : nanoid(8),
+      timeMs,
+      easing: kf.easing as Animation['keyframes'][number]['easing'],
+      customBezier: kf.customBezier as [number, number, number, number] | undefined,
+      params: normalizeImportedParams(kf.params as EyeParams),
+      styleOverrides: Array.isArray(kf.styleOverrides) ? (kf.styleOverrides as string[]) : []
+    }
+  })
+  const durationMs = loop ? t : t - lastGap
+
   return {
     id: typeof data.id === 'string' ? data.id : '',
     name: typeof data.name === 'string' ? data.name : 'Imported Animation',
-    loop: Boolean(data.loop),
-    keyframes: data.keyframes.map((kf: Animation['keyframes'][number]) => ({ ...kf, params: normalizeImportedParams(kf.params) })),
+    loop,
+    durationMs,
+    keyframes,
+    leftEyeKeyframes: [],
+    rightEyeKeyframes: [],
+    pupilKeyframes: [],
+    eyelidKeyframes: [],
+    tracks: createDefaultTracks(() => nanoid(8)),
     // Older exported/hand-authored animation JSON predates stickers entirely (or a
     // hand-edited file's sticker entries are malformed) — normalizeStickerInstances()
     // backfills/drops per-entry the same way it does for project load in persistence.ts,
     // rather than rejecting the whole file or letting a malformed sticker reach the renderer.
-    stickers: normalizeStickerInstances(data.stickers)
+    stickers: normalizeStickerInstances(data.stickers),
+    markers: []
   }
 }
