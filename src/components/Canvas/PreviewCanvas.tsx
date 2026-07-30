@@ -171,6 +171,7 @@ export function PreviewCanvas() {
         rightParams,
         rightTheme,
         customShapes: state.project.customPupilShapes,
+        customEyeShapes: state.project.customEyeShapes,
         stickers,
         stickerAssets: state.project.stickerAssets,
         stickerElapsedMs

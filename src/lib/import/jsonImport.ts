@@ -1,31 +1,54 @@
 import { nanoid } from 'nanoid'
-import type { Animation, EyeParams, Keyframe, PupilShapeId } from '@/types'
+import type { Animation, EyeParams, EyeShapeId, Keyframe, PupilShapeId } from '@/types'
 import { DEFAULT_EYE_PARAMS, EYE_PARAM_RANGES, createDefaultTracks } from '@/types'
 import { normalizeStickerInstances } from '@/state/persistence'
 
 const PUPIL_SHAPE_IDS: PupilShapeId[] = ['circle', 'oval', 'heart', 'star', 'diamond', 'square', 'triangle', 'custom']
+const EYE_SHAPE_IDS: EyeShapeId[] = [
+  'default',
+  'heart',
+  'star',
+  'diamond',
+  'hexagon',
+  'cloud',
+  'teardrop',
+  'leaf',
+  'bean',
+  'crescent',
+  'catEye',
+  'animeEye',
+  'robotEye',
+  'happyArc',
+  'custom'
+]
 
-// EYE_PARAM_RANGES only covers the numeric EyeParams fields (pupilShape/pupilCustomShapeId
-// are deliberately excluded — see its definition in types/index.ts), so this only checks
-// those; pupilShape/pupilCustomShapeId are validated and defaulted separately below in
-// normalizeImportedParams(), same reasoning persistence.ts's normalizeEyeParams() already
-// applies to project save/load.
+// EYE_PARAM_RANGES only covers the numeric EyeParams fields (pupilShape/pupilCustomShapeId/
+// eyeShape/eyeCustomShapeId and the boolean flip/visible/locked fields are deliberately
+// excluded — see its definition in types/index.ts), so this only checks those; the excluded
+// fields are validated and defaulted separately below in normalizeImportedParams(), same
+// reasoning persistence.ts's normalizeEyeParams() already applies to project save/load.
 function isEyeParams(value: unknown): value is EyeParams {
   if (typeof value !== 'object' || value === null) return false
   return Object.keys(EYE_PARAM_RANGES).every((key) => typeof (value as Record<string, unknown>)[key] === 'number')
 }
 
-/** Fills in pupilShape/pupilCustomShapeId (added after this JSON export format already
- * existed, so older exported/hand-authored animation files won't have them) and validates
- * pupilShape against the known set — a garbage/foreign value here would otherwise reach
- * cppExport.ts's PUPIL_SHAPE_ENUM lookup and silently emit `undefined` into the generated
- * C++ literal instead of a valid enum identifier. */
+/** Fills in pupilShape/pupilCustomShapeId/eyeShape/eyeCustomShapeId and the boolean flip/
+ * visible/locked fields (added after this JSON export format already existed, so older
+ * exported/hand-authored animation files won't have them), validating the two shape ids
+ * against their known sets — a garbage/foreign value here would otherwise reach cppExport.ts's
+ * enum lookups and silently emit `undefined` into the generated C++ literal instead of a valid
+ * enum identifier. Booleans spread from DEFAULT_EYE_PARAMS first so a missing field backfills
+ * to its default rather than becoming `undefined`. */
 function normalizeImportedParams(params: EyeParams): EyeParams {
   const shape = params.pupilShape
+  const eyeShape = params.eyeShape
   return {
+    ...DEFAULT_EYE_PARAMS,
     ...params,
     pupilShape: PUPIL_SHAPE_IDS.includes(shape) ? shape : DEFAULT_EYE_PARAMS.pupilShape,
-    pupilCustomShapeId: typeof params.pupilCustomShapeId === 'string' ? params.pupilCustomShapeId : null
+    pupilCustomShapeId: typeof params.pupilCustomShapeId === 'string' ? params.pupilCustomShapeId : null,
+    eyeShape: EYE_SHAPE_IDS.includes(eyeShape) ? eyeShape : DEFAULT_EYE_PARAMS.eyeShape,
+    eyeCustomShapeId: typeof params.eyeCustomShapeId === 'string' ? params.eyeCustomShapeId : null
   }
 }
 

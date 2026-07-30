@@ -23,6 +23,38 @@ export interface EyeParams {
   pupilShape: PupilShapeId
   /** Id into Project.customPupilShapes — only meaningful when pupilShape === 'custom'. */
   pupilCustomShapeId: string | null
+  /** Layers-panel visibility/lock for the Pupil layer — see the comment on eyeShapeVisible
+   * below. visible=false skips the pupil draw call entirely without discarding pupil settings. */
+  pupilVisible: boolean
+  pupilLocked: boolean
+  /** Which silhouette the eye's own outer boundary renders as — replaces the plain rounded-rect
+   * (via width/height/radius) as the clip every other draw call (sclera/iris/pupil/eyelids/
+   * glow/border) relies on. 'default' is today's existing rounded-rect/ellipse path (Circle,
+   * Oval, and Rounded Rectangle in the shape picker are all just width/height/radius presets on
+   * top of 'default', exactly like pupilShape's circle/oval convenience). Every other value
+   * draws a shared normalized polygon from src/renderer/eyeShapes.ts. Not numerically
+   * interpolatable — see lerpParams()'s explicit step-at-midpoint handling in interpolate.ts. */
+  eyeShape: EyeShapeId
+  /** Id into Project.customEyeShapes — only meaningful when eyeShape === 'custom'. */
+  eyeCustomShapeId: string | null
+  /** 50-200%: scales the traced eye-shape polygon's own silhouette independent of width/height
+   * (which control the eye's overall footprint that iris/pupil/eyelid math keys off) — lets the
+   * silhouette shrink/grow inside that same footprint. No effect when eyeShape === 'default'. */
+  eyeShapeScale: number
+  /** -30..30px: nudges the traced eye-shape polygon within the eye's own box without moving
+   * iris/pupil/eyelids, which stay centered on the box. No effect when eyeShape === 'default'. */
+  eyeShapeOffsetX: number
+  eyeShapeOffsetY: number
+  /** Mirrors the traced polygon horizontally/vertically before rotation. No effect when
+   * eyeShape === 'default'. */
+  eyeShapeFlipH: boolean
+  eyeShapeFlipV: boolean
+  /** Layers-panel visibility/lock — see the Layers panel comment near StickerInstance below.
+   * visible=false renders as if eyeShape were 'default' without discarding the actual eyeShape/
+   * eyeCustomShapeId assignment (a real, exported behavior, not studio-only). locked=true is
+   * authoring-time only (disables the Eye Shape controls in ControlsPanel); never exported. */
+  eyeShapeVisible: boolean
+  eyeShapeLocked: boolean
   upperEyelid: number
   lowerEyelid: number
   /** Tilts each lid's covering edge independently, -45..45°. */
@@ -31,6 +63,33 @@ export interface EyeParams {
   /** How pronounced each lid's soft curved edge is: 0 (flat/neutral), -100 (curved inward) to 100 (curved outward). */
   upperEyelidCurvature: number
   lowerEyelidCurvature: number
+  /** 0-100: blends the curve's taper from today's pinched quartic bump (0) toward a wider,
+   * flatter-topped profile (100) that reads as a continuous rounded oval/egg arc instead of a
+   * single narrow peak — see eyelidCurvePoints() in drawEye.ts for the exact formula. Backward
+   * compatible: 0 reproduces the original formula exactly. */
+  upperEyelidRoundness: number
+  lowerEyelidRoundness: number
+  /** 0-100: compresses the taper into a narrower central portion (100 = today's full-width
+   * taper, lower = more pinched) — the inverse-direction complement to roundness, so together
+   * they cover the full range from "very narrow bump" to "very wide/flat" while always staying
+   * pinned to exactly zero at the eye's own flat-side edge (no new kinks possible). */
+  upperEyelidStretchX: number
+  lowerEyelidStretchX: number
+  /** 0-200%: multiplies the curve's vertical amplitude on top of curvature — a pure scale on
+   * offset, safe at any value since it never touches the taper's horizontal (x) domain. */
+  upperEyelidStretchY: number
+  lowerEyelidStretchY: number
+  /** -100 to 100: shifts the bump's peak left/right by biasing how much of the flat "plateau"
+   * (see roundness) sits on each side, giving an asymmetric lean instead of a centered peak. */
+  upperEyelidSkew: number
+  lowerEyelidSkew: number
+  /** Layers-panel visibility/lock for the Upper/Lower Eyelid layers — see the comment on
+   * eyeShapeVisible above. visible=false renders as if this lid's coverage were 0 without
+   * discarding the actual authored eyelid settings (a real, exported behavior). */
+  upperEyelidVisible: boolean
+  lowerEyelidVisible: boolean
+  upperEyelidLocked: boolean
+  lowerEyelidLocked: boolean
   highlightX: number
   highlightY: number
   highlightSize: number
@@ -51,6 +110,44 @@ export interface CustomPupilShape {
   points: [number, number][]
 }
 
+/** Built-in eye-outline silhouettes plus 'custom' (an imported SVG shape, referenced by
+ * EyeParams.eyeCustomShapeId). 'default' is today's existing rounded-rect/ellipse boundary —
+ * Circle, Oval, and Rounded Rectangle in the shape picker are all 'default' with preset
+ * width/height/radius values, exactly like pupilShape's circle/oval convenience (nothing new
+ * needed for those 3 beyond the picker UI). Every other value draws a shared normalized polygon
+ * from src/renderer/eyeShapes.ts — heart/star/diamond are the exact same point tables
+ * pupilShapes.ts already defines, reused as-is. */
+export type EyeShapeId =
+  | 'default'
+  | 'heart'
+  | 'star'
+  | 'diamond'
+  | 'hexagon'
+  | 'cloud'
+  | 'teardrop'
+  | 'leaf'
+  | 'bean'
+  | 'crescent'
+  | 'catEye'
+  | 'animeEye'
+  | 'robotEye'
+  | 'happyArc'
+  | 'custom'
+
+/** A user-imported eye shape, normalized to a [-1,1]-centered bounding box — same space and
+ * purpose as CustomPupilShape above, one level up (replaces the eye's own outer silhouette
+ * instead of just the pupil fill). `svgSource` preserves the original uploaded SVG text verbatim
+ * alongside the derived polygon — the polygon actually used for rendering/export is still a
+ * 48-point sample of the SVG's first closed path (same documented limitation CustomPupilShape
+ * already has), but the original vector source stays available rather than being discarded, the
+ * practical reading of "preserve vector quality" on a renderer with no vector rasterizer. */
+export interface CustomEyeShape {
+  id: string
+  name: string
+  points: [number, number][]
+  svgSource: string
+}
+
 export interface EyeColors {
   sclera: string
   iris: string
@@ -68,6 +165,17 @@ export interface EyeColors {
   /** Ring thickness in device pixels. Was a fixed constant (3px, matched between preview and
    * export) until the Visual Reference system made it an adjustable, shared style property. */
   borderWidth: number
+  /** 0-100: the eye shape's own opacity — no existing sclera opacity field to reuse (unlike Fill/
+   * Stroke Color, which the Eye Shape panel surfaces from sclera/border directly). Pre-blended
+   * against the background at export time, same pattern as pupilOpacity/borderOpacity. */
+  eyeShapeOpacity: number
+  /** Layers-panel visibility/lock for the Effects layer (glow+shadow together) — see the comment
+   * on EyeParams.eyeShapeVisible. visible=false renders as if glowIntensity/shadowIntensity were
+   * 0 without discarding their actual values (composes with the existing "0 = off" convention
+   * both already have in drawEye.ts/cppExport.ts). locked=true disables the Glow/Shadow controls
+   * in ColorPanel; never exported. */
+  effectsVisible: boolean
+  effectsLocked: boolean
 }
 
 export type DisplayShape = 'circle' | 'square' | 'rounded'
@@ -104,7 +212,9 @@ export const PUPIL_TRACK_FIELDS: (keyof EyeParams)[] = [
   'pupilY',
   'pupilRotation',
   'pupilShape',
-  'pupilCustomShapeId'
+  'pupilCustomShapeId',
+  'pupilVisible',
+  'pupilLocked'
 ]
 export const EYELID_TRACK_FIELDS: (keyof EyeParams)[] = [
   'upperEyelid',
@@ -112,7 +222,19 @@ export const EYELID_TRACK_FIELDS: (keyof EyeParams)[] = [
   'upperEyelidTilt',
   'lowerEyelidTilt',
   'upperEyelidCurvature',
-  'lowerEyelidCurvature'
+  'lowerEyelidCurvature',
+  'upperEyelidRoundness',
+  'lowerEyelidRoundness',
+  'upperEyelidStretchX',
+  'lowerEyelidStretchX',
+  'upperEyelidStretchY',
+  'lowerEyelidStretchY',
+  'upperEyelidSkew',
+  'lowerEyelidSkew',
+  'upperEyelidVisible',
+  'lowerEyelidVisible',
+  'upperEyelidLocked',
+  'lowerEyelidLocked'
 ]
 export const SHAPE_TRACK_FIELDS: (keyof EyeParams)[] = [
   'width',
@@ -124,7 +246,16 @@ export const SHAPE_TRACK_FIELDS: (keyof EyeParams)[] = [
   'irisHeight',
   'highlightX',
   'highlightY',
-  'highlightSize'
+  'highlightSize',
+  'eyeShape',
+  'eyeCustomShapeId',
+  'eyeShapeScale',
+  'eyeShapeOffsetX',
+  'eyeShapeOffsetY',
+  'eyeShapeFlipH',
+  'eyeShapeFlipV',
+  'eyeShapeVisible',
+  'eyeShapeLocked'
 ]
 
 export interface Keyframe {
@@ -346,8 +477,21 @@ export const STYLE_EYE_PARAM_FIELDS: (keyof EyeParams)[] = [
   'pupilHeight',
   'pupilShape',
   'pupilCustomShapeId',
+  'eyeShape',
+  'eyeCustomShapeId',
+  'eyeShapeScale',
+  'eyeShapeFlipH',
+  'eyeShapeFlipV',
   'upperEyelidCurvature',
   'lowerEyelidCurvature',
+  'upperEyelidRoundness',
+  'lowerEyelidRoundness',
+  'upperEyelidStretchX',
+  'lowerEyelidStretchX',
+  'upperEyelidStretchY',
+  'lowerEyelidStretchY',
+  'upperEyelidSkew',
+  'lowerEyelidSkew',
   'highlightX',
   'highlightY',
   'highlightSize'
@@ -370,7 +514,8 @@ export const STYLE_EYE_COLOR_FIELDS: (keyof EyeColors)[] = [
   'glowIntensity',
   'borderOpacity',
   'borderWidth',
-  'pupilOpacity'
+  'pupilOpacity',
+  'eyeShapeOpacity'
 ]
 
 export interface VisualReferenceStyle {
@@ -413,10 +558,11 @@ export function computeStyleOverrides(params: EyeParams, colors: EyeColors | nul
 
 /** Copies every Visual-Reference-eligible EyeParams field from `vr` into `target` EXCEPT
  * fields listed in `overrides` — mutates `target` in place (called from Immer producers).
- * Mostly-numeric fields, plus pupilShape/pupilCustomShapeId (string/string|null). */
+ * Mostly-numeric fields, plus pupilShape/pupilCustomShapeId/eyeShape/eyeCustomShapeId
+ * (string/string|null) and eyeShapeFlipH/eyeShapeFlipV (boolean). */
 export function applyStyleToParams(target: EyeParams, vr: EyeParams, overrides: string[]): void {
-  const t = target as unknown as Record<string, number | string | null>
-  const v = vr as unknown as Record<string, number | string | null>
+  const t = target as unknown as Record<string, number | string | boolean | null>
+  const v = vr as unknown as Record<string, number | string | boolean | null>
   for (const f of STYLE_EYE_PARAM_FIELDS) {
     if (!overrides.includes(f)) t[f] = v[f]
   }
@@ -606,6 +752,8 @@ export interface Project {
   visualReference: VisualReferenceStyle
   /** Reusable library of imported custom pupil shapes — see CustomPupilShape above. */
   customPupilShapes: CustomPupilShape[]
+  /** Reusable library of imported custom eye shapes — see CustomEyeShape above. */
+  customEyeShapes: CustomEyeShape[]
   /** Reusable library of sticker assets (built-ins seeded once, plus custom imports) — see
    * StickerAsset above. */
   stickerAssets: StickerAsset[]
@@ -668,12 +816,35 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   pupilRotation: 0,
   pupilShape: 'circle',
   pupilCustomShapeId: null,
+  pupilVisible: true,
+  pupilLocked: false,
+  eyeShape: 'default',
+  eyeCustomShapeId: null,
+  eyeShapeScale: 100,
+  eyeShapeOffsetX: 0,
+  eyeShapeOffsetY: 0,
+  eyeShapeFlipH: false,
+  eyeShapeFlipV: false,
+  eyeShapeVisible: true,
+  eyeShapeLocked: false,
   upperEyelid: 0,
   lowerEyelid: 0,
   upperEyelidTilt: 0,
   lowerEyelidTilt: 0,
   upperEyelidCurvature: 0,
   lowerEyelidCurvature: 0,
+  upperEyelidRoundness: 0,
+  lowerEyelidRoundness: 0,
+  upperEyelidStretchX: 100,
+  lowerEyelidStretchX: 100,
+  upperEyelidStretchY: 100,
+  lowerEyelidStretchY: 100,
+  upperEyelidSkew: 0,
+  lowerEyelidSkew: 0,
+  upperEyelidVisible: true,
+  lowerEyelidVisible: true,
+  upperEyelidLocked: false,
+  lowerEyelidLocked: false,
   highlightX: -18,
   highlightY: -18,
   highlightSize: 22
@@ -691,7 +862,10 @@ export const DEFAULT_EYE_COLORS: EyeColors = {
   glowIntensity: 25,
   borderOpacity: 5,
   borderWidth: 3,
-  pupilOpacity: 100
+  pupilOpacity: 100,
+  eyeShapeOpacity: 100,
+  effectsVisible: true,
+  effectsLocked: false
 }
 
 export const EYE_COLOR_RANGES = {
@@ -699,7 +873,8 @@ export const EYE_COLOR_RANGES = {
   glowIntensity: [0, 100] as [number, number],
   borderOpacity: [0, 100] as [number, number],
   borderWidth: [0, 12] as [number, number],
-  pupilOpacity: [0, 100] as [number, number]
+  pupilOpacity: [0, 100] as [number, number],
+  eyeShapeOpacity: [0, 100] as [number, number]
 }
 
 export function defaultVisualReference(): VisualReferenceStyle {
@@ -756,10 +931,30 @@ export const DEFAULT_TIMING: GlobalTiming = {
   breathingAmount: 20
 }
 
-// pupilShape/pupilCustomShapeId are deliberately excluded — they're not numeric-range fields
-// (see EyeParams.pupilShape's doc comment). The shape picker UI and jsonImport.ts's
-// isEyeParams() both branch around these two fields explicitly instead of reading a range.
-export const EYE_PARAM_RANGES: Record<Exclude<keyof EyeParams, 'pupilShape' | 'pupilCustomShapeId'>, [number, number]> = {
+// pupilShape/pupilCustomShapeId/eyeShape/eyeCustomShapeId are deliberately excluded — they're
+// not numeric-range fields (see EyeParams.pupilShape's doc comment). The boolean flip/visible/
+// locked fields are excluded for the same reason. The shape picker UI and jsonImport.ts's
+// isEyeParams() both branch around these fields explicitly instead of reading a range.
+export const EYE_PARAM_RANGES: Record<
+  Exclude<
+    keyof EyeParams,
+    | 'pupilShape'
+    | 'pupilCustomShapeId'
+    | 'pupilVisible'
+    | 'pupilLocked'
+    | 'eyeShape'
+    | 'eyeCustomShapeId'
+    | 'eyeShapeFlipH'
+    | 'eyeShapeFlipV'
+    | 'eyeShapeVisible'
+    | 'eyeShapeLocked'
+    | 'upperEyelidVisible'
+    | 'lowerEyelidVisible'
+    | 'upperEyelidLocked'
+    | 'lowerEyelidLocked'
+  >,
+  [number, number]
+> = {
   width: [20, 130],
   height: [20, 130],
   radius: [0, 130],
@@ -781,9 +976,20 @@ export const EYE_PARAM_RANGES: Record<Exclude<keyof EyeParams, 'pupilShape' | 'p
   lowerEyelidTilt: [-45, 45],
   upperEyelidCurvature: [-100, 100],
   lowerEyelidCurvature: [-100, 100],
+  upperEyelidRoundness: [0, 100],
+  lowerEyelidRoundness: [0, 100],
+  upperEyelidStretchX: [0, 100],
+  lowerEyelidStretchX: [0, 100],
+  upperEyelidStretchY: [0, 200],
+  lowerEyelidStretchY: [0, 200],
+  upperEyelidSkew: [-100, 100],
+  lowerEyelidSkew: [-100, 100],
   highlightX: [-40, 40],
   highlightY: [-40, 40],
-  highlightSize: [0, 60]
+  highlightSize: [0, 60],
+  eyeShapeScale: [50, 200],
+  eyeShapeOffsetX: [-30, 30],
+  eyeShapeOffsetY: [-30, 30]
 }
 
 // ---- Per-eye (Eye Target) helpers ------------------------------------------

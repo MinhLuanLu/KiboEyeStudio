@@ -252,6 +252,7 @@ export function analyzeEyeImage(imageData: ImageData): AnalysisResult {
       highlightSize: highlightSize > 1 ? highlightSize : 18
     },
     colors: {
+      ...DEFAULT_EYE_COLORS,
       sclera: rgbToHex(...scleraColorRgb),
       iris: irisHex,
       pupil: rgbToHex(...pupilColorRgb),
@@ -260,10 +261,7 @@ export function analyzeEyeImage(imageData: ImageData): AnalysisResult {
       glow: shadeColor(irisHex, 15),
       border: '#ffffff',
       shadowIntensity: 20,
-      glowIntensity: 20,
-      borderOpacity: DEFAULT_EYE_COLORS.borderOpacity,
-      borderWidth: DEFAULT_EYE_COLORS.borderWidth,
-      pupilOpacity: DEFAULT_EYE_COLORS.pupilOpacity
+      glowIntensity: 20
     }
   }
 }

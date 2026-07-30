@@ -100,6 +100,7 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     expressions,
     visualReference,
     customPupilShapes: [],
+    customEyeShapes: [],
     stickerAssets: [...BUILTIN_STICKER_ASSETS],
     stickers: [],
     uiDesign: createDefaultUiDesign()
@@ -246,6 +247,17 @@ interface StoreState {
    * id, so the caller can immediately select it via setEyeParam('pupilCustomShapeId', id). */
   addCustomPupilShape: (name: string, points: [number, number][]) => string
   deleteCustomPupilShape: (id: string) => void
+
+  // eye shapes
+  /** Same asset/instance split as addCustomPupilShape() above, one level up — appends a new
+   * custom eye shape (already-normalized [-1,1] points, plus the original SVG text) to the
+   * project's reusable library and returns its id. */
+  addCustomEyeShape: (name: string, points: [number, number][], svgSource: string) => string
+  /** Re-imports over an existing custom eye shape in place (same id, new points/svgSource) —
+   * "Allow replacing the imported SVG with another one" from the spec, so every EyeParams that
+   * already reference this id keep working without needing to re-select. */
+  replaceCustomEyeShape: (id: string, points: [number, number][], svgSource: string) => void
+  deleteCustomEyeShape: (id: string) => void
 
   // visual reference (shared style inheritance — see types/index.ts)
   setVisualReferenceParam: <K extends keyof EyeParams>(key: K, value: EyeParams[K]) => void
@@ -864,6 +876,31 @@ export const useStore = create<StoreState>()(
     deleteCustomPupilShape: (id) =>
       set((s) => {
         s.project.customPupilShapes = s.project.customPupilShapes.filter((shape) => shape.id !== id)
+        s.dirty = true
+      }),
+
+    addCustomEyeShape: (name, points, svgSource) => {
+      const id = nanoid(8)
+      set((s) => {
+        s.project.customEyeShapes.push({ id, name, points, svgSource })
+        s.dirty = true
+      })
+      return id
+    },
+
+    replaceCustomEyeShape: (id, points, svgSource) =>
+      set((s) => {
+        const shape = s.project.customEyeShapes.find((sh) => sh.id === id)
+        if (shape) {
+          shape.points = points
+          shape.svgSource = svgSource
+        }
+        s.dirty = true
+      }),
+
+    deleteCustomEyeShape: (id) =>
+      set((s) => {
+        s.project.customEyeShapes = s.project.customEyeShapes.filter((shape) => shape.id !== id)
         s.dirty = true
       }),
 

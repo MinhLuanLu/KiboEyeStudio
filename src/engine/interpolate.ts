@@ -21,9 +21,20 @@ const EYE_PARAM_KEYS = [
   'lowerEyelidTilt',
   'upperEyelidCurvature',
   'lowerEyelidCurvature',
+  'upperEyelidRoundness',
+  'lowerEyelidRoundness',
+  'upperEyelidStretchX',
+  'lowerEyelidStretchX',
+  'upperEyelidStretchY',
+  'lowerEyelidStretchY',
+  'upperEyelidSkew',
+  'lowerEyelidSkew',
   'highlightX',
   'highlightY',
-  'highlightSize'
+  'highlightSize',
+  'eyeShapeScale',
+  'eyeShapeOffsetX',
+  'eyeShapeOffsetY'
 ] as const satisfies readonly (keyof EyeParams)[]
 
 /** Shortest-path interpolation between two angles in degrees, wrapping through 0/360 rather
@@ -46,9 +57,23 @@ export function lerpParams(a: EyeParams, b: EyeParams, t: number): EyeParams {
   // instead (matches eyesLerpFrame()/eyesLerpLive() in cppExport.ts, so a keyframe transition
   // between two different pupil shapes snaps at the same instant in the studio preview and
   // the exported firmware). Everything else (size/position/rotation) keeps animating smoothly
-  // through the snap exactly as before.
+  // through the snap exactly as before. eyeShape/eyeCustomShapeId get the identical treatment,
+  // one level up; the boolean flip/visible/locked fields step the same way for the same reason
+  // (a boolean has no meaningful "halfway" value).
   out.pupilShape = t < 0.5 ? a.pupilShape : b.pupilShape
   out.pupilCustomShapeId = t < 0.5 ? a.pupilCustomShapeId : b.pupilCustomShapeId
+  out.eyeShape = t < 0.5 ? a.eyeShape : b.eyeShape
+  out.eyeCustomShapeId = t < 0.5 ? a.eyeCustomShapeId : b.eyeCustomShapeId
+  out.eyeShapeFlipH = t < 0.5 ? a.eyeShapeFlipH : b.eyeShapeFlipH
+  out.eyeShapeFlipV = t < 0.5 ? a.eyeShapeFlipV : b.eyeShapeFlipV
+  out.eyeShapeVisible = t < 0.5 ? a.eyeShapeVisible : b.eyeShapeVisible
+  out.eyeShapeLocked = t < 0.5 ? a.eyeShapeLocked : b.eyeShapeLocked
+  out.pupilVisible = t < 0.5 ? a.pupilVisible : b.pupilVisible
+  out.pupilLocked = t < 0.5 ? a.pupilLocked : b.pupilLocked
+  out.upperEyelidVisible = t < 0.5 ? a.upperEyelidVisible : b.upperEyelidVisible
+  out.lowerEyelidVisible = t < 0.5 ? a.lowerEyelidVisible : b.lowerEyelidVisible
+  out.upperEyelidLocked = t < 0.5 ? a.upperEyelidLocked : b.upperEyelidLocked
+  out.lowerEyelidLocked = t < 0.5 ? a.lowerEyelidLocked : b.lowerEyelidLocked
   return out
 }
 

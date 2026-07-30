@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { useStore, getActiveAnimation } from '@/state/store'
 import { effectiveEyeParams, effectiveVisualReferenceParams, EYE_PARAM_RANGES, DEFAULT_EYE_PARAMS } from '@/types'
-import type { EyeParams, PupilShapeId } from '@/types'
+import type { EyeParams, EyeShapeId, PupilShapeId } from '@/types'
 import { Slider } from '@/components/ui/Slider'
 import { EyeTargetSelector } from '@/components/ui/EyeTargetSelector'
 import { StyleFieldRow } from '@/components/ui/StyleFieldRow'
 import { PanelTabs } from '@/components/ui/PanelTabs'
 import { PupilShapePicker } from './PupilShapePicker'
+import { EyeShapePicker } from './EyeShapePicker'
 
 type ControlsTab = 'shape' | 'iris-pupil' | 'eyelids' | 'timing'
 
@@ -94,6 +95,23 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
     setParam('pupilHeight', DEFAULT_EYE_PARAMS.pupilHeight)
   }
 
+  const selectEyeShape = (shape: EyeShapeId, customShapeId: string | null) => {
+    setParam('eyeShape', shape)
+    setParam('eyeCustomShapeId', customShapeId)
+  }
+  const resetEyeShape = () => {
+    checkpoint()
+    selectEyeShape('default', null)
+    setParam('eyeShapeScale', DEFAULT_EYE_PARAMS.eyeShapeScale)
+    setParam('eyeShapeOffsetX', DEFAULT_EYE_PARAMS.eyeShapeOffsetX)
+    setParam('eyeShapeOffsetY', DEFAULT_EYE_PARAMS.eyeShapeOffsetY)
+    setParam('eyeShapeFlipH', DEFAULT_EYE_PARAMS.eyeShapeFlipH)
+    setParam('eyeShapeFlipV', DEFAULT_EYE_PARAMS.eyeShapeFlipV)
+    setParam('width', DEFAULT_EYE_PARAMS.width)
+    setParam('height', DEFAULT_EYE_PARAMS.height)
+    setParam('radius', DEFAULT_EYE_PARAMS.radius)
+  }
+
   // Inherited/Custom indicators compare `target` against the current Visual Reference —
   // always shown for live editing (keyframe, expression, AND the plain base pose with
   // nothing selected) so it's never ambiguous whether the base pose is actually in sync with
@@ -122,6 +140,20 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
     checkpoint()
     setParam('pupilShape', vrReference.pupilShape)
     setParam('pupilCustomShapeId', vrReference.pupilCustomShapeId)
+  }
+  const eyeShapeOverridden =
+    target.eyeShape !== vrReference.eyeShape ||
+    target.eyeCustomShapeId !== vrReference.eyeCustomShapeId ||
+    target.eyeShapeScale !== vrReference.eyeShapeScale ||
+    target.eyeShapeFlipH !== vrReference.eyeShapeFlipH ||
+    target.eyeShapeFlipV !== vrReference.eyeShapeFlipV
+  const resetEyeShapeStyle = () => {
+    checkpoint()
+    setParam('eyeShape', vrReference.eyeShape)
+    setParam('eyeCustomShapeId', vrReference.eyeCustomShapeId)
+    setParam('eyeShapeScale', vrReference.eyeShapeScale)
+    setParam('eyeShapeFlipH', vrReference.eyeShapeFlipH)
+    setParam('eyeShapeFlipV', vrReference.eyeShapeFlipV)
   }
 
   return (
@@ -155,20 +187,104 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
 
       <div className="flex-1 min-h-0 overflow-y-auto p-3">
         {tab === 'shape' && (
-          <Section title="Eye Shape">
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('width')} onReset={() => resetStyleField('width')}>
-              <Slider label="Eye Width" value={target.width} min={EYE_PARAM_RANGES.width[0]} max={EYE_PARAM_RANGES.width[1]} onCommitStart={checkpoint} onChange={(v) => setParam('width', v)} />
-            </StyleFieldRow>
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('height')} onReset={() => resetStyleField('height')}>
-              <Slider label="Eye Height" value={target.height} min={EYE_PARAM_RANGES.height[0]} max={EYE_PARAM_RANGES.height[1]} onCommitStart={checkpoint} onChange={(v) => setParam('height', v)} />
-            </StyleFieldRow>
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('radius')} onReset={() => resetStyleField('radius')}>
-              <Slider label="Eye Radius" value={target.radius} min={EYE_PARAM_RANGES.radius[0]} max={EYE_PARAM_RANGES.radius[1]} onCommitStart={checkpoint} onChange={(v) => setParam('radius', v)} />
-            </StyleFieldRow>
-            <Slider label="Eye Distance" value={target.distance} min={EYE_PARAM_RANGES.distance[0]} max={EYE_PARAM_RANGES.distance[1]} onCommitStart={checkpoint} onChange={(v) => setParam('distance', v)} />
-            <Slider label="Eye Rotation" value={target.rotation} min={EYE_PARAM_RANGES.rotation[0]} max={EYE_PARAM_RANGES.rotation[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('rotation', v)} />
-            {editTarget === 'visual-reference' && <PreviewOnlyNote />}
-          </Section>
+          <div className="flex flex-col gap-5">
+            <Section title="Eye Shape">
+              <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('width')} onReset={() => resetStyleField('width')}>
+                <Slider label="Eye Width" value={target.width} min={EYE_PARAM_RANGES.width[0]} max={EYE_PARAM_RANGES.width[1]} onCommitStart={checkpoint} onChange={(v) => setParam('width', v)} />
+              </StyleFieldRow>
+              <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('height')} onReset={() => resetStyleField('height')}>
+                <Slider label="Eye Height" value={target.height} min={EYE_PARAM_RANGES.height[0]} max={EYE_PARAM_RANGES.height[1]} onCommitStart={checkpoint} onChange={(v) => setParam('height', v)} />
+              </StyleFieldRow>
+              {target.eyeShape === 'default' && (
+                <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('radius')} onReset={() => resetStyleField('radius')}>
+                  <Slider label="Eye Radius" value={target.radius} min={EYE_PARAM_RANGES.radius[0]} max={EYE_PARAM_RANGES.radius[1]} onCommitStart={checkpoint} onChange={(v) => setParam('radius', v)} />
+                </StyleFieldRow>
+              )}
+              <Slider label="Eye Distance" value={target.distance} min={EYE_PARAM_RANGES.distance[0]} max={EYE_PARAM_RANGES.distance[1]} onCommitStart={checkpoint} onChange={(v) => setParam('distance', v)} />
+              <Slider label="Eye Rotation" value={target.rotation} min={EYE_PARAM_RANGES.rotation[0]} max={EYE_PARAM_RANGES.rotation[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('rotation', v)} />
+              {editTarget === 'visual-reference' && <PreviewOnlyNote />}
+            </Section>
+
+            <Section title="Eye Shape Library">
+              <StyleFieldRow active={!!editingContext} overridden={eyeShapeOverridden} onReset={resetEyeShapeStyle}>
+                <div className="flex flex-col gap-2">
+                  <EyeShapePicker
+                    shape={target.eyeShape}
+                    customShapeId={target.eyeCustomShapeId}
+                    currentWidth={target.width}
+                    currentHeight={target.height}
+                    currentRadius={target.radius}
+                    onSelectShape={selectEyeShape}
+                    onSelectDefaultPreset={(p) => {
+                      setParam('width', p.width)
+                      setParam('height', p.height)
+                      setParam('radius', p.radius)
+                    }}
+                  />
+                  <button className="studio-btn self-start text-xs" onClick={resetEyeShape}>
+                    Reset to Default
+                  </button>
+                </div>
+              </StyleFieldRow>
+
+              {target.eyeShape !== 'default' && (
+                <>
+                  <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('eyeShapeScale')} onReset={() => resetStyleField('eyeShapeScale')}>
+                    <Slider
+                      label="Shape Scale"
+                      value={target.eyeShapeScale}
+                      min={EYE_PARAM_RANGES.eyeShapeScale[0]}
+                      max={EYE_PARAM_RANGES.eyeShapeScale[1]}
+                      suffix="%"
+                      onCommitStart={checkpoint}
+                      onChange={(v) => setParam('eyeShapeScale', v)}
+                    />
+                  </StyleFieldRow>
+                  <Slider
+                    label="Shape Offset X"
+                    value={target.eyeShapeOffsetX}
+                    min={EYE_PARAM_RANGES.eyeShapeOffsetX[0]}
+                    max={EYE_PARAM_RANGES.eyeShapeOffsetX[1]}
+                    onCommitStart={checkpoint}
+                    onChange={(v) => setParam('eyeShapeOffsetX', v)}
+                  />
+                  <Slider
+                    label="Shape Offset Y"
+                    value={target.eyeShapeOffsetY}
+                    min={EYE_PARAM_RANGES.eyeShapeOffsetY[0]}
+                    max={EYE_PARAM_RANGES.eyeShapeOffsetY[1]}
+                    onCommitStart={checkpoint}
+                    onChange={(v) => setParam('eyeShapeOffsetY', v)}
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      className={`studio-btn text-xs flex-1 ${target.eyeShapeFlipH ? 'border-studio-accent text-studio-accent' : ''}`}
+                      onClick={() => {
+                        checkpoint()
+                        setParam('eyeShapeFlipH', !target.eyeShapeFlipH)
+                      }}
+                    >
+                      Flip Horizontal
+                    </button>
+                    <button
+                      className={`studio-btn text-xs flex-1 ${target.eyeShapeFlipV ? 'border-studio-accent text-studio-accent' : ''}`}
+                      onClick={() => {
+                        checkpoint()
+                        setParam('eyeShapeFlipV', !target.eyeShapeFlipV)
+                      }}
+                    >
+                      Flip Vertical
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-studio-muted">
+                    Fill Color and Stroke Color/Width for the eye shape are the same Sclera and Border controls on the
+                    Colors tab.
+                  </p>
+                </>
+              )}
+              {editTarget === 'visual-reference' && <PreviewOnlyNote />}
+            </Section>
+          </div>
         )}
 
         {tab === 'iris-pupil' && (
@@ -228,6 +344,30 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
             </StyleFieldRow>
             <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidCurvature')} onReset={() => resetStyleField('lowerEyelidCurvature')}>
               <Slider label="Lower Eyelid Curvature" value={target.lowerEyelidCurvature} min={EYE_PARAM_RANGES.lowerEyelidCurvature[0]} max={EYE_PARAM_RANGES.lowerEyelidCurvature[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidCurvature', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidRoundness')} onReset={() => resetStyleField('upperEyelidRoundness')}>
+              <Slider label="Upper Eyelid Roundness" value={target.upperEyelidRoundness} min={EYE_PARAM_RANGES.upperEyelidRoundness[0]} max={EYE_PARAM_RANGES.upperEyelidRoundness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidRoundness', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidRoundness')} onReset={() => resetStyleField('lowerEyelidRoundness')}>
+              <Slider label="Lower Eyelid Roundness" value={target.lowerEyelidRoundness} min={EYE_PARAM_RANGES.lowerEyelidRoundness[0]} max={EYE_PARAM_RANGES.lowerEyelidRoundness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidRoundness', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidStretchX')} onReset={() => resetStyleField('upperEyelidStretchX')}>
+              <Slider label="Upper Eyelid Stretch X" value={target.upperEyelidStretchX} min={EYE_PARAM_RANGES.upperEyelidStretchX[0]} max={EYE_PARAM_RANGES.upperEyelidStretchX[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidStretchX', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidStretchX')} onReset={() => resetStyleField('lowerEyelidStretchX')}>
+              <Slider label="Lower Eyelid Stretch X" value={target.lowerEyelidStretchX} min={EYE_PARAM_RANGES.lowerEyelidStretchX[0]} max={EYE_PARAM_RANGES.lowerEyelidStretchX[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidStretchX', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidStretchY')} onReset={() => resetStyleField('upperEyelidStretchY')}>
+              <Slider label="Upper Eyelid Stretch Y" value={target.upperEyelidStretchY} min={EYE_PARAM_RANGES.upperEyelidStretchY[0]} max={EYE_PARAM_RANGES.upperEyelidStretchY[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidStretchY', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidStretchY')} onReset={() => resetStyleField('lowerEyelidStretchY')}>
+              <Slider label="Lower Eyelid Stretch Y" value={target.lowerEyelidStretchY} min={EYE_PARAM_RANGES.lowerEyelidStretchY[0]} max={EYE_PARAM_RANGES.lowerEyelidStretchY[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidStretchY', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidSkew')} onReset={() => resetStyleField('upperEyelidSkew')}>
+              <Slider label="Upper Eyelid Skew" value={target.upperEyelidSkew} min={EYE_PARAM_RANGES.upperEyelidSkew[0]} max={EYE_PARAM_RANGES.upperEyelidSkew[1]} onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidSkew', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidSkew')} onReset={() => resetStyleField('lowerEyelidSkew')}>
+              <Slider label="Lower Eyelid Skew" value={target.lowerEyelidSkew} min={EYE_PARAM_RANGES.lowerEyelidSkew[0]} max={EYE_PARAM_RANGES.lowerEyelidSkew[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidSkew', v)} />
             </StyleFieldRow>
           </Section>
         )}

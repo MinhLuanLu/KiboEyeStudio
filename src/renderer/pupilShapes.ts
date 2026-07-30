@@ -45,6 +45,10 @@ const SQUARE: PupilPolygon = [
   [-1, 1]
 ]
 
+// Exported (not just DIAMOND/STAR/HEART below) so src/renderer/eyeShapes.ts can reuse these
+// exact same tables for the Eye Shape library's Diamond/Star/Heart entries — one definition,
+// shared by pupils and eye shapes alike, same "compute once" guarantee this module's own doc
+// comment describes for studio-vs-firmware.
 const DIAMOND: PupilPolygon = [
   [0, -1],
   [1, 0],
@@ -102,3 +106,5 @@ export const PUPIL_SHAPE_POLYGONS: Record<PupilShapeId, PupilPolygon | null> = {
   heart: HEART,
   custom: null
 }
+
+export { DIAMOND, STAR, HEART }

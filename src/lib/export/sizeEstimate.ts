@@ -6,13 +6,14 @@ import { collectAnimationBreakpoints } from './cppExport'
 // padding: 3x uint8 + 1x int8 + 1x uint8 + 2x uint8 (irisWidth/Height) + 2x uint8
 // (pupilWidth/Height) + 2x int8 (pupilX/Y) = 11 bytes, then uint16 pupilRotation needs
 // 2-byte alignment so 1 pad byte is inserted (-> offset 12) + 2 bytes = 14, + 2x uint8
-// (eyelids) + 2x int8 (eyelid tilt) + 2x int8 (eyelid curvature) + 2x int8 (highlight X/Y)
-// + 1x uint8 (highlightSize) = 23 (all packed tightly, no further padding since offset 14
-// was already 2-byte aligned), then uint16 durationMs needs 2-byte alignment so 1 more pad
-// byte (-> offset 24) + 2 bytes = 26, + uint8 easing + 4x int8 bezier = 31, + uint8 pupilShape
-// + uint8 pupilCustomShapeIndex = 33, rounded up to 34 for the struct's own 2-byte alignment
-// (from its uint16 members).
-const EYE_FRAME_BYTES = 34
+// (eyelids) + 2x int8 (eyelid tilt) + 2x int8 (eyelid curvature) + 2x uint8 (eyelid
+// roundness) + 2x uint8 (eyelid stretchX) + 2x uint8 (eyelid stretchY) + 2x int8 (eyelid
+// skew) + 2x int8 (highlight X/Y) + 1x uint8 (highlightSize) = 31 (all packed tightly, no
+// further padding since offset 14 was already 2-byte aligned), then uint16 durationMs needs
+// 2-byte alignment so 1 more pad byte (-> offset 32) + 2 bytes = 34, + uint8 easing + 4x int8
+// bezier = 39, + uint8 pupilShape + uint8 pupilCustomShapeIndex = 41, rounded up to 42 for
+// the struct's own 2-byte alignment (from its uint16 members).
+const EYE_FRAME_BYTES = 42
 
 // Pupil Shapes section flash cost (see exportPupilShapes() in cppExport.ts) — separate from
 // EYE_FRAME_BYTES since it's per-project, not per-keyframe: the 5 built-in shape tables
@@ -20,6 +21,13 @@ const EYE_FRAME_BYTES = 34
 // points each; each custom SVG import adds one more table at a fixed 48 points.
 const BUILTIN_PUPIL_SHAPE_TABLE_BYTES = 400
 const CUSTOM_PUPIL_SHAPE_TABLE_BYTES = 48 * 2
+
+// Same purpose as the pupil-shape constants above, one level up — 13 built-in eye-shape point
+// tables (heart/star/diamond reuse the pupil ones at runtime but still get their own emitted
+// eye-shape table, since firmware indexes them via a separate EyeShapeId enum) plus a per-
+// custom-import term.
+const BUILTIN_EYE_SHAPE_TABLE_BYTES = 1040
+const CUSTOM_EYE_SHAPE_TABLE_BYTES = 48 * 2
 
 // Matches sizeof(StickerDef) from cppExport.ts's struct (see exportStickers()), with typical
 // compiler padding: the largest members are the two uint32 fields (startTimeMs/endTimeMs,
@@ -66,6 +74,7 @@ export function estimateProjectSize(project: Project): SizeEstimate {
   }, 0)
   const keyframeCount = animationFrameCount + expressionFrameCount
   const pupilShapeBytes = BUILTIN_PUPIL_SHAPE_TABLE_BYTES + project.customPupilShapes.length * CUSTOM_PUPIL_SHAPE_TABLE_BYTES
+  const eyeShapeBytes = BUILTIN_EYE_SHAPE_TABLE_BYTES + project.customEyeShapes.length * CUSTOM_EYE_SHAPE_TABLE_BYTES
 
   // Mirrors exportStickers()'s own "every scope's visible stickers, raster assets deduped by
   // id across all of them" logic in cppExport.ts, so this estimate matches what actually gets
@@ -95,7 +104,7 @@ export function estimateProjectSize(project: Project): SizeEstimate {
   }
   const stickerBytes = visibleStickers.length * STICKER_DEF_BYTES + stickerRasterBytes
 
-  const flashBytes = keyframeCount * EYE_FRAME_BYTES + pupilShapeBytes + stickerBytes
+  const flashBytes = keyframeCount * EYE_FRAME_BYTES + pupilShapeBytes + eyeShapeBytes + stickerBytes
   // Rough RAM estimate: one "current" and one "target" EyeFrame plus small player state,
   // since PROGMEM data itself doesn't consume RAM until copied out frame-by-frame.
   const ramBytes = EYE_FRAME_BYTES * 2 + 64

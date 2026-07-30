@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid'
 import type {
   Animation,
+  CustomEyeShape,
   CustomPupilShape,
   EasingType,
   EditorState,
@@ -304,6 +305,26 @@ function normalizeCustomPupilShapes(raw: unknown): CustomPupilShape[] {
   })
 }
 
+/** Same purpose/shape as normalizeCustomPupilShapes above, one level up, for
+ * project.customEyeShapes — backfills saves written before the eye shape feature existed and
+ * drops malformed entries. svgSource defaults to '' for older/hand-edited entries missing it
+ * (the derived `points` are what rendering/export actually use). */
+function normalizeCustomEyeShapes(raw: unknown): CustomEyeShape[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((s): s is Omit<CustomEyeShape, 'svgSource'> & { svgSource?: unknown } => {
+      return (
+        !!s &&
+        typeof s === 'object' &&
+        typeof s.id === 'string' &&
+        typeof s.name === 'string' &&
+        Array.isArray(s.points) &&
+        s.points.every((p: unknown) => Array.isArray(p) && p.length === 2 && typeof p[0] === 'number' && typeof p[1] === 'number')
+      )
+    })
+    .map((s) => ({ ...s, svgSource: typeof s.svgSource === 'string' ? s.svgSource : '' }))
+}
+
 /** Backfills project.uiDesign for saves written before UI Design Mode existed, and drops any
  * individually malformed widget/screen/css-rule/asset entries (lenient like the other
  * normalize* helpers) rather than letting a hand-edited file crash the workspace. Falls back
@@ -509,6 +530,7 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     expressions,
     visualReference,
     customPupilShapes: normalizeCustomPupilShapes(raw.customPupilShapes),
+    customEyeShapes: normalizeCustomEyeShapes(raw.customEyeShapes),
     stickerAssets: normalizeStickerAssets((raw as unknown as Record<string, unknown>).stickerAssets),
     stickers: normalizeStickerInstances((raw as unknown as Record<string, unknown>).stickers),
     uiDesign: normalizeUiDesign((raw as unknown as Record<string, unknown>).uiDesign)

@@ -1,4 +1,4 @@
-import type { CustomPupilShape, EyeParams, StickerAsset, StickerInstance } from '@/types'
+import type { CustomEyeShape, CustomPupilShape, EyeParams, StickerAsset, StickerInstance } from '@/types'
 import { applyDisplayMask, drawBezel, type DisplayMaskOptions } from './displayMask'
 import { drawEye, DEFAULT_EYE_THEME, type EyeTheme } from './drawEye'
 import { drawSticker } from './drawSticker'
@@ -15,6 +15,11 @@ export interface FaceRenderOptions extends DisplayMaskOptions {
    * is 'custom'. Omit (defaults to []) wherever a custom pupil shape can't apply — drawEye
    * falls back to a circle for 'custom' with no match, so this is safe to leave out. */
   customShapes?: CustomPupilShape[]
+  /** project.customEyeShapes — resolved by eyeCustomShapeId when either eye's eyeShape is
+   * 'custom'. Omit (defaults to []) wherever a custom eye shape can't apply — drawEye falls
+   * back to the default rounded-rect boundary for 'custom' with no match, so this is safe to
+   * leave out. */
+  customEyeShapes?: CustomEyeShape[]
   /** Stickers to draw this frame — already merged/sorted by layer+order, see
    * effectiveStickers() in types/index.ts. Omit for no stickers. */
   stickers?: StickerInstance[]
@@ -40,6 +45,7 @@ export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, opt
     rightParams = params,
     rightTheme = theme,
     customShapes = [],
+    customEyeShapes = [],
     stickers = [],
     stickerAssets = [],
     stickerElapsedMs = 0
@@ -70,12 +76,12 @@ export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, opt
 
   ctx.save()
   ctx.translate(cx - halfLeft, cy)
-  drawEye(ctx, params, theme, false, backgroundColor, customShapes)
+  drawEye(ctx, params, theme, false, backgroundColor, customShapes, customEyeShapes)
   ctx.restore()
 
   ctx.save()
   ctx.translate(cx + halfRight, cy)
-  drawEye(ctx, rightParams, rightTheme, true, backgroundColor, customShapes)
+  drawEye(ctx, rightParams, rightTheme, true, backgroundColor, customShapes, customEyeShapes)
   ctx.restore()
 
   drawLayer('front')
