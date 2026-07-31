@@ -430,14 +430,26 @@ interface StoreState {
    * selected/active just means there's nowhere to add a sticker yet (UI should disable Add). */
   stickerScope: StickerScope
   selectedStickerId: string | null
+  /** Ephemeral copy/paste clipboard for copySticker()/pasteSticker() — never saved to the
+   * project, same convention as devModeOpen/esp32PreviewMode above. */
+  stickerClipboard: StickerInstance | null
   setStickerScope: (scope: StickerScope) => void
   selectSticker: (id: string | null) => void
   addSticker: (assetId: string, layer?: StickerLayer) => string | null
   duplicateSticker: (id: string) => string | null
   deleteSticker: (id: string) => void
   updateSticker: (id: string, partial: Partial<StickerInstance>) => void
+  renameSticker: (id: string, name: string) => void
   setStickerVisible: (id: string, visible: boolean) => void
   setStickerLocked: (id: string, locked: boolean) => void
+  /** In-memory only (not persisted) — copies one sticker's full settings so pasteSticker()
+   * can drop an identical instance into whichever scope is active when Paste is clicked,
+   * including a different scope/expression than the one it was copied from. */
+  copySticker: (id: string) => void
+  /** Pastes the last copySticker() sticker into the current scope's list, with a new id (and
+   * trackId reset — a pasted sticker starts ungrouped even if the original was on a track,
+   * since that track may not exist in this scope). No-op if nothing has been copied. */
+  pasteSticker: () => string | null
   /** Swaps this sticker's `order` with its neighbor in the same direction, within its own
    * layer only — matches the Sticker Manager's "reorder within the same layer" list. */
   moveStickerOrder: (id: string, direction: 'up' | 'down') => void
@@ -694,6 +706,7 @@ export const useStore = create<StoreState>()(
 
     stickerScope: 'project',
     selectedStickerId: null,
+    stickerClipboard: null,
     selectedWidgetId: null,
     uiPreviewDisplayOverride: null,
 
@@ -1963,7 +1976,8 @@ export const useStore = create<StoreState>()(
           y: 0,
           width: 48,
           height: 48,
-          scale: 100,
+          scaleX: 100,
+          scaleY: 100,
           rotation: 0,
           opacity: 100,
           tint: null,
@@ -2004,7 +2018,8 @@ export const useStore = create<StoreState>()(
           y: 0,
           width: 48,
           height: 48,
-          scale: 100,
+          scaleX: 100,
+          scaleY: 100,
           rotation: 0,
           opacity: 100,
           tint: null,
@@ -2056,6 +2071,38 @@ export const useStore = create<StoreState>()(
         Object.assign(owner.list[owner.index], partial)
         s.dirty = true
       }),
+
+    renameSticker: (id, name) =>
+      set((s) => {
+        const owner = findStickerOwner(s.project, id)
+        const trimmed = name.trim()
+        if (owner && trimmed) owner.list[owner.index].name = trimmed
+        s.dirty = true
+      }),
+
+    copySticker: (id) =>
+      set((s) => {
+        const owner = findStickerOwner(s.project, id)
+        if (!owner) return
+        s.stickerClipboard = JSON.parse(JSON.stringify(owner.list[owner.index]))
+      }),
+
+    pasteSticker: () => {
+      const newId = nanoid(8)
+      let added = false
+      set((s) => {
+        const clipboard = s.stickerClipboard
+        if (!clipboard) return
+        const list = resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
+        if (!list) return
+        const order = list.filter((st) => st.layer === clipboard.layer).length
+        list.push({ ...JSON.parse(JSON.stringify(clipboard)), id: newId, trackId: '', order })
+        s.selectedStickerId = newId
+        s.dirty = true
+        added = true
+      })
+      return added ? newId : null
+    },
 
     setStickerVisible: (id, visible) =>
       set((s) => {

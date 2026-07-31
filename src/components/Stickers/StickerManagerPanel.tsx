@@ -50,6 +50,10 @@ export function StickerManagerPanel() {
   const addSticker = useStore((s) => s.addSticker)
   const duplicateSticker = useStore((s) => s.duplicateSticker)
   const deleteSticker = useStore((s) => s.deleteSticker)
+  const renameSticker = useStore((s) => s.renameSticker)
+  const stickerClipboard = useStore((s) => s.stickerClipboard)
+  const copySticker = useStore((s) => s.copySticker)
+  const pasteSticker = useStore((s) => s.pasteSticker)
   const setStickerVisible = useStore((s) => s.setStickerVisible)
   const setStickerLocked = useStore((s) => s.setStickerLocked)
   const moveStickerOrder = useStore((s) => s.moveStickerOrder)
@@ -61,6 +65,8 @@ export function StickerManagerPanel() {
   const [dragId, setDragId] = useState<string | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
   const [justImportedId, setJustImportedId] = useState<string | null>(null)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [nameDraft, setNameDraft] = useState('')
   const pngInputRef = useRef<HTMLInputElement>(null)
   const gifInputRef = useRef<HTMLInputElement>(null)
   const svgInputRef = useRef<HTMLInputElement>(null)
@@ -156,6 +162,18 @@ export function StickerManagerPanel() {
             + Add to {scopeLabel}
           </button>
         </div>
+        <button
+          className="studio-btn text-xs self-start"
+          disabled={!canAddToScope || !stickerClipboard}
+          title={stickerClipboard ? `Paste "${stickerClipboard.name}" into the current ${scopeLabel.toLowerCase()}` : 'Copy a sticker first'}
+          onClick={() => {
+            checkpoint()
+            const id = pasteSticker()
+            if (id) selectSticker(id)
+          }}
+        >
+          Paste{stickerClipboard ? ` "${stickerClipboard.name}"` : ''}
+        </button>
 
         <div className="flex flex-col gap-1">
           <span className="studio-label">Drag onto a Timeline sticker track</span>
@@ -277,7 +295,31 @@ export function StickerManagerPanel() {
             >
               <StickerThumb asset={asset} />
               <div className="flex-1 min-w-0">
-                <div className="text-xs truncate">{inst.name}</div>
+                {renamingId === inst.id ? (
+                  <input
+                    autoFocus
+                    className="text-xs bg-studio-panel border border-studio-accent rounded px-1 w-full"
+                    value={nameDraft}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setNameDraft(e.target.value)}
+                    onBlur={() => {
+                      if (nameDraft.trim()) { checkpoint(); renameSticker(inst.id, nameDraft.trim()) }
+                      setRenamingId(null)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                      if (e.key === 'Escape') setRenamingId(null)
+                    }}
+                  />
+                ) : (
+                  <div
+                    className="text-xs truncate"
+                    title="Double-click to rename"
+                    onDoubleClick={(e) => { e.stopPropagation(); setNameDraft(inst.name); setRenamingId(inst.id) }}
+                  >
+                    {inst.name}
+                  </div>
+                )}
                 <div className="flex items-center gap-1 text-[10px] text-studio-muted">
                   <span className="px-1 rounded bg-studio-panel border border-studio-border">{inst.layer === 'behind' ? 'Behind' : 'Front'}</span>
                   <span className="px-1 rounded bg-studio-panel border border-studio-border">{animated ? 'Animated' : 'Static'}</span>
@@ -311,6 +353,13 @@ export function StickerManagerPanel() {
                   onClick={(e) => { e.stopPropagation(); checkpoint(); setStickerLocked(inst.id, !inst.locked) }}
                 >
                   {inst.locked ? '🔒' : '🔓'}
+                </button>
+                <button
+                  title="Copy"
+                  className="text-studio-muted hover:text-studio-text text-xs px-1"
+                  onClick={(e) => { e.stopPropagation(); copySticker(inst.id) }}
+                >
+                  ⧉📋
                 </button>
                 <button
                   title="Duplicate"

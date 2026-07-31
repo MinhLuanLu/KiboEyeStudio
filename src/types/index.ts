@@ -679,9 +679,11 @@ export interface StickerInstance {
   y: number
   width: number
   height: number
-  /** % multiplier applied on top of width/height, default 100 — a separate control from
-   * width/height per the spec's explicit "width, height, scale" wording. */
-  scale: number
+  /** % multipliers applied on top of width/height, default 100 each — a separate control from
+   * width/height per the spec's explicit "width, height, scale" wording. Independent X/Y so a
+   * sticker can be stretched non-uniformly; set both the same for a uniform scale. */
+  scaleX: number
+  scaleY: number
   rotation: number
   opacity: number
   /** null = the asset's native colors/frames, unmodified. */

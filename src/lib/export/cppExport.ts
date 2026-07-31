@@ -664,7 +664,8 @@ function stickerDefLiteral(s: StickerInstance, asset: StickerAsset | undefined, 
     Math.round(s.y),
     Math.max(0, Math.round(s.width)),
     Math.max(0, Math.round(s.height)),
-    Math.max(0, Math.round(s.scale)),
+    Math.max(0, Math.round(s.scaleX)),
+    Math.max(0, Math.round(s.scaleY)),
     Math.round(s.rotation),
     Math.max(0, Math.min(100, Math.round(s.opacity))),
     toRgb565Hex(s.tint ?? '#ffffff'),
@@ -769,7 +770,7 @@ function exportStickers(project: Project): { code: string; assetsById: Map<strin
     '  uint8_t layer;       // StickerLayerId',
     '  int16_t x, y;',
     '  uint16_t width, height;',
-    '  uint16_t scale;      // %',
+    '  uint16_t scaleX, scaleY; // %, independent -- non-uniform sticker scale',
     '  int16_t rotation;    // degrees, base (before spin)',
     '  uint8_t opacity;     // 0-100, base (before fade/pulse) — see the visibility-threshold comment above',
     '  uint16_t tintColor;  // RGB565 — procedural only, see comment above',
@@ -828,7 +829,7 @@ function exportStickers(project: Project): { code: string; assetsById: Map<strin
   lines.push(`const uint8_t STICKER_RASTER_ASSET_COUNT = ${usedRasterAssets.length};`)
   lines.push('')
 
-  lines.push('// kind, assetIndex, layer, x, y, width, height, scale, rotation, opacity, tintColor,')
+  lines.push('// kind, assetIndex, layer, x, y, width, height, scaleX, scaleY, rotation, opacity, tintColor,')
   lines.push('// flipH, flipV, animSpeed, animFps, startDelayMs, loopMode, reverse, fadeInMs, fadeOutMs,')
   lines.push('// startTimeMs, endTimeMs, driftX, driftY, spin, pulseScale, pulseOpacity')
   lines.push('// Project-wide stickers — always visible. Each Expression/Animation below exports its own')
@@ -2254,13 +2255,15 @@ inline StickerLive eyesComputeStickerLive(const StickerDef& s, unsigned long ela
   // against whatever's already drawn beneath it).
   if (opacity < 35.0f) return live;
 
-  float scale = s.scale / 100.0f;
+  float pulseMul = 1.0f;
   if (s.pulseScale > 0) {
     float pulse = sinf(tSec * 2.0f * (float)PI);
-    scale *= 1.0f + (s.pulseScale / 100.0f) * 0.3f * pulse;
+    pulseMul = 1.0f + (s.pulseScale / 100.0f) * 0.3f * pulse;
   }
-  live.rx = (int16_t)roundf((s.width / 2.0f) * scale) * (s.flipH ? -1 : 1);
-  live.ry = (int16_t)roundf((s.height / 2.0f) * scale) * (s.flipV ? -1 : 1);
+  float scaleX = (s.scaleX / 100.0f) * pulseMul;
+  float scaleY = (s.scaleY / 100.0f) * pulseMul;
+  live.rx = (int16_t)roundf((s.width / 2.0f) * scaleX) * (s.flipH ? -1 : 1);
+  live.ry = (int16_t)roundf((s.height / 2.0f) * scaleY) * (s.flipV ? -1 : 1);
   live.cx = s.x + (int16_t)roundf(s.driftX * tSec);
   live.cy = s.y + (int16_t)roundf(s.driftY * tSec);
   live.rotationDeg = s.rotation + s.spin * tSec;

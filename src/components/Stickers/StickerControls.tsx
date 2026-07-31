@@ -55,7 +55,8 @@ export function StickerControls({ sticker }: { sticker: StickerInstance }) {
         <Slider label="Y" value={sticker.y} min={-160} max={160} onCommitStart={checkpoint} onChange={(v) => set('y', v)} />
         <Slider label="Width" value={sticker.width} min={4} max={240} onCommitStart={checkpoint} onChange={(v) => set('width', v)} />
         <Slider label="Height" value={sticker.height} min={4} max={240} onCommitStart={checkpoint} onChange={(v) => set('height', v)} />
-        <Slider label="Scale" value={sticker.scale} min={10} max={300} suffix="%" onCommitStart={checkpoint} onChange={(v) => set('scale', v)} />
+        <Slider label="Scale X" value={sticker.scaleX} min={10} max={300} suffix="%" onCommitStart={checkpoint} onChange={(v) => set('scaleX', v)} />
+        <Slider label="Scale Y" value={sticker.scaleY} min={10} max={300} suffix="%" onCommitStart={checkpoint} onChange={(v) => set('scaleY', v)} />
         <Slider label="Rotation" value={sticker.rotation} min={-180} max={180} suffix="°" onCommitStart={checkpoint} onChange={(v) => set('rotation', v)} />
         <Slider label="Opacity" value={sticker.opacity} min={0} max={100} suffix="%" onCommitStart={checkpoint} onChange={(v) => set('opacity', v)} />
         <div className="flex items-center justify-between">

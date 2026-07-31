@@ -223,8 +223,8 @@ export function PreviewCanvas() {
     const candidates = [...lastStickersRef.current].sort((a, b) => (a.layer === b.layer ? 0 : a.layer === 'front' ? -1 : 1))
     for (const s of candidates) {
       if (!s.visible || s.locked) continue
-      const hw = (s.width / 2) * (s.scale / 100)
-      const hh = (s.height / 2) * (s.scale / 100)
+      const hw = (s.width / 2) * (s.scaleX / 100)
+      const hh = (s.height / 2) * (s.scaleY / 100)
       if (x >= s.x - hw && x <= s.x + hw && y >= s.y - hh && y <= s.y + hh) return s
     }
     return null

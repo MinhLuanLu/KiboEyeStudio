@@ -133,7 +133,10 @@ export function normalizeStickerInstances(raw: unknown): StickerInstance[] {
       y: typeof r.y === 'number' ? r.y : 0,
       width: typeof r.width === 'number' ? r.width : 48,
       height: typeof r.height === 'number' ? r.height : 48,
-      scale: typeof r.scale === 'number' ? r.scale : 100,
+      // Migrates old saved projects (single uniform `scale`) into scaleX/scaleY — falls back to
+      // 100 only when neither the new nor the old field is present.
+      scaleX: typeof r.scaleX === 'number' ? r.scaleX : typeof r.scale === 'number' ? r.scale : 100,
+      scaleY: typeof r.scaleY === 'number' ? r.scaleY : typeof r.scale === 'number' ? r.scale : 100,
       rotation: typeof r.rotation === 'number' ? r.rotation : 0,
       opacity: typeof r.opacity === 'number' ? r.opacity : 100,
       tint: typeof r.tint === 'string' ? r.tint : null,

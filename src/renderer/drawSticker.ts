@@ -105,12 +105,14 @@ export function drawSticker(ctx: CanvasRenderingContext2D, instance: StickerInst
   const liveRotation = instance.rotation + anim.spin * tSec
   const pulseScale = 1 + (anim.pulseScale / 100) * Math.sin(tSec * PULSE_HZ * Math.PI * 2)
   const pulseOpacityMul = 1 + (anim.pulseOpacity / 100) * Math.sin(tSec * PULSE_HZ * Math.PI * 2 + 1) // phase-offset from scale so they don't lock in sync
-  const liveScale = (instance.scale / 100) * Math.max(0, pulseScale)
+  const pulseScaleClamped = Math.max(0, pulseScale)
+  const liveScaleX = (instance.scaleX / 100) * pulseScaleClamped
+  const liveScaleY = (instance.scaleY / 100) * pulseScaleClamped
   const liveOpacity = Math.max(0, Math.min(1, (instance.opacity / 100) * Math.max(0, pulseOpacityMul))) * alpha
   if (liveOpacity <= 0.002) return
 
-  const hw = (instance.width / 2) * liveScale
-  const hh = (instance.height / 2) * liveScale
+  const hw = (instance.width / 2) * liveScaleX
+  const hh = (instance.height / 2) * liveScaleY
   if (hw <= 0 || hh <= 0) return
 
   ctx.save()
