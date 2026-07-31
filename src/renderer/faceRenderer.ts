@@ -28,6 +28,10 @@ export interface FaceRenderOptions extends DisplayMaskOptions {
   /** Elapsed ms since the active expression/animation started — drives sticker drift/spin/
    * pulse/fade and raster frame playback. Ignored if `stickers` is omitted/empty. */
   stickerElapsedMs?: number
+  /** ESP32 Export Preview mode — see drawEye()'s own `firmwareSim` param for exactly what this
+   * changes (RGB565 color quantization, ring-stepped iris/glow). Defaults to false (normal
+   * studio rendering). */
+  firmwareSim?: boolean
 }
 
 /** Renders the full display face onto a `width`x`height` canvas: background fill, shape
@@ -48,7 +52,8 @@ export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, opt
     customEyeShapes = [],
     stickers = [],
     stickerAssets = [],
-    stickerElapsedMs = 0
+    stickerElapsedMs = 0,
+    firmwareSim = false
   } = options
   applyDisplayMask(ctx, options)
 
@@ -76,12 +81,12 @@ export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, opt
 
   ctx.save()
   ctx.translate(cx - halfLeft, cy)
-  drawEye(ctx, params, theme, false, backgroundColor, customShapes, customEyeShapes)
+  drawEye(ctx, params, theme, false, backgroundColor, customShapes, customEyeShapes, firmwareSim)
   ctx.restore()
 
   ctx.save()
   ctx.translate(cx + halfRight, cy)
-  drawEye(ctx, rightParams, rightTheme, true, backgroundColor, customShapes, customEyeShapes)
+  drawEye(ctx, rightParams, rightTheme, true, backgroundColor, customShapes, customEyeShapes, firmwareSim)
   ctx.restore()
 
   drawLayer('front')

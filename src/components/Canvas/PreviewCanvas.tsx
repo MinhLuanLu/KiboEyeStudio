@@ -174,7 +174,8 @@ export function PreviewCanvas() {
         customEyeShapes: state.project.customEyeShapes,
         stickers,
         stickerAssets: state.project.stickerAssets,
-        stickerElapsedMs
+        stickerElapsedMs,
+        firmwareSim: state.esp32PreviewMode
       })
 
       const fpsAccum = fpsAccumRef.current

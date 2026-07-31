@@ -198,6 +198,11 @@ interface StoreState {
 
   devModeOpen: boolean
   devStats: DevStats
+  /** ESP32 Export Preview — swaps the live canvas to drawEye()'s `firmwareSim` mode (RGB565
+   * color quantization, ring-stepped iris/glow) so the user can compare against normal studio
+   * rendering before compiling. Ephemeral UI state, not part of the saved project, same as
+   * devModeOpen above. */
+  esp32PreviewMode: boolean
   exportDialogOpen: boolean
   /** Separate from exportDialogOpen — UI Design Mode's own LVGL export dialog is a distinct
    * component (LvglExportDialog.tsx), not a tab within the Eye Studio ExportDialog, matching
@@ -410,6 +415,7 @@ interface StoreState {
 
   // dev mode
   toggleDevMode: () => void
+  toggleEsp32Preview: () => void
   setDevStats: (stats: DevStats) => void
   setExportDialogOpen: (open: boolean) => void
   setLvglExportDialogOpen: (open: boolean) => void
@@ -696,6 +702,7 @@ export const useStore = create<StoreState>()(
     playbackTimeMs: 0,
 
     devModeOpen: false,
+    esp32PreviewMode: false,
     devStats: { fps: 0, frame: 0, timeMs: 0 },
     exportDialogOpen: false,
     lvglExportDialogOpen: false,
@@ -1906,6 +1913,7 @@ export const useStore = create<StoreState>()(
       }),
 
     toggleDevMode: () => set((s) => void (s.devModeOpen = !s.devModeOpen)),
+    toggleEsp32Preview: () => set((s) => void (s.esp32PreviewMode = !s.esp32PreviewMode)),
     setDevStats: (stats) => set((s) => void (s.devStats = stats)),
     setExportDialogOpen: (open) => set((s) => void (s.exportDialogOpen = open)),
     setLvglExportDialogOpen: (open) => set((s) => void (s.lvglExportDialogOpen = open)),

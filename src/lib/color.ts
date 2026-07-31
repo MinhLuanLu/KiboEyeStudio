@@ -48,3 +48,21 @@ export function hexToRgb565(hex: string): number {
   const [r, g, b] = hexToRgb(hex)
   return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
 }
+
+/** Rounds a color to the nearest color the real RGB565 display can actually show (5 bits red,
+ * 6 green, 5 blue) and expands it back to 24-bit for Canvas 2D — the visible color-banding
+ * effect of exporting to firmware, used by the ESP32 Export Preview mode (drawEye.ts's
+ * `firmwareSim` flag) so studio colors read the same as they will on real hardware instead of
+ * the studio's own full 24-bit palette. Bit-replication (not zero-padding) expansion, the
+ * standard RGB565->RGB888 technique, so pure white/black round-trip exactly instead of coming
+ * back slightly grey. */
+export function quantizeToRgb565(hex: string): string {
+  const [r, g, b] = hexToRgb(hex)
+  const r5 = r >> 3
+  const g6 = g >> 2
+  const b5 = b >> 3
+  const r8 = (r5 << 3) | (r5 >> 2)
+  const g8 = (g6 << 2) | (g6 >> 4)
+  const b8 = (b5 << 3) | (b5 >> 2)
+  return rgbToHex(r8, g8, b8)
+}

@@ -10,7 +10,8 @@
     "build": "tsc --noEmit && electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
-    "dist": "electron-vite build && electron-builder"
+    "dist": "electron-vite build && electron-builder",
+    "verify:eye-geometry": "npx tsx scripts/verifyEyeGeometryParity.ts"
   },
   "dependencies": {
     "acorn": "^8.18.0",

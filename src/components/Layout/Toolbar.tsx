@@ -25,6 +25,8 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
   const toggleDevMode = useStore((s) => s.toggleDevMode)
   const showBezel = useStore((s) => s.project.display.showBezel)
   const toggleBezel = useStore((s) => s.toggleBezel)
+  const esp32PreviewMode = useStore((s) => s.esp32PreviewMode)
+  const toggleEsp32Preview = useStore((s) => s.toggleEsp32Preview)
   const setExportDialogOpen = useStore((s) => s.setExportDialogOpen)
   const setGuideOpen = useStore((s) => s.setGuideOpen)
 
@@ -80,6 +82,13 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
         </button>
         <button className={`studio-btn ${devModeOpen ? 'text-studio-accent' : ''}`} onClick={toggleDevMode} title="Toggle Developer Mode (Ctrl+.)">
           {'</>'}
+        </button>
+        <button
+          className={`studio-btn text-xs ${esp32PreviewMode ? 'text-studio-accent' : ''}`}
+          onClick={toggleEsp32Preview}
+          title="ESP32 Export Preview — shows the canvas approximately as the exported firmware will render it (RGB565 color quantization, ring-stepped iris/glow) instead of the studio's full-quality preview"
+        >
+          ESP32 Preview
         </button>
         <button className="studio-btn" onClick={() => setGuideOpen(true)} title="User Guide (F1)">
           Help

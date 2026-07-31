@@ -1,12 +1,30 @@
 import type { CustomEyeShape, CustomPupilShape, EyeColors, EyeParams } from '@/types'
 import { DEFAULT_EYE_COLORS } from '@/types'
-import { mixColors, shadeColor } from '@/lib/color'
+import { mixColors, shadeColor, quantizeToRgb565 } from '@/lib/color'
 import { PUPIL_SHAPE_POLYGONS, type PupilPolygon } from './pupilShapes'
 import { EYE_SHAPE_POLYGONS, type EyeShapePolygon } from './eyeShapes'
 
 export type EyeTheme = EyeColors
 
 export const DEFAULT_EYE_THEME: EyeTheme = DEFAULT_EYE_COLORS
+
+/** Rounds every color field in a theme to what the real RGB565 display can actually show —
+ * used by drawEye()'s `firmwareSim` mode (ESP32 Export Preview) so the studio's own full
+ * 24-bit palette doesn't hide the real color-banding the exported firmware will have. Only the
+ * 7 hex-color fields are touched; numeric style fields (opacity/intensity/width) pass through
+ * unchanged since they're not colors and RGB565 doesn't affect them. */
+function quantizeThemeToRgb565(theme: EyeTheme): EyeTheme {
+  return {
+    ...theme,
+    sclera: quantizeToRgb565(theme.sclera),
+    iris: quantizeToRgb565(theme.iris),
+    pupil: quantizeToRgb565(theme.pupil),
+    highlight: quantizeToRgb565(theme.highlight),
+    shadow: quantizeToRgb565(theme.shadow),
+    glow: quantizeToRgb565(theme.glow),
+    border: quantizeToRgb565(theme.border)
+  }
+}
 
 /**
  * Traces a rounded-rect whose corners are quarter-*ellipses* (independent x/y radii)
@@ -106,6 +124,20 @@ function traceEyeShapePolygon(
  * Draws a single eye centered at the current canvas origin (caller translates first).
  * `mirrorX` flips rotation/pupil/highlight horizontally so a left/right eye pair reads as
  * looking in the same world direction rather than toward/away from each other.
+ *
+ * `firmwareSim`: the ESP32 Export Preview mode. This still calls the exact same geometry code
+ * as the normal render (same shape/rotation/scale/clip/eyelid math — there's no second renderer
+ * to drift out of sync with this one), but swaps in the specific approximations the real
+ * exported firmware has to make that Canvas 2D doesn't: colors are rounded to what RGB565 can
+ * actually display (quantizeThemeToRgb565), the iris's smooth radial gradient is replaced by
+ * eyesFillIrisGradient()'s own 6 concentric flat-color rings (cppExport.ts), and the glow's
+ * ctx.shadowBlur halo is replaced by eyesFillGlow()'s own 4 concentric alpha-stepped rings —
+ * matching cppExport.ts's actual algorithms line-for-line, not just its visual impression.
+ * Sclera/eyelid/pupil/border/shape-boundary rendering is identical in both modes since firmware
+ * computes those the same way, per-row/continuously, that Canvas 2D already does. Genuine
+ * unsimulated gaps: real hardware has no anti-aliasing at all on primitive fills (Canvas 2D
+ * paths are always anti-aliased) — flagged here rather than attempting a faithful per-pixel
+ * rasterizer, which would need a second full software renderer to get right.
  */
 export function drawEye(
   ctx: CanvasRenderingContext2D,
@@ -114,8 +146,10 @@ export function drawEye(
   mirrorX = false,
   backgroundColor = '#000000',
   customShapes: CustomPupilShape[] = [],
-  customEyeShapes: CustomEyeShape[] = []
+  customEyeShapes: CustomEyeShape[] = [],
+  firmwareSim = false
 ): void {
+  if (firmwareSim) theme = quantizeThemeToRgb565(theme)
   const {
     width,
     height,
@@ -187,16 +221,36 @@ export function drawEye(
   // Outer glow — painted *before* the eye-shape clip so the blur can bleed outside the
   // rounded-rect silhouette (drawn on the round-display canvas behind everything else).
   if (theme.glowIntensity > 0) {
-    ctx.save()
-    ctx.shadowColor = theme.glow
-    ctx.shadowBlur = 4 + (theme.glowIntensity / 100) * 22
-    ctx.globalAlpha = 0.25 + (theme.glowIntensity / 100) * 0.55
-    ctx.fillStyle = theme.glow
-    traceEyeBoundary()
-    ctx.fill()
-    // A couple of extra passes make the halo read as a soft glow rather than a single blur ring.
-    ctx.fill()
-    ctx.restore()
+    if (firmwareSim) {
+      // Matches eyesFillGlow() in cppExport.ts exactly: 4 concentric grown-boundary rings,
+      // largest/faintest first, each a flat color blended toward the background — Adafruit_GFX
+      // has no blur primitive, so this stepped-ring falloff (not ctx.shadowBlur) is genuinely
+      // what real hardware draws.
+      const RINGS = 4
+      const maxBlur = 4 + (theme.glowIntensity / 100) * 22
+      const baseAlpha = 0.25 + (theme.glowIntensity / 100) * 0.55
+      for (let i = RINGS; i >= 1; i--) {
+        const t = i / RINGS
+        const expand = maxBlur * t
+        let alpha = baseAlpha * (1 - t) * 1.3
+        if (alpha > 1) alpha = 1
+        if (alpha <= 0.02) continue
+        ctx.fillStyle = mixColors(backgroundColor, theme.glow, alpha)
+        traceEyeBoundary(expand)
+        ctx.fill()
+      }
+    } else {
+      ctx.save()
+      ctx.shadowColor = theme.glow
+      ctx.shadowBlur = 4 + (theme.glowIntensity / 100) * 22
+      ctx.globalAlpha = 0.25 + (theme.glowIntensity / 100) * 0.55
+      ctx.fillStyle = theme.glow
+      traceEyeBoundary()
+      ctx.fill()
+      // A couple of extra passes make the halo read as a soft glow rather than a single blur ring.
+      ctx.fill()
+      ctx.restore()
+    }
   }
 
   // Border — an outer rounded-rect one theme.borderWidth larger, filled with the border color
@@ -251,18 +305,38 @@ export function drawEye(
   // Iris — drawn via a scale transform so the radial gradient stretches into a true ellipse
   // (canvas gradients are otherwise always circular).
   if (irisRX > 0.1 && irisRY > 0.1) {
-    ctx.save()
-    ctx.translate(pcx, pcy)
-    ctx.scale(irisRX, irisRY)
-    const irisGrad = ctx.createRadialGradient(0, 0, 0.15, 0, 0, 1)
-    irisGrad.addColorStop(0, shadeColor(theme.iris, 12))
-    irisGrad.addColorStop(0.75, theme.iris)
-    irisGrad.addColorStop(1, shadeColor(theme.iris, -22))
-    ctx.beginPath()
-    ctx.fillStyle = irisGrad
-    ctx.arc(0, 0, 1, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.restore()
+    if (firmwareSim) {
+      // Matches eyesFillIrisGradient() in cppExport.ts exactly: 6 concentric flat-color rings
+      // (largest/darkest first, smallest/lightest on top), the same t>=0.75 breakpoint between
+      // the light->base and base->dark blend ranges — Adafruit_GFX has no gradient fill, so
+      // this stepped-ring approximation (not a true radial gradient) is what real hardware
+      // draws, and the step edges are genuinely visible at this eye's actual pixel size.
+      const RINGS = 6
+      for (let i = RINGS; i >= 1; i--) {
+        const t = i / RINGS
+        const color = t >= 0.75 ? mixColors(theme.iris, shadeColor(theme.iris, -22), (t - 0.75) / 0.25) : mixColors(shadeColor(theme.iris, 12), theme.iris, t / 0.75)
+        const ringRX = irisRX * t
+        const ringRY = irisRY * t
+        if (ringRX <= 0 || ringRY <= 0) continue
+        ctx.beginPath()
+        ctx.fillStyle = color
+        ctx.ellipse(pcx, pcy, ringRX, ringRY, 0, 0, Math.PI * 2)
+        ctx.fill()
+      }
+    } else {
+      ctx.save()
+      ctx.translate(pcx, pcy)
+      ctx.scale(irisRX, irisRY)
+      const irisGrad = ctx.createRadialGradient(0, 0, 0.15, 0, 0, 1)
+      irisGrad.addColorStop(0, shadeColor(theme.iris, 12))
+      irisGrad.addColorStop(0.75, theme.iris)
+      irisGrad.addColorStop(1, shadeColor(theme.iris, -22))
+      ctx.beginPath()
+      ctx.fillStyle = irisGrad
+      ctx.arc(0, 0, 1, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.restore()
+    }
   }
 
   // Pupil — rotates around its own center independent of the eye's own `rotation`. Like the

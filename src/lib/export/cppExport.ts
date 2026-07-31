@@ -926,7 +926,7 @@ inline float eyesEase(float t, uint8_t type, int8_t bx1, int8_t by1, int8_t bx2,
 
 // ---- Live (interpolated) eye pose ----
 struct LiveEye {
-  float width, height, radius, distance;
+  float width, height, radius, rotation, distance;
   float irisWidth, irisHeight, pupilWidth, pupilHeight;
   float pupilX, pupilY, pupilRotation;
   float upperEyelid, lowerEyelid;
@@ -969,6 +969,7 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   r.width = a.width + (b.width - a.width) * t;
   r.height = a.height + (b.height - a.height) * t;
   r.radius = a.radius + (b.radius - a.radius) * t;
+  r.rotation = a.rotation + (b.rotation - a.rotation) * t;
   r.distance = a.distance + (b.distance - a.distance) * t;
   r.irisWidth = a.irisWidth + (b.irisWidth - a.irisWidth) * t;
   r.irisHeight = a.irisHeight + (b.irisHeight - a.irisHeight) * t;
@@ -1018,6 +1019,7 @@ inline LiveEye eyesLerpLive(const LiveEye& a, const LiveEye& b, float t) {
   r.width = a.width + (b.width - a.width) * t;
   r.height = a.height + (b.height - a.height) * t;
   r.radius = a.radius + (b.radius - a.radius) * t;
+  r.rotation = a.rotation + (b.rotation - a.rotation) * t;
   r.distance = a.distance + (b.distance - a.distance) * t;
   r.irisWidth = a.irisWidth + (b.irisWidth - a.irisWidth) * t;
   r.irisHeight = a.irisHeight + (b.irisHeight - a.irisHeight) * t;
@@ -1144,56 +1146,95 @@ inline uint8_t eyesTransformEyeShape(const EyeShapeCtx& shape, float* wx, float*
   return count;
 }
 
-// The polygon eye-shape's own row/column bounding span (see the Scope note above) — the
-// even-odd crossing test eyesFillPolygonInEye() already uses, minus the fill itself.
-inline bool eyesEyeShapeRowSpan(const EyeShapeCtx& shape, float scanY, float& lo, float& hi) {
+// Max separate spans a single row/column scanline can produce against a non-convex eye shape
+// (Happy Arc, Heart, Star, Cloud, Crescent, Bean all measured with up to 4 crossings — see the
+// comment above eyesEyeShapeRowSpans() below) — generous headroom over that for custom SVG
+// imports, which could in principle be more complex, without costing real memory (this is a
+// small fixed-size stack buffer, not a heap allocation).
+const uint8_t EYE_MAX_SHAPE_SPANS = 6;
+
+// Sorted insertion helper shared by the two multi-span functions below — xCount is always
+// small (at most one crossing per polygon edge), so insertion sort is both correct and cheap.
+inline void eyesInsertionSort(float* xs, uint8_t n) {
+  for (uint8_t i = 1; i < n; i++) {
+    float key = xs[i];
+    int16_t k = (int16_t)i - 1;
+    while (k >= 0 && xs[k] > key) {
+      xs[k + 1] = xs[k];
+      k--;
+    }
+    xs[k + 1] = key;
+  }
+}
+
+// The polygon eye-shape's own row spans at \`scanY\` — ALL of them via the real even-odd rule
+// (sorted crossings paired [c0,c1], [c2,c3], ...), not just a single overall bounding min/max.
+// This distinction matters a lot for non-convex shapes: Happy Arc, Heart, Star, and Cloud all
+// have rows where the boundary is crossed 4 times (two separate strokes/lobes) rather than 2 —
+// collapsing those into one [min,max] span (the bug this function replaces) fills in the
+// shape's own concave "hollow" solid, which is exactly what turns Happy Arc's open arch into a
+// filled half-circle-looking blob on real hardware while the studio's Canvas 2D clip (which
+// handles concave paths natively) renders the true open arch. Returns the number of spans
+// found (0 if this row misses the shape entirely), capped at EYE_MAX_SHAPE_SPANS.
+inline uint8_t eyesEyeShapeRowSpans(const EyeShapeCtx& shape, float scanY, float* loXs, float* hiXs) {
   float wx[EYE_MAX_EYE_SHAPE_POLYGON_POINTS], wy[EYE_MAX_EYE_SHAPE_POLYGON_POINTS];
   uint8_t count = eyesTransformEyeShape(shape, wx, wy);
-  lo = 1e9f;
-  hi = -1e9f;
-  bool any = false;
+  float xs[EYE_MAX_EYE_SHAPE_POLYGON_POINTS];
+  uint8_t n = 0;
   for (uint8_t i = 0; i < count; i++) {
     uint8_t j = (i + 1) % count;
     float y1 = wy[i], y2 = wy[j];
     if ((y1 <= scanY && y2 > scanY) || (y2 <= scanY && y1 > scanY)) {
       float t = (scanY - y1) / (y2 - y1);
-      float x = wx[i] + t * (wx[j] - wx[i]);
-      if (x < lo) lo = x;
-      if (x > hi) hi = x;
-      any = true;
+      if (n < EYE_MAX_EYE_SHAPE_POLYGON_POINTS) xs[n++] = wx[i] + t * (wx[j] - wx[i]);
     }
   }
-  return any;
+  eyesInsertionSort(xs, n);
+  uint8_t spans = 0;
+  for (uint8_t i = 0; (uint16_t)i + 1 < n && spans < EYE_MAX_SHAPE_SPANS; i += 2) {
+    loXs[spans] = xs[i];
+    hiXs[spans] = xs[i + 1];
+    spans++;
+  }
+  return spans;
 }
 
-// Column-parameterized twin of eyesEyeShapeRowSpan() above (x/y roles swapped), matching
-// eyesEyeHalfHeightAt()'s own relationship to eyesEyeHalfWidthAt().
-inline bool eyesEyeShapeColSpan(const EyeShapeCtx& shape, float scanX, float& lo, float& hi) {
+// Column-parameterized twin of eyesEyeShapeRowSpans() above (x/y roles swapped) — same
+// multi-span even-odd correctness, needed for eyesFillEyelid()'s column sweep against shapes
+// like Crescent/Bean/Star/Cloud that can have more than 2 boundary crossings per column too
+// (Happy Arc itself only ever has 2 per column, but this is shared code for every shape).
+inline uint8_t eyesEyeShapeColSpans(const EyeShapeCtx& shape, float scanX, float* loYs, float* hiYs) {
   float wx[EYE_MAX_EYE_SHAPE_POLYGON_POINTS], wy[EYE_MAX_EYE_SHAPE_POLYGON_POINTS];
   uint8_t count = eyesTransformEyeShape(shape, wx, wy);
-  lo = 1e9f;
-  hi = -1e9f;
-  bool any = false;
+  float ys[EYE_MAX_EYE_SHAPE_POLYGON_POINTS];
+  uint8_t n = 0;
   for (uint8_t i = 0; i < count; i++) {
     uint8_t j = (i + 1) % count;
     float x1 = wx[i], x2 = wx[j];
     if ((x1 <= scanX && x2 > scanX) || (x2 <= scanX && x1 > scanX)) {
       float t = (scanX - x1) / (x2 - x1);
-      float y = wy[i] + t * (wy[j] - wy[i]);
-      if (y < lo) lo = y;
-      if (y > hi) hi = y;
-      any = true;
+      if (n < EYE_MAX_EYE_SHAPE_POLYGON_POINTS) ys[n++] = wy[i] + t * (wy[j] - wy[i]);
     }
   }
-  return any;
+  eyesInsertionSort(ys, n);
+  uint8_t spans = 0;
+  for (uint8_t i = 0; (uint16_t)i + 1 < n && spans < EYE_MAX_SHAPE_SPANS; i += 2) {
+    loYs[spans] = ys[i];
+    hiYs[spans] = ys[i + 1];
+    spans++;
+  }
+  return spans;
 }
 
-// Shape-aware dispatchers: fall back to the plain symmetric eyesEyeHalfWidthAt()/
-// eyesEyeHalfHeightAt() (as a centered [-half, +half] span) when shape.points is unset, or the
-// polygon's own row/column bounding span otherwise. Every one of the 7 call sites that used to
-// call eyesEyeHalfWidthAt/HalfHeightAt directly (sclera, iris, pupil, border, glow, both
-// eyelids) goes through one of these two instead, so a custom/built-in eye shape clips all of
-// them consistently.
+// Shape-aware dispatchers matching the original single-span API (still used by
+// eyesPointInsideEyeShape's rounded-rect fallback and anywhere only a containing bound is
+// needed, e.g. sizing a scan loop) — for a polygon shape this now returns the *overall*
+// min/max across every true span (safe for bounding a loop range) rather than claiming
+// everything between is solid; callers that need to fill/clip correctly must use the *Spans()
+// functions above instead. Every one of the 7 call sites that used to call
+// eyesEyeHalfWidthAt/HalfHeightAt directly (sclera, iris, pupil, border, glow, both eyelids)
+// goes through one of these two (or their *Spans siblings) so a custom/built-in eye shape
+// clips all of them consistently.
 inline bool eyesEyeHalfWidthAtShape(float dy, float hx, float hy, float rx, float ry, const EyeShapeCtx& shape, float& loX, float& hiX) {
   if (!shape.points || shape.count < 3) {
     float half = eyesEyeHalfWidthAt(dy, hx, hy, rx, ry);
@@ -1202,7 +1243,16 @@ inline bool eyesEyeHalfWidthAtShape(float dy, float hx, float hy, float rx, floa
     hiX = half;
     return true;
   }
-  return eyesEyeShapeRowSpan(shape, dy, loX, hiX);
+  float loXs[EYE_MAX_SHAPE_SPANS], hiXs[EYE_MAX_SHAPE_SPANS];
+  uint8_t n = eyesEyeShapeRowSpans(shape, dy, loXs, hiXs);
+  if (n == 0) return false;
+  loX = loXs[0];
+  hiX = hiXs[0];
+  for (uint8_t i = 1; i < n; i++) {
+    if (loXs[i] < loX) loX = loXs[i];
+    if (hiXs[i] > hiX) hiX = hiXs[i];
+  }
+  return true;
 }
 inline bool eyesEyeHalfHeightAtShape(float dx, float hx, float hy, float rx, float ry, const EyeShapeCtx& shape, float& loY, float& hiY) {
   if (!shape.points || shape.count < 3) {
@@ -1212,7 +1262,67 @@ inline bool eyesEyeHalfHeightAtShape(float dx, float hx, float hy, float rx, flo
     hiY = half;
     return true;
   }
-  return eyesEyeShapeColSpan(shape, dx, loY, hiY);
+  float loYs[EYE_MAX_SHAPE_SPANS], hiYs[EYE_MAX_SHAPE_SPANS];
+  uint8_t n = eyesEyeShapeColSpans(shape, dx, loYs, hiYs);
+  if (n == 0) return false;
+  loY = loYs[0];
+  hiY = hiYs[0];
+  for (uint8_t i = 1; i < n; i++) {
+    if (loYs[i] < loY) loY = loYs[i];
+    if (hiYs[i] > hiY) hiY = hiYs[i];
+  }
+  return true;
+}
+
+// Point-in-eye-silhouette test in the eye's own LOCAL (unrotated) coordinate frame. For the
+// plain rounded-rect (shape.points unset) this reuses eyesEyeHalfWidthAtShape()'s single span,
+// exact for that always-convex boundary. For a polygon shape this does a direct even-odd
+// crossing-count test (count boundary crossings to the point's left; odd = inside) rather than
+// testing membership in eyesEyeHalfWidthAtShape()'s span — that span is an overall bounding
+// range across every true span (see the comment above it), which would incorrectly read a
+// point in a non-convex shape's own concave "hollow" (e.g. under Happy Arc's open arch) as
+// inside. Every fill routine's rotated fallback below (used only when the eye's own
+// EyeParams.rotation != 0) calls this once per candidate device pixel, after inverse-rotating
+// that pixel into local space — see the "Eye rotation" comment on eyesDrawEye() for why a
+// per-row span trick (what every routine's zero-rotation fast path uses instead, via the
+// *Spans() functions above) can't be reused directly once the eye itself is rotated.
+inline bool eyesPointInsideEyeShape(float lx, float ly, float hx, float hy, float rx, float ry, const EyeShapeCtx& shape) {
+  if (!shape.points || shape.count < 3) {
+    float half = eyesEyeHalfWidthAt(ly, hx, hy, rx, ry);
+    return half >= 0 && lx >= -half && lx <= half;
+  }
+  float wx[EYE_MAX_EYE_SHAPE_POLYGON_POINTS], wy[EYE_MAX_EYE_SHAPE_POLYGON_POINTS];
+  uint8_t count = eyesTransformEyeShape(shape, wx, wy);
+  uint8_t crossings = 0;
+  for (uint8_t i = 0; i < count; i++) {
+    uint8_t j = (i + 1) % count;
+    float y1 = wy[i], y2 = wy[j];
+    if ((y1 <= ly && y2 > ly) || (y2 <= ly && y1 > ly)) {
+      float t = (ly - y1) / (y2 - y1);
+      float xCross = wx[i] + t * (wx[j] - wx[i]);
+      if (xCross <= lx) crossings++;
+    }
+  }
+  return (crossings & 1) != 0;
+}
+
+// The eyelid taper law shared by eyesFillEyelid()'s fast (per-column) and rotated (per-point)
+// paths — factored out so there is exactly one copy of this formula in the firmware export,
+// matching eyelidCurvePoints()'s own derivation in the studio's drawEye.ts. \`u\` is the
+// normalized horizontal position (-1..1) the taper is evaluated at.
+inline float eyesEyelidTaper(float u, float roundFrac, float compress, float skewFrac) {
+  float side = u >= 0 ? 1.0f : -1.0f;
+  float plateau = roundFrac * 0.7f * (1.0f + side * skewFrac * 0.6f);
+  if (plateau < 0) plateau = 0;
+  if (plateau > 0.85f) plateau = 0.85f;
+  float au = u < 0 ? -u : u;
+  if (au <= plateau) return 1.0f;
+  float span = (1.0f - plateau) * compress;
+  if (span < 0.0001f) span = 0.0001f;
+  float uu = (au - plateau) / span;
+  if (uu > 1.0f) uu = 1.0f;
+  float tt = 1.0f - uu * uu;
+  return tt * tt;
 }
 
 // Fills a rounded-rect whose corners are quarter-*ellipses* (independent x/y radii), via
@@ -1247,22 +1357,52 @@ inline void eyesFillRoundedRect(T& gfx, int16_t cx, int16_t cy, int16_t w, int16
 // fallback branch.
 template <typename T>
 inline void eyesFillEyeBoundaryRing(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius,
-                                     const EyeShapeCtx& eyeShape, float extraPx, uint16_t color) {
-  if (!eyeShape.points || eyeShape.count < 3) {
-    eyesFillRoundedRect(gfx, cx, cy, w + (int16_t)(extraPx * 2), h + (int16_t)(extraPx * 2), radius + (int16_t)extraPx, color);
+                                     const EyeShapeCtx& eyeShape, float extraPx, float rotRad, uint16_t color) {
+  if (rotRad == 0.0f) {
+    if (!eyeShape.points || eyeShape.count < 3) {
+      eyesFillRoundedRect(gfx, cx, cy, w + (int16_t)(extraPx * 2), h + (int16_t)(extraPx * 2), radius + (int16_t)extraPx, color);
+      return;
+    }
+    EyeShapeCtx widened = eyeShape;
+    widened.hx += extraPx;
+    widened.hy += extraPx;
+    int16_t halfH = (int16_t)ceilf(widened.hy + fabsf(widened.offsetY)) + 1;
+    float loXs[EYE_MAX_SHAPE_SPANS], hiXs[EYE_MAX_SHAPE_SPANS];
+    for (int16_t dy = -halfH; dy <= halfH; dy++) {
+      uint8_t n = eyesEyeShapeRowSpans(widened, (float)dy, loXs, hiXs);
+      for (uint8_t i = 0; i < n; i++) {
+        int16_t ixLo = (int16_t)floorf(loXs[i]);
+        int16_t ixHi = (int16_t)ceilf(hiXs[i]);
+        if (ixHi < ixLo) continue;
+        gfx.drawFastHLine(cx + ixLo, cy + dy, ixHi - ixLo + 1, color);
+      }
+    }
     return;
   }
-  EyeShapeCtx widened = eyeShape;
-  widened.hx += extraPx;
-  widened.hy += extraPx;
-  int16_t halfH = (int16_t)ceilf(widened.hy + fabsf(widened.offsetY)) + 1;
-  for (int16_t dy = -halfH; dy <= halfH; dy++) {
-    float lo, hi;
-    if (!eyesEyeShapeRowSpan(widened, (float)dy, lo, hi)) continue;
-    int16_t ixLo = (int16_t)floorf(lo);
-    int16_t ixHi = (int16_t)ceilf(hi);
-    if (ixHi < ixLo) continue;
-    gfx.drawFastHLine(cx + ixLo, cy + dy, ixHi - ixLo + 1, color);
+  // Eye rotation != 0 — device-pixel scan, inverse-rotated into the eye's local frame and
+  // tested against the same grown boundary the fast path above uses (eyesPointInsideEyeShape,
+  // built on the identical eyesEyeHalfWidthAtShape() call), so a rotated glow/border ring
+  // matches the unrotated one exactly at rotRad == 0. See the "Eye rotation" comment on
+  // eyesDrawEye() for why this can't just reuse the per-row fast path once the eye is rotated.
+  float hx = w / 2.0f, hy = h / 2.0f;
+  float rx = radius < hx ? (float)radius : hx;
+  float ry = radius < hy ? (float)radius : hy;
+  float ghx = hx + extraPx, ghy = hy + extraPx, grx = rx + extraPx, gry = ry + extraPx;
+  EyeShapeCtx gshape = eyeShape;
+  if (gshape.points) {
+    gshape.hx += extraPx;
+    gshape.hy += extraPx;
+  }
+  float c = cosf(rotRad), s = sinf(rotRad);
+  float maxLocal = sqrtf(ghx * ghx + ghy * ghy) + fabsf(gshape.offsetX) + fabsf(gshape.offsetY) + 2.0f;
+  int16_t half = (int16_t)ceilf(maxLocal);
+  for (int16_t dy = -half; dy <= half; dy++) {
+    for (int16_t dx = -half; dx <= half; dx++) {
+      float lx = dx * c + dy * s;
+      float ly = -dx * s + dy * c;
+      if (!eyesPointInsideEyeShape(lx, ly, ghx, ghy, grx, gry, gshape)) continue;
+      gfx.drawPixel(cx + dx, cy + dy, color);
+    }
   }
 }
 
@@ -1277,7 +1417,7 @@ inline void eyesFillEyeBoundaryRing(T& gfx, int16_t cx, int16_t cy, int16_t w, i
 template <typename T>
 inline void eyesFillEllipseInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eyeW, int16_t eyeH, int16_t eyeRadius,
                                   int16_t ecx, int16_t ecy, int16_t rx, int16_t ry, float rotationDeg,
-                                  const EyeShapeCtx& eyeShape, uint16_t color) {
+                                  const EyeShapeCtx& eyeShape, float eyeRotRad, uint16_t color) {
   if (rx <= 0 || ry <= 0) return;
   float eyeHx = eyeW / 2.0f, eyeHy = eyeH / 2.0f;
   float eyeRx = eyeRadius < eyeHx ? (float)eyeRadius : eyeHx;
@@ -1285,35 +1425,76 @@ inline void eyesFillEllipseInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t e
 
   float rad = rotationDeg * (float)PI / 180.0f;
   float c = cosf(rad), s = sinf(rad);
+
+  if (eyeRotRad == 0.0f) {
+    float invRx2 = 1.0f / ((float)rx * (float)rx);
+    float invRy2 = 1.0f / ((float)ry * (float)ry);
+    float A = c * c * invRx2 + s * s * invRy2;
+
+    int16_t maxExtent = (int16_t)ceilf((float)max(rx, ry)) + 1;
+    float eyeLoXs[EYE_MAX_SHAPE_SPANS], eyeHiXs[EYE_MAX_SHAPE_SPANS];
+    for (int16_t dy = -maxExtent; dy <= maxExtent; dy++) {
+      float dy0 = (float)dy;
+      float B = 2.0f * dy0 * c * s * (invRx2 - invRy2);
+      float C = dy0 * dy0 * (s * s * invRx2 + c * c * invRy2) - 1.0f;
+      float disc = B * B - 4.0f * A * C;
+      if (disc < 0) continue;
+      float sq = sqrtf(disc);
+      float dxA = (-B - sq) / (2.0f * A);
+      float dxB = (-B + sq) / (2.0f * A);
+      float xLo = ecx + (dxA < dxB ? dxA : dxB);
+      float xHi = ecx + (dxA < dxB ? dxB : dxA);
+
+      int16_t worldY = ecy + dy;
+      uint8_t n;
+      if (eyeShape.points) {
+        n = eyesEyeShapeRowSpans(eyeShape, (float)(worldY - eyeCy), eyeLoXs, eyeHiXs);
+      } else {
+        float eyeLoX, eyeHiX;
+        n = eyesEyeHalfWidthAtShape((float)(worldY - eyeCy), eyeHx, eyeHy, eyeRx, eyeRy, eyeShape, eyeLoX, eyeHiX) ? 1 : 0;
+        if (n) {
+          eyeLoXs[0] = eyeLoX;
+          eyeHiXs[0] = eyeHiX;
+        }
+      }
+      for (uint8_t i = 0; i < n; i++) {
+        float clipLo = max(xLo, (float)eyeCx + eyeLoXs[i]);
+        float clipHi = min(xHi, (float)eyeCx + eyeHiXs[i]);
+        if (clipHi < clipLo) continue;
+        int16_t ixLo = (int16_t)(clipLo + 0.5f);
+        int16_t ixHi = (int16_t)(clipHi + 0.5f);
+        if (ixHi < ixLo) continue;
+        gfx.drawFastHLine(ixLo, worldY, ixHi - ixLo + 1, color);
+      }
+    }
+    return;
+  }
+
+  // Eye rotation != 0 — same device-pixel-scan/inverse-rotate approach as
+  // eyesFillEyeBoundaryRing()'s own rotated branch, composed with this ellipse's own
+  // (independent) \`rotationDeg\` — the ellipse is tested in the eye's LOCAL frame (relative to
+  // the eye's own center) against both its own shape (inverse-rotated by \`rad\` into the
+  // ellipse's unrotated frame, then the standard axis-aligned ellipse test) and the eye's
+  // boundary (eyesPointInsideEyeShape, the same call the fast path above uses via
+  // eyesEyeHalfWidthAtShape), then placed into device space via the eye's own rotation.
+  float ecxLocal = (float)(ecx - eyeCx);
+  float ecyLocal = (float)(ecy - eyeCy);
   float invRx2 = 1.0f / ((float)rx * (float)rx);
   float invRy2 = 1.0f / ((float)ry * (float)ry);
-  float A = c * c * invRx2 + s * s * invRy2;
-
-  int16_t maxExtent = (int16_t)ceilf((float)max(rx, ry)) + 1;
+  float ec = cosf(eyeRotRad), es = sinf(eyeRotRad);
+  int16_t maxExtent = (int16_t)(ceilf((float)max(rx, ry)) + ceilf(fabsf(ecxLocal)) + ceilf(fabsf(ecyLocal)) + 2.0f);
   for (int16_t dy = -maxExtent; dy <= maxExtent; dy++) {
-    float dy0 = (float)dy;
-    float B = 2.0f * dy0 * c * s * (invRx2 - invRy2);
-    float C = dy0 * dy0 * (s * s * invRx2 + c * c * invRy2) - 1.0f;
-    float disc = B * B - 4.0f * A * C;
-    if (disc < 0) continue;
-    float sq = sqrtf(disc);
-    float dxA = (-B - sq) / (2.0f * A);
-    float dxB = (-B + sq) / (2.0f * A);
-    float xLo = ecx + (dxA < dxB ? dxA : dxB);
-    float xHi = ecx + (dxA < dxB ? dxB : dxA);
-
-    int16_t worldY = ecy + dy;
-    float eyeLoX, eyeHiX;
-    if (!eyesEyeHalfWidthAtShape((float)(worldY - eyeCy), eyeHx, eyeHy, eyeRx, eyeRy, eyeShape, eyeLoX, eyeHiX)) continue; // this row falls entirely outside the eye's own silhouette
-
-    float clipLo = max(xLo, (float)eyeCx + eyeLoX);
-    float clipHi = min(xHi, (float)eyeCx + eyeHiX);
-    if (clipHi < clipLo) continue;
-
-    int16_t ixLo = (int16_t)(clipLo + 0.5f);
-    int16_t ixHi = (int16_t)(clipHi + 0.5f);
-    if (ixHi < ixLo) continue;
-    gfx.drawFastHLine(ixLo, worldY, ixHi - ixLo + 1, color);
+    for (int16_t dx = -maxExtent; dx <= maxExtent; dx++) {
+      float ux = (float)dx - ecxLocal;
+      float uy = (float)dy - ecyLocal;
+      float rxp = ux * c + uy * s; // inverse-rotate into the ellipse's own unrotated frame
+      float ryp = -ux * s + uy * c;
+      if (rxp * rxp * invRx2 + ryp * ryp * invRy2 > 1.0f) continue;
+      if (!eyesPointInsideEyeShape((float)dx, (float)dy, eyeHx, eyeHy, eyeRx, eyeRy, eyeShape)) continue;
+      int16_t wx = eyeCx + (int16_t)roundf((float)dx * ec - (float)dy * es);
+      int16_t wy = eyeCy + (int16_t)roundf((float)dx * es + (float)dy * ec);
+      gfx.drawPixel(wx, wy, color);
+    }
   }
 }
 
@@ -1332,7 +1513,7 @@ inline void eyesFillEllipseInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t e
 template <typename T>
 inline void eyesFillPolygonInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eyeW, int16_t eyeH, int16_t eyeRadius,
                                   int16_t ecx, int16_t ecy, int16_t rx, int16_t ry, float rotationDeg,
-                                  const int8_t points[][2], uint8_t count, const EyeShapeCtx& eyeShape, uint16_t color) {
+                                  const int8_t points[][2], uint8_t count, const EyeShapeCtx& eyeShape, float eyeRotRad, uint16_t color) {
   if (count < 3 || rx <= 0 || ry <= 0) return;
   if (count > EYE_MAX_PUPIL_POLYGON_POINTS) count = EYE_MAX_PUPIL_POLYGON_POINTS;
 
@@ -1343,53 +1524,111 @@ inline void eyesFillPolygonInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t e
   float rad = rotationDeg * (float)PI / 180.0f;
   float c = cosf(rad), s = sinf(rad);
 
-  float wx[EYE_MAX_PUPIL_POLYGON_POINTS];
-  float wy[EYE_MAX_PUPIL_POLYGON_POINTS];
-  float minY = 1e9f, maxY = -1e9f;
+  if (eyeRotRad == 0.0f) {
+    float wx[EYE_MAX_PUPIL_POLYGON_POINTS];
+    float wy[EYE_MAX_PUPIL_POLYGON_POINTS];
+    float minY = 1e9f, maxY = -1e9f;
+    for (uint8_t i = 0; i < count; i++) {
+      float nx = points[i][0] / 100.0f;
+      float ny = points[i][1] / 100.0f;
+      float rxp = nx * c - ny * s;
+      float ryp = nx * s + ny * c;
+      wx[i] = ecx + rxp * rx;
+      wy[i] = ecy + ryp * ry;
+      if (wy[i] < minY) minY = wy[i];
+      if (wy[i] > maxY) maxY = wy[i];
+    }
+
+    int16_t yStart = (int16_t)floorf(minY);
+    int16_t yEnd = (int16_t)ceilf(maxY);
+    float xs[EYE_MAX_PUPIL_POLYGON_POINTS];
+    for (int16_t y = yStart; y <= yEnd; y++) {
+      float scanY = y + 0.5f;
+      uint8_t xCount = 0;
+      for (uint8_t i = 0; i < count; i++) {
+        uint8_t j = (i + 1) % count;
+        float y1 = wy[i], y2 = wy[j];
+        if ((y1 <= scanY && y2 > scanY) || (y2 <= scanY && y1 > scanY)) {
+          float t = (scanY - y1) / (y2 - y1);
+          xs[xCount++] = wx[i] + t * (wx[j] - wx[i]);
+        }
+      }
+      // Insertion sort — xCount is always small (at most one crossing per edge).
+      for (uint8_t i = 1; i < xCount; i++) {
+        float key = xs[i];
+        int16_t k = (int16_t)i - 1;
+        while (k >= 0 && xs[k] > key) { xs[k + 1] = xs[k]; k--; }
+        xs[k + 1] = key;
+      }
+
+      float eyeLoXs[EYE_MAX_SHAPE_SPANS], eyeHiXs[EYE_MAX_SHAPE_SPANS];
+      uint8_t eyeN;
+      if (eyeShape.points) {
+        eyeN = eyesEyeShapeRowSpans(eyeShape, (float)(y - eyeCy), eyeLoXs, eyeHiXs);
+      } else {
+        float eyeLoX, eyeHiX;
+        eyeN = eyesEyeHalfWidthAtShape((float)(y - eyeCy), eyeHx, eyeHy, eyeRx, eyeRy, eyeShape, eyeLoX, eyeHiX) ? 1 : 0;
+        if (eyeN) {
+          eyeLoXs[0] = eyeLoX;
+          eyeHiXs[0] = eyeHiX;
+        }
+      }
+      if (eyeN == 0) continue;
+
+      for (uint8_t i = 0; (uint16_t)i + 1 < xCount; i += 2) {
+        for (uint8_t e = 0; e < eyeN; e++) {
+          float xLo = max(xs[i], (float)eyeCx + eyeLoXs[e]);
+          float xHi = min(xs[i + 1], (float)eyeCx + eyeHiXs[e]);
+          if (xHi < xLo) continue;
+          int16_t ixLo = (int16_t)(xLo + 0.5f);
+          int16_t ixHi = (int16_t)(xHi + 0.5f);
+          if (ixHi < ixLo) continue;
+          gfx.drawFastHLine(ixLo, y, ixHi - ixLo + 1, color);
+        }
+      }
+    }
+    return;
+  }
+
+  // Eye rotation != 0 — vertices are built in the eye's LOCAL frame (relative to the eye's own
+  // center, same rotate-by-\`rad\`/scale-by-rx,ry as the fast path above, just without the
+  // absolute \`eyeCx\`/\`eyeCy\` baked in yet), then each candidate device pixel is inverse-rotated
+  // into that same local frame and tested with a standard even-odd point-in-polygon count
+  // (an odd number of edge crossings to the point's left means inside) — the point-test
+  // equivalent of the fast path's per-row span fill. Clipped to the eye's own boundary via
+  // eyesPointInsideEyeShape, the same call the fast path uses via eyesEyeHalfWidthAtShape.
+  float ecxLocal = (float)(ecx - eyeCx);
+  float ecyLocal = (float)(ecy - eyeCy);
+  float wxL[EYE_MAX_PUPIL_POLYGON_POINTS];
+  float wyL[EYE_MAX_PUPIL_POLYGON_POINTS];
   for (uint8_t i = 0; i < count; i++) {
     float nx = points[i][0] / 100.0f;
     float ny = points[i][1] / 100.0f;
     float rxp = nx * c - ny * s;
     float ryp = nx * s + ny * c;
-    wx[i] = ecx + rxp * rx;
-    wy[i] = ecy + ryp * ry;
-    if (wy[i] < minY) minY = wy[i];
-    if (wy[i] > maxY) maxY = wy[i];
+    wxL[i] = ecxLocal + rxp * rx;
+    wyL[i] = ecyLocal + ryp * ry;
   }
-
-  int16_t yStart = (int16_t)floorf(minY);
-  int16_t yEnd = (int16_t)ceilf(maxY);
-  float xs[EYE_MAX_PUPIL_POLYGON_POINTS];
-  for (int16_t y = yStart; y <= yEnd; y++) {
-    float scanY = y + 0.5f;
-    uint8_t xCount = 0;
-    for (uint8_t i = 0; i < count; i++) {
-      uint8_t j = (i + 1) % count;
-      float y1 = wy[i], y2 = wy[j];
-      if ((y1 <= scanY && y2 > scanY) || (y2 <= scanY && y1 > scanY)) {
-        float t = (scanY - y1) / (y2 - y1);
-        xs[xCount++] = wx[i] + t * (wx[j] - wx[i]);
+  float ec = cosf(eyeRotRad), es = sinf(eyeRotRad);
+  int16_t maxExtent = (int16_t)(ceilf((float)max(rx, ry)) + ceilf(fabsf(ecxLocal)) + ceilf(fabsf(ecyLocal)) + 2.0f);
+  for (int16_t dy = -maxExtent; dy <= maxExtent; dy++) {
+    for (int16_t dx = -maxExtent; dx <= maxExtent; dx++) {
+      float scanY = (float)dy + 0.5f;
+      uint8_t crossings = 0;
+      for (uint8_t i = 0; i < count; i++) {
+        uint8_t j = (i + 1) % count;
+        float y1 = wyL[i], y2 = wyL[j];
+        if ((y1 <= scanY && y2 > scanY) || (y2 <= scanY && y1 > scanY)) {
+          float t = (scanY - y1) / (y2 - y1);
+          float xCross = wxL[i] + t * (wxL[j] - wxL[i]);
+          if (xCross <= (float)dx) crossings++;
+        }
       }
-    }
-    // Insertion sort — xCount is always small (at most one crossing per edge).
-    for (uint8_t i = 1; i < xCount; i++) {
-      float key = xs[i];
-      int16_t k = (int16_t)i - 1;
-      while (k >= 0 && xs[k] > key) { xs[k + 1] = xs[k]; k--; }
-      xs[k + 1] = key;
-    }
-
-    float eyeLoX, eyeHiX;
-    if (!eyesEyeHalfWidthAtShape((float)(y - eyeCy), eyeHx, eyeHy, eyeRx, eyeRy, eyeShape, eyeLoX, eyeHiX)) continue;
-
-    for (uint8_t i = 0; (uint16_t)i + 1 < xCount; i += 2) {
-      float xLo = max(xs[i], (float)eyeCx + eyeLoX);
-      float xHi = min(xs[i + 1], (float)eyeCx + eyeHiX);
-      if (xHi < xLo) continue;
-      int16_t ixLo = (int16_t)(xLo + 0.5f);
-      int16_t ixHi = (int16_t)(xHi + 0.5f);
-      if (ixHi < ixLo) continue;
-      gfx.drawFastHLine(ixLo, y, ixHi - ixLo + 1, color);
+      if ((crossings & 1) == 0) continue;
+      if (!eyesPointInsideEyeShape((float)dx, (float)dy, eyeHx, eyeHy, eyeRx, eyeRy, eyeShape)) continue;
+      int16_t wx = eyeCx + (int16_t)roundf((float)dx * ec - (float)dy * es);
+      int16_t wy = eyeCy + (int16_t)roundf((float)dx * es + (float)dy * ec);
+      gfx.drawPixel(wx, wy, color);
     }
   }
 }
@@ -1403,9 +1642,9 @@ inline void eyesFillPolygonInEye(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t e
 template <typename T>
 inline void eyesFillPupilShape(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eyeW, int16_t eyeH, int16_t eyeRadius,
                                 int16_t ecx, int16_t ecy, int16_t rx, int16_t ry, float rotationDeg,
-                                uint8_t shape, uint8_t customIndex, const EyeShapeCtx& eyeShape, uint16_t color) {
+                                uint8_t shape, uint8_t customIndex, const EyeShapeCtx& eyeShape, float eyeRotRad, uint16_t color) {
   if (shape == EYE_PUPIL_SHAPE_ELLIPSE) {
-    eyesFillEllipseInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, eyeShape, color);
+    eyesFillEllipseInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, eyeShape, eyeRotRad, color);
     return;
   }
   const int8_t (*points)[2] = nullptr;
@@ -1429,9 +1668,9 @@ inline void eyesFillPupilShape(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eye
   // draw nothing at all, leaving the pupil invisible instead of falling back to the ellipse
   // like the studio preview's drawEye.ts does for the same case.
   if (points && count >= 3) {
-    eyesFillPolygonInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, points, count, eyeShape, color);
+    eyesFillPolygonInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, points, count, eyeShape, eyeRotRad, color);
   } else {
-    eyesFillEllipseInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, eyeShape, color);
+    eyesFillEllipseInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, rx, ry, rotationDeg, eyeShape, eyeRotRad, color);
   }
 }
 
@@ -1462,7 +1701,7 @@ inline void eyesFillPupilShape(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eye
 template <typename T>
 inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius, bool isUpper,
                             float coveragePct, float tiltDeg, float curvaturePct, float roundnessPct,
-                            float stretchXPct, float stretchYPct, float skewPct, const EyeShapeCtx& eyeShape, uint16_t color) {
+                            float stretchXPct, float stretchYPct, float skewPct, const EyeShapeCtx& eyeShape, float rotRad, uint16_t color) {
   if (coveragePct <= 0) return;
   float hx = w / 2.0f;
   float hy = h / 2.0f;
@@ -1479,48 +1718,84 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
   float ampScale = stretchYPct < 0 ? 0 : (stretchYPct > 200 ? 2.0f : stretchYPct / 100.0f);
   float offset = curveOffset * ampScale;
 
-  int16_t halfWi = (int16_t)ceilf(hx);
-  for (int16_t dx = -halfWi; dx <= halfWi; dx++) {
-    float eyeLoY, eyeHiY;
-    if (!eyesEyeHalfHeightAtShape((float)dx, hx, hy, rx, ry, eyeShape, eyeLoY, eyeHiY)) continue; // this column falls entirely outside the eye's own silhouette
+  if (rotRad == 0.0f) {
+    int16_t halfWi = (int16_t)ceilf(hx);
+    float eyeLoYs[EYE_MAX_SHAPE_SPANS], eyeHiYs[EYE_MAX_SHAPE_SPANS];
+    for (int16_t dx = -halfWi; dx <= halfWi; dx++) {
+      uint8_t n;
+      if (eyeShape.points) {
+        n = eyesEyeShapeColSpans(eyeShape, (float)dx, eyeLoYs, eyeHiYs);
+      } else {
+        float eyeLoY, eyeHiY;
+        n = eyesEyeHalfHeightAtShape((float)dx, hx, hy, rx, ry, eyeShape, eyeLoY, eyeHiY) ? 1 : 0;
+        if (n) {
+          eyeLoYs[0] = eyeLoY;
+          eyeHiYs[0] = eyeHiY;
+        }
+      }
+      if (n == 0) continue; // this column falls entirely outside the eye's own silhouette
 
-    float u = hx > 0.01f ? (float)dx / hx : 0.0f;
-    if (u > 1.0f) u = 1.0f;
-    if (u < -1.0f) u = -1.0f;
-    float side = u >= 0 ? 1.0f : -1.0f;
-    float plateau = roundFrac * 0.7f * (1.0f + side * skewFrac * 0.6f);
-    if (plateau < 0) plateau = 0;
-    if (plateau > 0.85f) plateau = 0.85f;
-    float au = u < 0 ? -u : u;
-    float taper;
-    if (au <= plateau) {
-      taper = 1.0f;
-    } else {
-      float span = (1.0f - plateau) * compress;
-      if (span < 0.0001f) span = 0.0001f;
-      float uu = (au - plateau) / span;
-      if (uu > 1.0f) uu = 1.0f;
-      float tt = 1.0f - uu * uu;
-      taper = tt * tt;
+      float u = hx > 0.01f ? (float)dx / hx : 0.0f;
+      if (u > 1.0f) u = 1.0f;
+      if (u < -1.0f) u = -1.0f;
+      float taper = eyesEyelidTaper(u, roundFrac, compress, skewFrac);
+      float yCutoff = yBase + slope * (float)dx + offset * taper;
+      int16_t worldX = cx + dx;
+      // Applied per span — for a non-convex eye shape (Crescent, Star, Bean, Cloud) a column
+      // can cross the silhouette more than once, and the lid's cutoff line only actually
+      // intersects whichever span it falls inside; a span entirely on the covered/uncovered
+      // side of the cutoff is filled/skipped wholesale rather than clamped into a degenerate
+      // sliver, matching how the single-span case already behaved.
+      for (uint8_t i = 0; i < n; i++) {
+        float eyeLoY = eyeLoYs[i], eyeHiY = eyeHiYs[i];
+        float clampedCutoff = yCutoff;
+        // Clamp the curve itself to this span's own bounds too — without this, a large
+        // negative curvature/tilt could compute a yCutoff *beyond* the span's own edge, which
+        // would flip yTop/yBottom's usual ordering meaning instead of just clipping cleanly.
+        if (clampedCutoff > eyeHiY) clampedCutoff = eyeHiY;
+        if (clampedCutoff < eyeLoY) clampedCutoff = eyeLoY;
+        int16_t yTop, yBottom;
+        if (isUpper) {
+          yTop = cy + (int16_t)floorf(eyeLoY);
+          yBottom = cy + (int16_t)roundf(clampedCutoff);
+        } else {
+          yTop = cy + (int16_t)roundf(clampedCutoff);
+          yBottom = cy + (int16_t)ceilf(eyeHiY);
+        }
+        if (yBottom < yTop) continue;
+        gfx.drawFastVLine(worldX, yTop, yBottom - yTop + 1, color);
+      }
     }
-    float yCutoff = yBase + slope * (float)dx + offset * taper;
-    // Clamp the curve itself to the eye's true silhouette too — without this, a large
-    // negative curvature/tilt could compute a yCutoff *beyond* the corner's own boundary,
-    // which would flip yTop/yBottom's usual ordering meaning near the corner instead of just
-    // clipping cleanly to it.
-    if (yCutoff > eyeHiY) yCutoff = eyeHiY;
-    if (yCutoff < eyeLoY) yCutoff = eyeLoY;
-    int16_t worldX = cx + dx;
-    int16_t yTop, yBottom;
-    if (isUpper) {
-      yTop = cy + (int16_t)floorf(eyeLoY);
-      yBottom = cy + (int16_t)roundf(yCutoff);
-    } else {
-      yTop = cy + (int16_t)roundf(yCutoff);
-      yBottom = cy + (int16_t)ceilf(eyeHiY);
+    return;
+  }
+
+  // Eye rotation != 0 — device-pixel scan, inverse-rotated into the eye's local frame. The
+  // column-cutoff law above is a pure function of local \`lx\` (unchanged from the fast path,
+  // via the shared eyesEyelidTaper()), so each candidate pixel just re-evaluates it at its own
+  // local x instead of once per column, then tests local \`ly\` against the resulting cutoff —
+  // the point-test equivalent of the fast path's per-column vertical-span fill. See the
+  // comment on eyesFillEyeBoundaryRing()'s own rotated branch for why the per-column trick
+  // can't be reused directly once the eye itself is rotated.
+  float c = cosf(rotRad), s = sinf(rotRad);
+  float half = ceilf(sqrtf(hx * hx + hy * hy)) + 1.0f;
+  int16_t halfI = (int16_t)half;
+  for (int16_t dyD = -halfI; dyD <= halfI; dyD++) {
+    for (int16_t dxD = -halfI; dxD <= halfI; dxD++) {
+      float lx = dxD * c + dyD * s;
+      float ly = -dxD * s + dyD * c;
+      float eyeLoY, eyeHiY;
+      if (!eyesEyeHalfHeightAtShape(lx, hx, hy, rx, ry, eyeShape, eyeLoY, eyeHiY)) continue;
+      float u = hx > 0.01f ? lx / hx : 0.0f;
+      if (u > 1.0f) u = 1.0f;
+      if (u < -1.0f) u = -1.0f;
+      float taper = eyesEyelidTaper(u, roundFrac, compress, skewFrac);
+      float yCutoff = yBase + slope * lx + offset * taper;
+      if (yCutoff > eyeHiY) yCutoff = eyeHiY;
+      if (yCutoff < eyeLoY) yCutoff = eyeLoY;
+      bool covered = isUpper ? (ly >= eyeLoY && ly <= yCutoff) : (ly >= yCutoff && ly <= eyeHiY);
+      if (!covered) continue;
+      gfx.drawPixel(cx + dxD, cy + dyD, color);
     }
-    if (yBottom < yTop) continue;
-    gfx.drawFastVLine(worldX, yTop, yBottom - yTop + 1, color);
   }
 }
 
@@ -2293,34 +2568,72 @@ inline uint16_t eyesBlendRgb565(uint16_t a, uint16_t b, float t) {
 // the way Canvas 2D does.
 template <typename T>
 inline void eyesFillEyeSclera(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius,
-                               const EyeShapeCtx& eyeShape,
+                               const EyeShapeCtx& eyeShape, float rotRad,
                                uint16_t scleraTop, uint16_t scleraBottom, uint16_t shadowColor, uint8_t shadowIntensity) {
   if (w <= 0 || h <= 0) return;
   float hx = w / 2.0f;
   float hy = h / 2.0f;
   float rx = radius < hx ? (float)radius : hx;
   float ry = radius < hy ? (float)radius : hy;
-  int16_t halfH = (int16_t)ceilf(hy);
   float shadowH = h * 0.32f;
   float shadowAlpha = 0.15f + (shadowIntensity / 100.0f) * 0.45f;
-  for (int16_t dy = -halfH; dy <= halfH; dy++) {
-    float loX, hiX;
-    if (!eyesEyeHalfWidthAtShape((float)dy, hx, hy, rx, ry, eyeShape, loX, hiX)) continue;
-    float t = (dy + hy) / (float)h;
-    if (t < 0) t = 0;
-    if (t > 1) t = 1;
-    uint16_t rowColor = eyesBlendRgb565(scleraTop, scleraBottom, t);
-    if (shadowIntensity > 0) {
-      float distFromTop = dy + hy;
-      if (distFromTop < shadowH) {
-        float localAlpha = shadowAlpha * (1.0f - distFromTop / shadowH);
-        rowColor = eyesBlendRgb565(rowColor, shadowColor, localAlpha);
+  if (rotRad == 0.0f) {
+    int16_t halfH = (int16_t)ceilf(hy);
+    float loXs[EYE_MAX_SHAPE_SPANS], hiXs[EYE_MAX_SHAPE_SPANS];
+    for (int16_t dy = -halfH; dy <= halfH; dy++) {
+      float t = (dy + hy) / (float)h;
+      if (t < 0) t = 0;
+      if (t > 1) t = 1;
+      uint16_t rowColor = eyesBlendRgb565(scleraTop, scleraBottom, t);
+      if (shadowIntensity > 0) {
+        float distFromTop = dy + hy;
+        if (distFromTop < shadowH) {
+          float localAlpha = shadowAlpha * (1.0f - distFromTop / shadowH);
+          rowColor = eyesBlendRgb565(rowColor, shadowColor, localAlpha);
+        }
+      }
+      uint8_t n = eyeShape.points ? eyesEyeShapeRowSpans(eyeShape, (float)dy, loXs, hiXs) : 0;
+      if (!eyeShape.points) {
+        float loX, hiX;
+        if (!eyesEyeHalfWidthAtShape((float)dy, hx, hy, rx, ry, eyeShape, loX, hiX)) continue;
+        loXs[0] = loX;
+        hiXs[0] = hiX;
+        n = 1;
+      }
+      for (uint8_t i = 0; i < n; i++) {
+        int16_t ixLo = (int16_t)floorf(loXs[i]);
+        int16_t ixHi = (int16_t)ceilf(hiXs[i]);
+        if (ixHi < ixLo) continue;
+        gfx.drawFastHLine(cx + ixLo, cy + dy, ixHi - ixLo + 1, rowColor);
       }
     }
-    int16_t ixLo = (int16_t)floorf(loX);
-    int16_t ixHi = (int16_t)ceilf(hiX);
-    if (ixHi < ixLo) continue;
-    gfx.drawFastHLine(cx + ixLo, cy + dy, ixHi - ixLo + 1, rowColor);
+    return;
+  }
+  // Eye rotation != 0 — see the comment on eyesFillEyeBoundaryRing()'s own rotated branch;
+  // same device-pixel-scan/inverse-rotate approach, with the gradient+shadow color (a pure
+  // function of local \`ly\`, unchanged from the fast path above) evaluated per pixel instead of
+  // once per row.
+  float c = cosf(rotRad), s = sinf(rotRad);
+  float half = ceilf(sqrtf(hx * hx + hy * hy)) + 1.0f;
+  int16_t halfI = (int16_t)half;
+  for (int16_t dy = -halfI; dy <= halfI; dy++) {
+    for (int16_t dx = -halfI; dx <= halfI; dx++) {
+      float lx = dx * c + dy * s;
+      float ly = -dx * s + dy * c;
+      if (!eyesPointInsideEyeShape(lx, ly, hx, hy, rx, ry, eyeShape)) continue;
+      float t = (ly + hy) / (float)h;
+      if (t < 0) t = 0;
+      if (t > 1) t = 1;
+      uint16_t pixColor = eyesBlendRgb565(scleraTop, scleraBottom, t);
+      if (shadowIntensity > 0) {
+        float distFromTop = ly + hy;
+        if (distFromTop < shadowH) {
+          float localAlpha = shadowAlpha * (1.0f - distFromTop / shadowH);
+          pixColor = eyesBlendRgb565(pixColor, shadowColor, localAlpha);
+        }
+      }
+      gfx.drawPixel(cx + dx, cy + dy, pixColor);
+    }
   }
 }
 
@@ -2331,7 +2644,7 @@ inline void eyesFillEyeSclera(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t
 // eyesFillEllipseInEye() exactly like the flat iris fill this replaces.
 template <typename T>
 inline void eyesFillIrisGradient(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eyeW, int16_t eyeH, int16_t eyeRadius,
-                                  int16_t ecx, int16_t ecy, int16_t rx, int16_t ry, const EyeShapeCtx& eyeShape,
+                                  int16_t ecx, int16_t ecy, int16_t rx, int16_t ry, const EyeShapeCtx& eyeShape, float eyeRotRad,
                                   uint16_t irisLight, uint16_t irisBase, uint16_t irisDark) {
   const uint8_t RINGS = 6;
   for (int8_t i = RINGS; i >= 1; i--) {
@@ -2345,7 +2658,7 @@ inline void eyesFillIrisGradient(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t e
     int16_t ringRx = (int16_t)roundf(rx * t);
     int16_t ringRy = (int16_t)roundf(ry * t);
     if (ringRx <= 0 || ringRy <= 0) continue;
-    eyesFillEllipseInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, ringRx, ringRy, 0.0f, eyeShape, color);
+    eyesFillEllipseInEye(gfx, eyeCx, eyeCy, eyeW, eyeH, eyeRadius, ecx, ecy, ringRx, ringRy, 0.0f, eyeShape, eyeRotRad, color);
   }
 }
 
@@ -2359,7 +2672,7 @@ inline void eyesFillIrisGradient(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t e
 // top of it.
 template <typename T>
 inline void eyesFillGlow(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius,
-                          const EyeShapeCtx& eyeShape, uint16_t bgColor, uint16_t glowColor, uint8_t glowIntensity) {
+                          const EyeShapeCtx& eyeShape, float rotRad, uint16_t bgColor, uint16_t glowColor, uint8_t glowIntensity) {
   if (glowIntensity == 0) return;
   const uint8_t RINGS = 4;
   float maxBlur = 4.0f + (glowIntensity / 100.0f) * 22.0f;
@@ -2371,7 +2684,7 @@ inline void eyesFillGlow(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, i
     if (alpha > 1.0f) alpha = 1.0f;
     if (alpha <= 0.02f) continue;
     uint16_t ringColor = eyesBlendRgb565(bgColor, glowColor, alpha);
-    eyesFillEyeBoundaryRing(gfx, cx, cy, w, h, radius, eyeShape, expand, ringColor);
+    eyesFillEyeBoundaryRing(gfx, cx, cy, w, h, radius, eyeShape, expand, rotRad, ringColor);
   }
 }
 
@@ -2421,17 +2734,60 @@ inline EyeShapeCtx eyesResolveEyeShape(const LiveEye& e, int16_t w, int16_t h, i
   return shape;
 }
 
+// Fills the highlight as a plain circle, clipped to the eye's own silhouette and correctly
+// placed when the eye itself is rotated — gfx.fillCircle() (used before this) neither clips to
+// the eye boundary nor accounts for the eye's own rotation, both real gaps against the studio
+// (whose highlight draws inside the same ctx.clip()/ctx.rotate() the rest of the eye uses). A
+// circle's own shape is rotation-invariant, so only its center needs to move with the eye's
+// rotation — always filled as a small manual scanline circle (not just when rotated: the
+// highlight is small enough that clipping it this way costs nothing worth branching around),
+// tested per-point against the eye boundary via eyesPointInsideEyeShape exactly like every
+// other fill routine above.
+template <typename T>
+inline void eyesFillHighlightClipped(T& gfx, int16_t eyeCx, int16_t eyeCy, float hCenterLocalX, float hCenterLocalY, int16_t hR,
+                                      float eyeHx, float eyeHy, float eyeRx, float eyeRy, const EyeShapeCtx& eyeShape,
+                                      float rotRad, uint16_t color) {
+  if (hR <= 0) return;
+  float c = cosf(rotRad), s = sinf(rotRad);
+  for (int16_t dyC = -hR; dyC <= hR; dyC++) {
+    float span = sqrtf(max(0.0f, (float)(hR * hR) - (float)(dyC * dyC)));
+    int16_t dxSpan = (int16_t)span;
+    for (int16_t dxC = -dxSpan; dxC <= dxSpan; dxC++) {
+      float lx = hCenterLocalX + dxC;
+      float ly = hCenterLocalY + dyC;
+      if (!eyesPointInsideEyeShape(lx, ly, eyeHx, eyeHy, eyeRx, eyeRy, eyeShape)) continue;
+      int16_t wx = eyeCx + (int16_t)roundf(lx * c - ly * s);
+      int16_t wy = eyeCy + (int16_t)roundf(lx * s + ly * c);
+      gfx.drawPixel(wx, wy, color);
+    }
+  }
+}
+
 template <typename T>
 inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool mirror, uint16_t bgColor, const EyeColorSet& colors) {
   int16_t w = (int16_t)e.width, h = (int16_t)e.height;
   int16_t radius = (int16_t)e.radius;
   int sign = mirror ? -1 : 1;
   EyeShapeCtx eyeShape = eyesResolveEyeShape(e, w, h, sign);
+  // Eye rotation — mirrors the studio's \`ctx.rotate((rotation * sign * Math.PI) / 180)\` in
+  // drawEye.ts exactly (\`sign\` flips the rotation direction for the mirrored/right eye, same
+  // convention already used for pupilX/highlightX/eyeShapeOffsetX above). Every fill routine
+  // below takes this as an explicit rotRad/eyeRotRad parameter and branches internally: at
+  // rotRad == 0 (the overwhelming common case) each keeps its original fast per-row/per-column
+  // scanline path completely unchanged; only when rotRad != 0 do they fall back to a slower
+  // per-pixel scan (device pixel -> inverse-rotate into the eye's local frame -> test/color),
+  // since a horizontal device-space scanline is no longer horizontal in the eye's own local
+  // frame once it's rotated, so the per-row/-column span trick the fast paths rely on doesn't
+  // apply directly. This was previously a silent no-op in the exported firmware — e.rotation
+  // was carried through the keyframe data (EyeFrame.rotation) but dropped entirely by
+  // eyesLerpFrame()/eyesLerpLive() before ever reaching a draw call, so a tilted eye in the
+  // studio rendered upright on real hardware regardless of this field's value.
+  float rotRad = e.rotation * (mirror ? -1.0f : 1.0f) * (float)PI / 180.0f;
 
   // Glow — a soft halo bleeding outward past the eye's own edge (and past the border ring
   // below), drawn first so everything else paints over it. See eyesFillGlow()'s own comment
   // for the approximation this makes (no true blur on this hardware).
-  eyesFillGlow(gfx, cx, cy, w, h, radius, eyeShape, bgColor, colors.glow, colors.glowIntensity);
+  eyesFillGlow(gfx, cx, cy, w, h, radius, eyeShape, rotRad, bgColor, colors.glow, colors.glowIntensity);
 
   // Border — an outer stadium/oval shape colors.borderWidth larger on every side, in a color
   // already pre-blended toward the background by Border Opacity (see EYE_COLORS_LEFT/RIGHT
@@ -2443,15 +2799,29 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   // EyeColorSet (not a single global #define) so left/right eyes can have different ring
   // thicknesses, matching the studio's per-eye Visual Reference overrides.
   if (colors.borderWidth > 0) {
-    eyesFillEyeBoundaryRing(gfx, cx, cy, w, h, radius, eyeShape, (float)colors.borderWidth, colors.border);
+    eyesFillEyeBoundaryRing(gfx, cx, cy, w, h, radius, eyeShape, (float)colors.borderWidth, rotRad, colors.border);
   }
 
   // Sclera — vertical gradient (scleraTop -> scleraBottom) with the ambient shadow band
   // blended in — see eyesFillEyeSclera()'s own comment.
-  eyesFillEyeSclera(gfx, cx, cy, w, h, radius, eyeShape, colors.scleraTop, colors.scleraBottom, colors.shadow, colors.shadowIntensity);
+  eyesFillEyeSclera(gfx, cx, cy, w, h, radius, eyeShape, rotRad, colors.scleraTop, colors.scleraBottom, colors.shadow, colors.shadowIntensity);
 
-  int16_t px = cx + (int16_t)(sign * (e.pupilX / 100.0f) * (w / 2.0f));
-  int16_t py = cy + (int16_t)((e.pupilY / 100.0f) * (h / 2.0f));
+  // px/py stay device-absolute at rotRad == 0 (unchanged) but become the pupil/iris center's
+  // rotated device position once the eye is rotated — eyesFillEllipseInEye()/
+  // eyesFillPolygonInEye() recover the LOCAL offset by subtracting the eye's own device center
+  // (eyeCx/eyeCy, passed to them separately) back out, so this stays correct either way without
+  // needing a second "local" copy of these coordinates threaded through every call site.
+  int16_t pxLocal = (int16_t)(sign * (e.pupilX / 100.0f) * (w / 2.0f));
+  int16_t pyLocal = (int16_t)((e.pupilY / 100.0f) * (h / 2.0f));
+  int16_t px, py;
+  if (rotRad == 0.0f) {
+    px = cx + pxLocal;
+    py = cy + pyLocal;
+  } else {
+    float rc = cosf(rotRad), rs = sinf(rotRad);
+    px = cx + (int16_t)roundf((float)pxLocal * rc - (float)pyLocal * rs);
+    py = cy + (int16_t)roundf((float)pxLocal * rs + (float)pyLocal * rc);
+  }
 
   int16_t irisRX = (int16_t)((e.irisWidth / 100.0f) * (w / 2.0f));
   int16_t irisRY = (int16_t)((e.irisHeight / 100.0f) * (h / 2.0f));
@@ -2465,10 +2835,10 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   // e.pupilShape selects — see eyesFillPupilShape() above. Skipped entirely when
   // e.pupilVisible is false (Layers panel) without discarding any of the pupil's own settings.
   if (irisRX > 0 && irisRY > 0) {
-    eyesFillIrisGradient(gfx, cx, cy, w, h, radius, px, py, irisRX, irisRY, eyeShape, colors.irisLight, colors.iris, colors.irisDark);
+    eyesFillIrisGradient(gfx, cx, cy, w, h, radius, px, py, irisRX, irisRY, eyeShape, rotRad, colors.irisLight, colors.iris, colors.irisDark);
   }
   if (e.pupilVisible && pupilRX > 0 && pupilRY > 0) {
-    eyesFillPupilShape(gfx, cx, cy, w, h, radius, px, py, pupilRX, pupilRY, e.pupilRotation, e.pupilShape, e.pupilCustomShapeIndex, eyeShape, colors.pupil);
+    eyesFillPupilShape(gfx, cx, cy, w, h, radius, px, py, pupilRX, pupilRY, e.pupilRotation, e.pupilShape, e.pupilCustomShapeIndex, eyeShape, rotRad, colors.pupil);
   }
 
   // Highlight base falls back to iris sizing when the pupil is hidden by size OR by
@@ -2478,20 +2848,23 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   float hlBase = (hlBaseX + hlBaseY) / 2.0f;
   int16_t hR = (int16_t)((e.highlightSize / 100.0f) * hlBase);
   if (hR > 0 && hlBase > 0) {
-    int16_t hx = px + (int16_t)(sign * (e.highlightX / 100.0f) * hlBaseX);
-    int16_t hy = py + (int16_t)((e.highlightY / 100.0f) * hlBaseY);
+    float hCenterLocalX = (float)pxLocal + sign * (e.highlightX / 100.0f) * hlBaseX;
+    float hCenterLocalY = (float)pyLocal + (e.highlightY / 100.0f) * hlBaseY;
+    float eyeHx = w / 2.0f, eyeHy = h / 2.0f;
+    float eyeRx = radius < eyeHx ? (float)radius : eyeHx;
+    float eyeRy = radius < eyeHy ? (float)radius : eyeHy;
     // colors.highlightBlend is the highlight pre-blended 92% over the pupil color, matching
     // the studio's fixed-alpha look (RGB565 can't do the real per-pixel alpha blend here).
-    gfx.fillCircle(hx, hy, hR, colors.highlightBlend);
+    eyesFillHighlightClipped(gfx, cx, cy, hCenterLocalX, hCenterLocalY, hR, eyeHx, eyeHy, eyeRx, eyeRy, eyeShape, rotRad, colors.highlightBlend);
   }
 
   if (e.upperEyelidVisible) {
     eyesFillEyelid(gfx, cx, cy, w, h, radius, true, e.upperEyelid, e.upperEyelidTilt, e.upperEyelidCurvature,
-                   e.upperEyelidRoundness, e.upperEyelidStretchX, e.upperEyelidStretchY, e.upperEyelidSkew, eyeShape, bgColor);
+                   e.upperEyelidRoundness, e.upperEyelidStretchX, e.upperEyelidStretchY, e.upperEyelidSkew, eyeShape, rotRad, bgColor);
   }
   if (e.lowerEyelidVisible) {
     eyesFillEyelid(gfx, cx, cy, w, h, radius, false, e.lowerEyelid, e.lowerEyelidTilt, e.lowerEyelidCurvature,
-                   e.lowerEyelidRoundness, e.lowerEyelidStretchX, e.lowerEyelidStretchY, e.lowerEyelidSkew, eyeShape, bgColor);
+                   e.lowerEyelidRoundness, e.lowerEyelidStretchX, e.lowerEyelidStretchY, e.lowerEyelidSkew, eyeShape, rotRad, bgColor);
   }
 }
 
