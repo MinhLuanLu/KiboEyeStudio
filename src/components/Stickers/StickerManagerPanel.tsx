@@ -4,7 +4,7 @@ import { effectiveStickers } from '@/types'
 import type { StickerAsset, StickerScope } from '@/types'
 import { BUILTIN_STICKER_DRAWERS, BUILTIN_STICKER_ANIMATED } from '@/renderer/builtinStickers'
 import { STICKER_PRESET_BUNDLES } from '@/data/stickerPresets'
-import { decodeGifSticker, decodePngSticker, StickerImportError } from '@/lib/import/stickerImport'
+import { decodeGifSticker, decodePngSticker, decodeSvgSticker, StickerImportError } from '@/lib/import/stickerImport'
 import { StickerControls } from './StickerControls'
 
 const SCOPES: { value: StickerScope; label: string }[] = [
@@ -60,21 +60,39 @@ export function StickerManagerPanel() {
   const [newAssetId, setNewAssetId] = useState(project.stickerAssets[0]?.id ?? '')
   const [dragId, setDragId] = useState<string | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
+  const [justImportedId, setJustImportedId] = useState<string | null>(null)
   const pngInputRef = useRef<HTMLInputElement>(null)
   const gifInputRef = useRef<HTMLInputElement>(null)
+  const svgInputRef = useRef<HTMLInputElement>(null)
 
-  const handleImport = async (file: File, kind: 'png' | 'gif') => {
+  // Editing a specific expression is the natural default scope for anything added while it's
+  // selected — without this, the scope tab silently stays wherever it last was (defaulting to
+  // 'project' on first load), so a sticker added "while editing Happy" actually lands in the
+  // project-wide list and shows up in every expression, which reads as exactly the "stickers
+  // aren't properly scoped to the current expression" bug. Only reacts to the expression
+  // *changing*, so a deliberate manual scope choice (e.g. picking Project on purpose while an
+  // expression stays selected, to add something project-wide) isn't stomped on afterward.
+  useEffect(() => {
+    setStickerScope(selectedExpressionId ? 'expression' : 'project')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedExpressionId])
+
+  const handleImport = async (file: File, kind: 'png' | 'gif' | 'svg') => {
     setImportError(null)
     try {
-      const decoded = kind === 'png' ? await decodePngSticker(file) : await decodeGifSticker(file)
+      const decoded =
+        kind === 'png' ? await decodePngSticker(file) : kind === 'gif' ? await decodeGifSticker(file) : await decodeSvgSticker(file)
       checkpoint()
-      const name = file.name.replace(/\.(png|gif)$/i, '') || 'Sticker'
+      const name = file.name.replace(/\.(png|gif|svg)$/i, '') || 'Sticker'
       const assetId = addStickerAsset({ name, ...decoded })
       setNewAssetId(assetId)
+      setJustImportedId(assetId)
     } catch (err) {
       setImportError(err instanceof StickerImportError ? err.message : `Could not read that ${kind.toUpperCase()} file.`)
     }
   }
+
+  const scopeLabel = stickerScope === 'project' ? 'Project' : stickerScope === 'expression' ? 'Expression' : 'Animation'
 
   const activeExpression = project.expressions.find((e) => e.id === selectedExpressionId) ?? null
   const activeAnimation = getActiveAnimation() ?? null
@@ -111,7 +129,10 @@ export function StickerManagerPanel() {
           <select
             className="flex-1 bg-studio-panel2 border border-studio-border rounded-md text-xs px-2 py-1.5"
             value={newAssetId}
-            onChange={(e) => setNewAssetId(e.target.value)}
+            onChange={(e) => {
+              setNewAssetId(e.target.value)
+              setJustImportedId(null)
+            }}
           >
             {project.stickerAssets.map((a) => (
               <option key={a.id} value={a.id}>
@@ -120,15 +141,19 @@ export function StickerManagerPanel() {
             ))}
           </select>
           <button
-            className="studio-btn text-xs"
+            className={`studio-btn text-xs whitespace-nowrap ${
+              justImportedId && justImportedId === newAssetId ? 'border-studio-accent text-studio-accent' : ''
+            }`}
             disabled={!canAddToScope || !newAssetId}
+            title={`Add the selected sticker to the current ${scopeLabel.toLowerCase()}`}
             onClick={() => {
               checkpoint()
               const id = addSticker(newAssetId)
               if (id) selectSticker(id)
+              setJustImportedId(null)
             }}
           >
-            + Add
+            + Add to {scopeLabel}
           </button>
         </div>
 
@@ -180,6 +205,9 @@ export function StickerManagerPanel() {
             <button className="studio-btn text-xs flex-1" onClick={() => gifInputRef.current?.click()}>
               Import GIF...
             </button>
+            <button className="studio-btn text-xs flex-1" onClick={() => svgInputRef.current?.click()}>
+              Import SVG...
+            </button>
           </div>
           <input
             ref={pngInputRef}
@@ -189,6 +217,17 @@ export function StickerManagerPanel() {
             onChange={(e) => {
               const file = e.target.files?.[0]
               if (file) handleImport(file, 'png')
+              e.target.value = ''
+            }}
+          />
+          <input
+            ref={svgInputRef}
+            type="file"
+            accept=".svg,image/svg+xml"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              if (file) handleImport(file, 'svg')
               e.target.value = ''
             }}
           />

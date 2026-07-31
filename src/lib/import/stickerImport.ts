@@ -78,6 +78,62 @@ export async function decodePngSticker(file: File): Promise<DecodedStickerAsset>
   }
 }
 
+/** Target raster size (px, longest side) for imported SVG stickers — SVGs are vector and have
+ * no natural pixel size, so this picks a resolution sharp enough for a 240x240 display sticker
+ * regardless of the source SVG's own width/height/viewBox (which might be a tiny 24x24 icon or
+ * a huge illustration). The resulting bitmap still passes through extractCappedRgba's own
+ * MAX_RGBA_DIM downscale for the exported RGBA copy, same as PNG/GIF. */
+const SVG_RASTER_TARGET = 200
+
+/** Decodes an SVG into a single-frame raster sticker asset — this project's only other SVG
+ * handling (pupil/eye-shape import, src/lib/svgShapeImport.ts) samples path outlines into a
+ * polygon, not a pixel grid, since those shapes are drawn as fills, not blitted images; a
+ * sticker is composited via ctx.drawImage like any other raster sticker, so it's rasterized the
+ * same way PNG stickers are, just fed an SVG source instead of the uploaded raster directly. */
+export async function decodeSvgSticker(file: File): Promise<DecodedStickerAsset> {
+  const text = await file.text()
+  const doc = new DOMParser().parseFromString(text, 'image/svg+xml')
+  if (doc.querySelector('parsererror')) throw new StickerImportError('That file is not a valid SVG.')
+  const svgEl = doc.documentElement
+  let vw = parseFloat(svgEl.getAttribute('width') ?? '')
+  let vh = parseFloat(svgEl.getAttribute('height') ?? '')
+  if (!vw || !vh) {
+    const viewBox = svgEl.getAttribute('viewBox')
+    const parts = viewBox?.trim().split(/[\s,]+/).map(Number) ?? []
+    if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
+      vw = parts[2]
+      vh = parts[3]
+    }
+  }
+  if (!vw || !vh || !Number.isFinite(vw) || !Number.isFinite(vh)) {
+    vw = 128
+    vh = 128
+  }
+  const scale = SVG_RASTER_TARGET / Math.max(vw, vh)
+  const width = Math.max(1, Math.round(vw * scale))
+  const height = Math.max(1, Math.round(vh * scale))
+
+  const blobUrl = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }))
+  try {
+    const img = await loadImage(blobUrl)
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new StickerImportError('Could not rasterize that SVG.')
+    ctx.drawImage(img, 0, 0, width, height)
+    return {
+      frames: [canvas.toDataURL('image/png')],
+      frameDelaysMs: [100],
+      frameRgba: [extractCappedRgba(canvas)],
+      naturalWidth: width,
+      naturalHeight: height
+    }
+  } finally {
+    URL.revokeObjectURL(blobUrl)
+  }
+}
+
 /**
  * Decodes an animated GIF into its individual frames (as data URLs) plus each frame's native
  * delay, preserving the source's own animation timing. GIF frames are usually delta-encoded —

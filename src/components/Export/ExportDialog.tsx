@@ -6,6 +6,7 @@ import { generateCppHeader } from '@/lib/export/cppExport'
 import { validateStickerExport, type StickerValidationResult } from '@/lib/export/validateStickers'
 import { validatePupilShapeExport, type PupilShapeValidationResult } from '@/lib/export/validatePupilShapes'
 import { validateTimelineTiming, type TimelineTimingValidationResult } from '@/lib/export/validateTimelineTiming'
+import { validateEyeRotationExport, type EyeRotationValidationResult } from '@/lib/export/validateEyeRotation'
 import { parseAnimationJson } from '@/lib/import/jsonImport'
 import { exportFile, importJsonDialog } from '@/state/persistence'
 
@@ -106,6 +107,18 @@ function PupilShapeValidationPanel({ project }: { project: Parameters<typeof val
   )
 }
 
+function EyeRotationValidationPanel({ project }: { project: Parameters<typeof validateEyeRotationExport>[0] }) {
+  const results = useMemo(() => validateEyeRotationExport(project), [project])
+  return (
+    <ValidationPanel<EyeRotationValidationResult>
+      title="Eye Rotation Export Check"
+      results={results}
+      itemKey={(r, i) => `${r.locationId}-${i}`}
+      itemTitle={(r) => r.locationName}
+    />
+  )
+}
+
 function TimelineTimingValidationPanel({ project }: { project: Parameters<typeof validateTimelineTiming>[0] }) {
   const results = useMemo(() => validateTimelineTiming(project), [project])
   return (
@@ -193,6 +206,7 @@ export function ExportDialog() {
             </button>
           </div>
 
+          {tab === 'cpp' && <EyeRotationValidationPanel project={project} />}
           {tab === 'cpp' && <TimelineTimingValidationPanel project={project} />}
           {tab === 'cpp' && <PupilShapeValidationPanel project={project} />}
           {tab === 'cpp' && <StickerValidationPanel project={project} />}
