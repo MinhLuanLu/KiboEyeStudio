@@ -457,7 +457,11 @@ interface StoreState {
   /** Appends a new imported (raster) sticker asset to the project's reusable library —
    * same "asset, then place instances that reference it" split addCustomPupilShape()
    * established for pupil shapes. Returns the new asset's id. */
-  addStickerAsset: (asset: Omit<StickerAsset, 'id' | 'kind'>) => string
+  addStickerAsset: (asset: Omit<StickerAsset, 'id'>) => string
+  /** Persists the studio-computed recolor result for one svg-kind sticker instance — see
+   * StickerInstance.resolvedSvg's own comment for why this needs to be computed here (DOM
+   * available) and stored, not recomputed at export time (no DOM there). */
+  setStickerResolvedSvg: (id: string, resolved: { dataUrl: string; rgba: { width: number; height: number; data: number[] } } | null) => void
   deleteStickerAsset: (id: string) => void
 
   // UI Design Mode — see types/uiDesign.ts. Entirely independent of every action above:
@@ -1981,6 +1985,8 @@ export const useStore = create<StoreState>()(
           rotation: 0,
           opacity: 100,
           tint: null,
+          svgColorMode: 'preserveOriginal',
+          resolvedSvg: null,
           flipH: false,
           flipV: false,
           visible: true,
@@ -2023,6 +2029,8 @@ export const useStore = create<StoreState>()(
           rotation: 0,
           opacity: 100,
           tint: null,
+          svgColorMode: 'preserveOriginal',
+          resolvedSvg: null,
           flipH: false,
           flipV: false,
           visible: true,
@@ -2149,15 +2157,35 @@ export const useStore = create<StoreState>()(
     addStickerAsset: (asset) => {
       const id = nanoid(8)
       set((s) => {
-        s.project.stickerAssets.push({ ...asset, id, kind: 'raster' })
+        s.project.stickerAssets.push({ ...asset, id })
         s.dirty = true
       })
       return id
     },
 
+    // Cascades: every placed instance of this asset (across project/expression/animation
+    // scopes) is removed too, not just the library entry — otherwise those instances would
+    // dangle with an unresolvable assetId, rendering as the Sticker Manager's "Missing asset"
+    // placeholder forever instead of actually disappearing. Silent (no confirm dialog), matching
+    // this app's existing no-confirm convention for sticker/keyframe delete — Undo is the safety
+    // net, same as everywhere else.
     deleteStickerAsset: (id) =>
       set((s) => {
         s.project.stickerAssets = s.project.stickerAssets.filter((a) => a.id !== id)
+        const lists = [s.project.stickers, ...s.project.expressions.map((e) => e.stickers), ...s.project.animations.map((a) => a.stickers)]
+        for (const list of lists) {
+          for (let i = list.length - 1; i >= 0; i--) {
+            if (list[i].assetId === id) list.splice(i, 1)
+          }
+        }
+        if (s.selectedStickerId && !findStickerOwner(s.project, s.selectedStickerId)) s.selectedStickerId = null
+        s.dirty = true
+      }),
+
+    setStickerResolvedSvg: (id, resolved) =>
+      set((s) => {
+        const owner = findStickerOwner(s.project, id)
+        if (owner) owner.list[owner.index].resolvedSvg = resolved
         s.dirty = true
       }),
 

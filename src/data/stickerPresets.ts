@@ -19,6 +19,8 @@ function sticker(name: string, builtinId: string, layer: StickerLayer, x: number
     rotation: 0,
     opacity: 100,
     tint: null,
+    svgColorMode: 'preserveOriginal',
+    resolvedSvg: null,
     flipH: false,
     flipV: false,
     visible: true,

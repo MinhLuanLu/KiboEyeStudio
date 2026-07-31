@@ -649,11 +649,24 @@ function rgbaFrameToRgb565Table(frame: { width: number; height: number; data: nu
   return out
 }
 
+// The raster table key for one sticker instance: a plain PNG/GIF asset is keyed by its own
+// asset id (shared across every instance that uses it — one pixel table, many placements,
+// unchanged from before svg-kind assets existed); an svg-kind asset is keyed per *instance*
+// (`svg:${instance.id}`) instead, since each instance's colors are independently resolved
+// (StickerInstance.resolvedSvg) and two placements of the same SVG can carry different colors
+// — see the "Multiple instances... independent colors" requirement this exists to satisfy.
+function stickerRasterKey(s: StickerInstance, asset: StickerAsset | undefined): string | null {
+  if (asset?.kind === 'raster' && asset.frameRgba) return `asset:${asset.id}`
+  if (asset?.kind === 'svg' && s.resolvedSvg) return `svg:${s.id}`
+  return null
+}
+
 function stickerDefLiteral(s: StickerInstance, asset: StickerAsset | undefined, rasterIndexByAssetId: Map<string, number>): string {
-  const isRaster = asset?.kind === 'raster'
+  const rasterKey = stickerRasterKey(s, asset)
+  const isRaster = rasterKey !== null
   const kind = isRaster ? 'STICKER_KIND_RASTER' : 'STICKER_KIND_PROCEDURAL'
   const assetIndex = isRaster
-    ? String(rasterIndexByAssetId.get(asset!.id) ?? 0)
+    ? String(rasterIndexByAssetId.get(rasterKey!) ?? 0)
     : stickerBuiltinEnumName(asset?.builtinId ?? 'rain')
   const anim = s.anim
   const fields = [
@@ -739,14 +752,24 @@ function exportStickers(project: Project): { code: string; assetsById: Map<strin
   const projectStickers = scopes[0].stickers
   const assetsById = new Map(project.stickerAssets.map((a) => [a.id, a]))
 
-  const usedRasterAssets: StickerAsset[] = []
+  // Normalized shape both raster PNG/GIF assets (frameRgba lives on the shared StickerAsset)
+  // and svg-kind instances (frameRgba is a single already-recolored frame living on the
+  // INSTANCE — see StickerInstance.resolvedSvg) get flattened into before emission, so the
+  // PROGMEM-writing loop below doesn't need to know which case it's looking at.
+  const usedRasterAssets: { name: string; frameRgba: { width: number; height: number; data: number[] }[]; frameDelaysMs?: number[] }[] = []
   const rasterIndexByAssetId = new Map<string, number>()
   for (const { stickers } of scopes) {
     for (const s of stickers) {
       const asset = assetsById.get(s.assetId)
-      if (asset && asset.kind === 'raster' && asset.frameRgba && !rasterIndexByAssetId.has(asset.id)) {
-        rasterIndexByAssetId.set(asset.id, usedRasterAssets.length)
-        usedRasterAssets.push(asset)
+      const key = stickerRasterKey(s, asset)
+      if (!key || rasterIndexByAssetId.has(key)) continue
+      rasterIndexByAssetId.set(key, usedRasterAssets.length)
+      if (asset!.kind === 'raster') {
+        usedRasterAssets.push({ name: asset!.name, frameRgba: asset!.frameRgba!, frameDelaysMs: asset!.frameDelaysMs })
+      } else {
+        // svg — one already-recolored frame, resolved per-instance by the studio (see
+        // StickerControls.tsx's resolve effect); no per-frame delays since it's a single frame.
+        usedRasterAssets.push({ name: `${asset!.name} (${s.name})`, frameRgba: [s.resolvedSvg!.rgba] })
       }
     }
   }

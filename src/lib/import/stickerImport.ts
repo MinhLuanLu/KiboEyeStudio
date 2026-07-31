@@ -1,4 +1,6 @@
 import { decompressFrames, parseGIF } from 'gifuct-js'
+import type { StickerSvgMeta } from '@/types'
+import { parseSvgMeta } from '@/lib/svgRecolor'
 
 /** Thrown for any file that can't become a sticker asset — caught at the call site and shown
  * to the user as a plain-language error rather than crashing the import flow. */
@@ -10,7 +12,7 @@ export class StickerImportError extends Error {}
  * stickers ever actually need at full resolution. */
 const MAX_RGBA_DIM = 64
 
-interface CappedRgba {
+export interface CappedRgba {
   width: number
   height: number
   data: number[]
@@ -35,7 +37,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 
 /** Reads back a canvas's pixels, downsizing first if it exceeds MAX_RGBA_DIM in either
  * dimension — see MAX_RGBA_DIM's own comment for why this cap exists. */
-function extractCappedRgba(source: HTMLCanvasElement): CappedRgba {
+export function extractCappedRgba(source: HTMLCanvasElement): CappedRgba {
   let canvas = source
   if (source.width > MAX_RGBA_DIM || source.height > MAX_RGBA_DIM) {
     const scale = Math.min(MAX_RGBA_DIM / source.width, MAX_RGBA_DIM / source.height)
@@ -85,15 +87,12 @@ export async function decodePngSticker(file: File): Promise<DecodedStickerAsset>
  * MAX_RGBA_DIM downscale for the exported RGBA copy, same as PNG/GIF. */
 const SVG_RASTER_TARGET = 200
 
-/** Decodes an SVG into a single-frame raster sticker asset — this project's only other SVG
- * handling (pupil/eye-shape import, src/lib/svgShapeImport.ts) samples path outlines into a
- * polygon, not a pixel grid, since those shapes are drawn as fills, not blitted images; a
- * sticker is composited via ctx.drawImage like any other raster sticker, so it's rasterized the
- * same way PNG stickers are, just fed an SVG source instead of the uploaded raster directly. */
-export async function decodeSvgSticker(file: File): Promise<DecodedStickerAsset> {
-  const text = await file.text()
-  const doc = new DOMParser().parseFromString(text, 'image/svg+xml')
-  if (doc.querySelector('parsererror')) throw new StickerImportError('That file is not a valid SVG.')
+/** Reads an SVG's own width/height or viewBox to compute an aspect-preserving raster size —
+ * shared by decodeSvgSticker (initial import) and rasterizeSvgText (every subsequent recolor),
+ * so a recolored instance's bitmap always matches the original import's resolution/aspect
+ * ratio exactly, never drifting between the two call sites. */
+function svgRasterSize(svgText: string): { width: number; height: number } {
+  const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml')
   const svgEl = doc.documentElement
   let vw = parseFloat(svgEl.getAttribute('width') ?? '')
   let vh = parseFloat(svgEl.getAttribute('height') ?? '')
@@ -110,10 +109,19 @@ export async function decodeSvgSticker(file: File): Promise<DecodedStickerAsset>
     vh = 128
   }
   const scale = SVG_RASTER_TARGET / Math.max(vw, vh)
-  const width = Math.max(1, Math.round(vw * scale))
-  const height = Math.max(1, Math.round(vh * scale))
+  return { width: Math.max(1, Math.round(vw * scale)), height: Math.max(1, Math.round(vh * scale)) }
+}
 
-  const blobUrl = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }))
+/** Rasterizes SVG markup (already recolored, or not) into a single raster frame — the shared
+ * primitive both the initial import (decodeSvgSticker, below) and every later per-instance
+ * recolor (svgRecolor.ts's output, resolved by the Sticker Manager whenever an instance's
+ * tint/colorMode changes) go through, so "what you see" always comes from this one rasterizer.
+ * Transparency survives automatically: the canvas starts fully transparent and nothing fills a
+ * background before drawImage(), so unpainted SVG regions stay alpha=0 all the way through to
+ * the PNG data URL and the capped RGBA copy. */
+export async function rasterizeSvgText(svgText: string): Promise<{ dataUrl: string; rgba: CappedRgba; width: number; height: number }> {
+  const { width, height } = svgRasterSize(svgText)
+  const blobUrl = URL.createObjectURL(new Blob([svgText], { type: 'image/svg+xml' }))
   try {
     const img = await loadImage(blobUrl)
     const canvas = document.createElement('canvas')
@@ -122,15 +130,35 @@ export async function decodeSvgSticker(file: File): Promise<DecodedStickerAsset>
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new StickerImportError('Could not rasterize that SVG.')
     ctx.drawImage(img, 0, 0, width, height)
-    return {
-      frames: [canvas.toDataURL('image/png')],
-      frameDelaysMs: [100],
-      frameRgba: [extractCappedRgba(canvas)],
-      naturalWidth: width,
-      naturalHeight: height
-    }
+    return { dataUrl: canvas.toDataURL('image/png'), rgba: extractCappedRgba(canvas), width, height }
   } finally {
     URL.revokeObjectURL(blobUrl)
+  }
+}
+
+/** Decodes an SVG into a vector-preserving sticker asset: the raw markup is kept verbatim
+ * (`svgSource`) — this is what preserves hierarchy/transforms/viewBox, since the original text
+ * already has them and nothing here re-derives a lossier representation — alongside a parsed
+ * `svgMeta` summary and a natural-colors raster preview (frames[0], for the Sticker Manager
+ * thumbnail and as a same-shape fallback anywhere a plain `DecodedStickerAsset` is expected).
+ * Actual color customization happens later, per placed *instance* — see svgRecolor.ts and
+ * StickerInstance.resolvedSvg — not here at import time, since a color choice doesn't exist
+ * yet when there's no instance to attach it to. This project's only other SVG handling (pupil/
+ * eye-shape import, src/lib/svgShapeImport.ts) samples path outlines into a polygon instead,
+ * since those shapes are drawn as fills, not blitted images — not reusable here. */
+export async function decodeSvgSticker(file: File): Promise<DecodedStickerAsset & { svgSource: string; svgMeta: StickerSvgMeta }> {
+  const text = await file.text()
+  const meta = parseSvgMeta(text)
+  if (meta.rasterizedFallback && !text.includes('<svg')) throw new StickerImportError('That file is not a valid SVG.')
+  const raster = await rasterizeSvgText(text)
+  return {
+    frames: [raster.dataUrl],
+    frameDelaysMs: [100],
+    frameRgba: [raster.rgba],
+    naturalWidth: raster.width,
+    naturalHeight: raster.height,
+    svgSource: text,
+    svgMeta: meta
   }
 }
 

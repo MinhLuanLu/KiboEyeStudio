@@ -140,6 +140,11 @@ export function normalizeStickerInstances(raw: unknown): StickerInstance[] {
       rotation: typeof r.rotation === 'number' ? r.rotation : 0,
       opacity: typeof r.opacity === 'number' ? r.opacity : 100,
       tint: typeof r.tint === 'string' ? r.tint : null,
+      svgColorMode: r.svgColorMode === 'overrideWithTint' ? 'overrideWithTint' : 'preserveOriginal',
+      resolvedSvg:
+        r.resolvedSvg && typeof r.resolvedSvg === 'object' && typeof (r.resolvedSvg as { dataUrl?: unknown }).dataUrl === 'string'
+          ? (r.resolvedSvg as StickerInstance['resolvedSvg'])
+          : null,
       flipH: Boolean(r.flipH),
       flipV: Boolean(r.flipV),
       visible: r.visible !== false,

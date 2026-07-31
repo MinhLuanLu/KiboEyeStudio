@@ -1,11 +1,19 @@
+import { useEffect, useRef } from 'react'
 import { useStore } from '@/state/store'
-import type { StickerAnimSettings, StickerInstance, StickerLayer, StickerLoopMode } from '@/types'
+import type { StickerAnimSettings, StickerInstance, StickerLayer, StickerLoopMode, StickerSvgColorMode } from '@/types'
 import { Slider } from '@/components/ui/Slider'
 import { ColorField } from '@/components/ui/ColorField'
+import { recolorSvgSource } from '@/lib/svgRecolor'
+import { rasterizeSvgText } from '@/lib/import/stickerImport'
 
 const LAYERS: { value: StickerLayer; label: string }[] = [
   { value: 'behind', label: 'Behind' },
   { value: 'front', label: 'Front' }
+]
+
+const SVG_COLOR_MODES: { value: StickerSvgColorMode; label: string }[] = [
+  { value: 'preserveOriginal', label: 'Preserve Original Colors' },
+  { value: 'overrideWithTint', label: 'Override with Sticker Color' }
 ]
 
 const LOOP_MODES: { value: StickerLoopMode; label: string }[] = [
@@ -36,11 +44,42 @@ function SegmentedPicker<T extends string>({ value, options, onChange }: { value
  * changes," not two. */
 export function StickerControls({ sticker }: { sticker: StickerInstance }) {
   const updateSticker = useStore((s) => s.updateSticker)
+  const setStickerResolvedSvg = useStore((s) => s.setStickerResolvedSvg)
+  const asset = useStore((s) => s.project.stickerAssets.find((a) => a.id === sticker.assetId))
   const checkpoint = useStore((s) => s.checkpoint)
 
   const set = <K extends keyof StickerInstance>(key: K, value: StickerInstance[K]) => updateSticker(sticker.id, { [key]: value } as Partial<StickerInstance>)
   const setAnim = <K extends keyof StickerAnimSettings>(key: K, value: StickerAnimSettings[K]) =>
     updateSticker(sticker.id, { anim: { ...sticker.anim, [key]: value } })
+
+  // Recomputes this instance's resolvedSvg (the baked recolored bitmap — see its own comment
+  // in types/index.ts) whenever the asset/tint/color-mode combination it depends on changes.
+  // Deliberately does NOT depend on `sticker.resolvedSvg` itself, so writing the result back
+  // via setStickerResolvedSvg doesn't re-trigger this effect. Runs once for a freshly-added svg
+  // sticker too (its resolvedSvg starts null), so it renders correctly without ever touching
+  // the color controls.
+  const stickerId = sticker.id
+  const svgSource = asset?.kind === 'svg' ? asset.svgSource : undefined
+  const tint = sticker.tint
+  const svgColorMode = sticker.svgColorMode
+  const cancelledRef = useRef(false)
+  useEffect(() => {
+    cancelledRef.current = false
+    if (!svgSource) return
+    const recolored = recolorSvgSource(svgSource, svgColorMode, tint)
+    rasterizeSvgText(recolored)
+      .then(({ dataUrl, rgba }) => {
+        if (!cancelledRef.current) setStickerResolvedSvg(stickerId, { dataUrl, rgba })
+      })
+      .catch(() => {
+        // Malformed/unrasterizable recolor result — leave resolvedSvg as whatever it was
+        // (falls back to the asset's own natural-colors preview in drawSticker.ts) rather than
+        // crash the controls panel over a bad SVG.
+      })
+    return () => {
+      cancelledRef.current = true
+    }
+  }, [stickerId, svgSource, tint, svgColorMode, setStickerResolvedSvg])
 
   return (
     <div className="flex flex-col gap-4 p-3 border-t border-studio-border">
@@ -60,7 +99,7 @@ export function StickerControls({ sticker }: { sticker: StickerInstance }) {
         <Slider label="Rotation" value={sticker.rotation} min={-180} max={180} suffix="°" onCommitStart={checkpoint} onChange={(v) => set('rotation', v)} />
         <Slider label="Opacity" value={sticker.opacity} min={0} max={100} suffix="%" onCommitStart={checkpoint} onChange={(v) => set('opacity', v)} />
         <div className="flex items-center justify-between">
-          <span className="studio-label">Tint</span>
+          <span className="studio-label">{asset?.kind === 'svg' ? 'Sticker Color' : 'Tint'}</span>
           <div className="flex items-center gap-2">
             {sticker.tint && (
               <button className="text-xs text-studio-muted hover:text-studio-text" onClick={() => { checkpoint(); set('tint', null) }}>
@@ -70,6 +109,47 @@ export function StickerControls({ sticker }: { sticker: StickerInstance }) {
             <ColorField label="" value={sticker.tint ?? '#ffffff'} onCommitStart={checkpoint} onChange={(v) => set('tint', v)} />
           </div>
         </div>
+        {asset?.kind === 'svg' && (
+          <div className="flex flex-col gap-1.5 rounded-md border border-studio-border bg-studio-panel2 p-2">
+            <span className="studio-label text-[10px]">SVG Color Mode</span>
+            <SegmentedPicker
+              value={sticker.svgColorMode}
+              options={SVG_COLOR_MODES}
+              onChange={(v) => { checkpoint(); set('svgColorMode', v) }}
+            />
+            <p className="text-[11px] text-studio-muted leading-relaxed">
+              {asset.svgMeta?.usesCurrentColor
+                ? 'This SVG uses currentColor — those shapes always follow Sticker Color above. '
+                : ''}
+              {sticker.svgColorMode === 'preserveOriginal'
+                ? 'Hardcoded fill/stroke colors in the artwork are kept as authored.'
+                : 'Every hardcoded fill/stroke color is overridden with Sticker Color above.'}
+            </p>
+            {asset.svgMeta && (
+              <details className="text-[11px] text-studio-muted">
+                <summary className="cursor-pointer select-none">Debug info</summary>
+                <div className="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono">
+                  <span>Elements parsed</span>
+                  <span>{asset.svgMeta.elementCount}</span>
+                  <span>Fills detected</span>
+                  <span>{asset.svgMeta.fillCount}</span>
+                  <span>Strokes detected</span>
+                  <span>{asset.svgMeta.strokeCount}</span>
+                  <span>Uses currentColor</span>
+                  <span>{asset.svgMeta.usesCurrentColor ? 'yes' : 'no'}</span>
+                  <span>Has gradients</span>
+                  <span>{asset.svgMeta.hasGradients ? 'yes' : 'no'}</span>
+                  <span>Has clip/mask</span>
+                  <span>{asset.svgMeta.hasClipOrMask ? 'yes' : 'no'}</span>
+                  <span>Rasterized fallback</span>
+                  <span>{asset.svgMeta.rasterizedFallback ? 'yes (parse failed)' : 'no — recolored as vectors'}</span>
+                  <span>Resolved this instance</span>
+                  <span>{sticker.resolvedSvg ? 'yes' : 'pending…'}</span>
+                </div>
+              </details>
+            )}
+          </div>
+        )}
         <div className="flex gap-2">
           <button
             className={`studio-btn flex-1 text-xs ${sticker.flipH ? 'studio-tab-active' : ''}`}

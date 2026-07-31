@@ -596,7 +596,28 @@ export type StickerLayer = 'behind' | 'front'
  * state, same role EyeSide plays for eyeTarget (see state/store.ts's stickerScope). */
 export type StickerScope = 'project' | 'expression' | 'animation'
 export type StickerLoopMode = 'once' | 'loop' | 'pingpong'
-export type StickerAssetKind = 'procedural' | 'raster'
+export type StickerAssetKind = 'procedural' | 'raster' | 'svg'
+/** How a placed SVG sticker instance's own hardcoded (non-currentColor) fill/stroke colors are
+ * treated — see StickerInstance.svgColorMode. currentColor elements always follow the
+ * instance's tint regardless of this mode (there's no "original" color to preserve for them). */
+export type StickerSvgColorMode = 'preserveOriginal' | 'overrideWithTint'
+
+/** Structural stats parsed from an SVG sticker source at import time — surfaced in the
+ * Sticker Manager's debug panel and used to decide how the recolor engine should treat the
+ * asset (e.g. whether currentColor needs resolving). Purely informational beyond that; never
+ * used to gate whether recoloring is attempted. */
+export interface StickerSvgMeta {
+  elementCount: number
+  fillCount: number
+  strokeCount: number
+  usesCurrentColor: boolean
+  hasGradients: boolean
+  hasClipOrMask: boolean
+  /** True if the source couldn't be parsed as an SVG element tree at all (e.g. malformed
+   * markup) — the asset still gets a rasterized preview, but recoloring falls back to the old
+   * flat-tint overlay instead of selective vector recoloring. */
+  rasterizedFallback: boolean
+}
 
 /** Built-in procedural sticker ids — see src/renderer/builtinStickers.ts for their drawers. */
 export type BuiltinStickerId =
@@ -640,6 +661,15 @@ export interface StickerAsset {
    * this project's established arduino-cli compile-verification workflow). Same length as
    * `frames`. Only present on 'raster' assets. */
   frameRgba?: { width: number; height: number; data: number[] }[]
+  /** Set when kind === 'svg' — the original uploaded SVG markup, verbatim (this is what
+   * preserves hierarchy/transforms/viewBox: no separate representation is derived for those,
+   * the source text already has them). Recolored live per placed instance — see
+   * StickerInstance.svgColorMode/resolvedSvg — never mutated on the asset itself, since color
+   * is a per-instance concern (multiple placements of one SVG can each have their own color). */
+  svgSource?: string
+  /** Set when kind === 'svg' — parsed once at import time, informational (debug panel) plus
+   * used to decide currentColor handling. */
+  svgMeta?: StickerSvgMeta
 }
 
 /** All per-sticker animation controls — evaluated as a closed-form function of elapsed time
@@ -686,8 +716,23 @@ export interface StickerInstance {
   scaleY: number
   rotation: number
   opacity: number
-  /** null = the asset's native colors/frames, unmodified. */
+  /** null = the asset's native colors/frames, unmodified. For a kind:'svg' asset, this also
+   * doubles as the override/currentColor color — see svgColorMode below. */
   tint: string | null
+  /** Only meaningful when the referenced asset is kind:'svg'. 'preserveOriginal' (default)
+   * keeps every hardcoded fill/stroke color as authored; 'overrideWithTint' rewrites every
+   * hardcoded fill/stroke to `tint` too. Either way, any currentColor fill/stroke always
+   * resolves to `tint` (there's no original color to preserve for those) — see svgRecolor.ts. */
+  svgColorMode: StickerSvgColorMode
+  /** Studio-computed cache: `tint`/`svgColorMode` applied to the asset's svgSource, rasterized
+   * — recomputed (in the renderer process, where a DOM exists) whenever assetId/tint/
+   * svgColorMode change, then persisted here so both the live canvas (fast path — draw from
+   * this instead of re-rasterizing every animation frame) and the C++ export (which runs with
+   * no DOM at all — see StickerAsset.frameRgba's own comment for why) can use it with zero
+   * further parsing. null until first resolved (e.g. immediately after adding an svg sticker,
+   * for one frame) or if the asset isn't kind:'svg'. Independent per instance — this is what
+   * lets two placements of the same SVG asset carry different colors. */
+  resolvedSvg: { dataUrl: string; rgba: { width: number; height: number; data: number[] } } | null
   flipH: boolean
   flipV: boolean
   visible: boolean

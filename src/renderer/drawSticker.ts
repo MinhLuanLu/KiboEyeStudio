@@ -127,6 +127,17 @@ export function drawSticker(ctx: CanvasRenderingContext2D, instance: StickerInst
     ctx.scale(hw, hh) // drawer operates in [-1,1] unit space
     drawer(ctx, tSec, instance.tint ?? '#ffffff')
     ctx.restore()
+  } else if (asset.kind === 'svg') {
+    // The recolor (currentColor -> tint, and hardcoded fills/strokes -> tint when
+    // svgColorMode === 'overrideWithTint') is already baked into resolvedSvg.dataUrl per
+    // instance — see StickerInstance.resolvedSvg's own comment and svgRecolor.ts. Drawn plain
+    // (no source-atop overlay on top), since re-tinting an already-selectively-recolored image
+    // would flatten it right back into the one-flat-color result this whole system exists to
+    // avoid. Falls back to the asset's natural-colors import preview for the one/two frames
+    // before the first resolve completes (e.g. right after adding the sticker).
+    const dataUrl = instance.resolvedSvg?.dataUrl ?? asset.frames?.[0]
+    const img = dataUrl ? getImage(dataUrl) : null
+    if (img) ctx.drawImage(img, -hw, -hh, hw * 2, hh * 2)
   } else if (asset.kind === 'raster' && asset.frames && asset.frames.length > 0) {
     const frameIndex = pickRasterFrame(asset, animMs, anim)
     const img = getImage(asset.frames[frameIndex])

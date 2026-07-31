@@ -59,6 +59,7 @@ export function StickerManagerPanel() {
   const moveStickerOrder = useStore((s) => s.moveStickerOrder)
   const applyStickerPreset = useStore((s) => s.applyStickerPreset)
   const addStickerAsset = useStore((s) => s.addStickerAsset)
+  const deleteStickerAsset = useStore((s) => s.deleteStickerAsset)
   const checkpoint = useStore((s) => s.checkpoint)
 
   const [newAssetId, setNewAssetId] = useState(project.stickerAssets[0]?.id ?? '')
@@ -90,7 +91,7 @@ export function StickerManagerPanel() {
         kind === 'png' ? await decodePngSticker(file) : kind === 'gif' ? await decodeGifSticker(file) : await decodeSvgSticker(file)
       checkpoint()
       const name = file.name.replace(/\.(png|gif|svg)$/i, '') || 'Sticker'
-      const assetId = addStickerAsset({ name, ...decoded })
+      const assetId = addStickerAsset({ name, kind: kind === 'svg' ? 'svg' : 'raster', ...decoded })
       setNewAssetId(assetId)
       setJustImportedId(assetId)
     } catch (err) {
@@ -179,18 +180,33 @@ export function StickerManagerPanel() {
           <span className="studio-label">Drag onto a Timeline sticker track</span>
           <div className="flex gap-1.5 overflow-x-auto pb-1">
             {project.stickerAssets.map((a) => (
-              <button
-                key={a.id}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData('application/x-kibo-sticker-asset', a.id)
-                  e.dataTransfer.effectAllowed = 'copy'
-                }}
-                className="shrink-0 cursor-grab active:cursor-grabbing"
-                title={`Drag "${a.name}" onto a sticker track to place it there`}
-              >
-                <StickerThumb asset={a} />
-              </button>
+              <div key={a.id} className="relative shrink-0">
+                <button
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData('application/x-kibo-sticker-asset', a.id)
+                    e.dataTransfer.effectAllowed = 'copy'
+                  }}
+                  className="cursor-grab active:cursor-grabbing"
+                  title={`Drag "${a.name}" onto a sticker track to place it there`}
+                >
+                  <StickerThumb asset={a} />
+                </button>
+                {a.kind !== 'procedural' && (
+                  <button
+                    title={`Remove "${a.name}" from the sticker library (also removes every placed instance of it)`}
+                    className="absolute -top-1.5 -right-1.5 w-4 h-4 flex items-center justify-center rounded-full bg-studio-panel border border-studio-border text-[9px] text-studio-muted hover:text-red-400 hover:border-red-400"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      checkpoint()
+                      deleteStickerAsset(a.id)
+                      if (newAssetId === a.id) setNewAssetId(project.stickerAssets.find((o) => o.id !== a.id)?.id ?? '')
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         </div>
