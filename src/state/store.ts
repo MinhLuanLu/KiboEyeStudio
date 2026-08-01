@@ -321,6 +321,11 @@ interface StoreState {
   clearTimelineSelection: () => void
   setSnappingEnabled: (enabled: boolean) => void
 
+  /** Sets the active animation's total duration directly, clamping so it never cuts off
+   * existing keyframes, sticker clips, or markers. This is the whole-timeline "ms" input
+   * the Timeline toolbar edits. */
+  setAnimationDuration: (durationMs: number) => void
+
   /** Continuous-drag primitive (like the old updateKeyframeDuration) — callers checkpoint()
    * once at drag-start, then call this on every pointermove. Clamps against MIN_SEGMENT_MS
    * neighbor gaps; the pose track's first keyframe stays pinned at t=0. Dragging the pose
@@ -1433,6 +1438,24 @@ export const useStore = create<StoreState>()(
       }),
 
     setSnappingEnabled: (enabled) => set((s) => void (s.snappingEnabled = enabled)),
+
+    setAnimationDuration: (durationMs) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        const maxKeyframeTime = Math.max(
+          0,
+          ...a.keyframes.map((k) => k.timeMs),
+          ...a.leftEyeKeyframes.map((k) => k.timeMs),
+          ...a.rightEyeKeyframes.map((k) => k.timeMs),
+          ...a.pupilKeyframes.map((k) => k.timeMs),
+          ...a.eyelidKeyframes.map((k) => k.timeMs),
+          ...a.stickers.map((st) => st.anim.endTimeMs ?? st.anim.startTimeMs),
+          ...a.markers.map((m) => m.timeMs)
+        )
+        a.durationMs = Math.max(Math.round(durationMs), maxKeyframeTime)
+        s.dirty = true
+      }),
 
     setKeyframeTime: (trackKind, keyframeId, timeMs) =>
       set((s) => {

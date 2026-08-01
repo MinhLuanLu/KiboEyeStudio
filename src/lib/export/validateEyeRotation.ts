@@ -10,13 +10,11 @@ export interface EyeRotationValidationResult {
   messages: string[]
 }
 
-/** Firmware's eyesDrawEye() never reads EyeParams.rotation — every fill routine (sclera,
- * border, glow, iris, eyelids, and any custom eye-shape boundary) walks the eye row-by-row in
- * an *unrotated* local frame, so a tilted eye renders upright on real hardware even though the
- * studio's Canvas 2D preview rotates the whole eye via ctx.rotate() before drawing anything.
- * This is a real, structural export gap (not a rounding/precision issue), so it's surfaced here
- * the same way a dangling custom pupil/eye shape reference is — a concrete reason a project
- * won't look the same on hardware, not a silent mismatch. */
+/** Firmware's eyesDrawEye() and the Studio preview now share the same rotation model:
+ * the whole eye, including its boundary, fills, eyelids, pupil, and highlight, is rotated
+ * around the eye center before drawing. This check is therefore informational only, surfacing
+ * authored rotations so the export panel can confirm they are handled by the generated code
+ * instead of treating them as a hardware mismatch. */
 export function validateEyeRotationExport(project: Project): EyeRotationValidationResult[] {
   const results: EyeRotationValidationResult[] = []
   const locations: { id: string; label: string; params: EyeParams }[] = []
@@ -36,9 +34,9 @@ export function validateEyeRotationExport(project: Project): EyeRotationValidati
       results.push({
         locationId: loc.id,
         locationName: loc.label,
-        status: 'warning',
+        status: 'passed',
         messages: [
-          `Rotation is ${loc.params.rotation}° here, but the exported firmware doesn't rotate the eye's outer shape — this eye renders upright on real hardware, not tilted like the studio preview.`
+          `Rotation is ${loc.params.rotation}° here and is exported with the same rotation logic as the Studio preview.`
         ]
       })
     }

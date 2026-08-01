@@ -68,29 +68,57 @@ export function TimelineInspector() {
     if (!kf) return null
     const isPinned = trackKind === 'pose' && idx === 0
     const filteredExpressions = expressions.filter((e) => e.name.toLowerCase().includes(exprSearch.toLowerCase()))
+    const nudgeKeyframeTime = (deltaMs: number) => {
+      checkpoint()
+      setKeyframeTime(trackKind, kf.id, kf.timeMs + deltaMs)
+    }
 
     return (
       <div className="flex flex-col gap-2.5 studio-panel p-2.5">
         <div className="flex items-center gap-4 flex-wrap">
           <div className="flex flex-col gap-1">
             <span className="studio-label">Time (ms)</span>
-            <input
-              type="number"
-              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-24 disabled:opacity-50"
-              min={0}
-              disabled={isPinned}
-              value={Math.round(kf.timeMs)}
-              onChange={(e) => {
-                checkpoint()
-                setKeyframeTime(trackKind, kf.id, Number(e.target.value))
-              }}
-              title={isPinned ? 'The first Expression keyframe is always pinned at 0ms' : undefined}
-            />
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                step={1}
+                inputMode="numeric"
+                className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-24 disabled:opacity-50"
+                min={0}
+                disabled={isPinned}
+                value={Math.round(kf.timeMs)}
+                onChange={(e) => {
+                  checkpoint()
+                  setKeyframeTime(trackKind, kf.id, Number(e.target.value))
+                }}
+                title={isPinned ? 'The first Expression keyframe is always pinned at 0ms' : undefined}
+              />
+              <button
+                type="button"
+                className="studio-btn px-2 py-1 text-xs disabled:opacity-50"
+                disabled={isPinned}
+                onClick={() => nudgeKeyframeTime(-1)}
+                title="Decrease by 1ms"
+              >
+                -1
+              </button>
+              <button
+                type="button"
+                className="studio-btn px-2 py-1 text-xs disabled:opacity-50"
+                disabled={isPinned}
+                onClick={() => nudgeKeyframeTime(1)}
+                title="Increase by 1ms"
+              >
+                +1
+              </button>
+            </div>
           </div>
           <div className="flex flex-col gap-1">
             <span className="studio-label">Frame</span>
             <input
               type="number"
+              step={1}
+              inputMode="numeric"
               className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-20 disabled:opacity-50"
               min={0}
               disabled={isPinned}

@@ -16,6 +16,7 @@ interface TimelineToolbarProps {
   playbackTimeMs: number
   fps: number
   pxPerMs: number
+  onDurationChange: (durationMs: number) => void
   onZoomChange: (pxPerMs: number) => void
   onZoomToFit: () => void
   snappingEnabled: boolean
@@ -46,6 +47,7 @@ export function TimelineToolbar({
   playbackTimeMs,
   fps,
   pxPerMs,
+  onDurationChange,
   onZoomChange,
   onZoomToFit,
   snappingEnabled,
@@ -76,7 +78,19 @@ export function TimelineToolbar({
         <span title="Frame">F{msToFrame(playbackTimeMs, fps)}</span>
         <span title="FPS">{fps}fps</span>
         <span>·</span>
-        <span title="Total duration">{Math.round(durationMs)}ms total</span>
+        <label className="flex items-center gap-1">
+          <span className="text-studio-muted">Total</span>
+          <input
+            type="number"
+            step={1}
+            min={0}
+            className="w-24 bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-xs text-studio-text"
+            value={Math.round(durationMs)}
+            onChange={(e) => onDurationChange(Number(e.target.value))}
+            title="Whole animation duration in milliseconds"
+          />
+          <span>ms</span>
+        </label>
       </div>
 
       <div className="flex items-center gap-1 ml-auto">

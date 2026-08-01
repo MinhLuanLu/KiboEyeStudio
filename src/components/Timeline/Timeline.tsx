@@ -126,6 +126,7 @@ export function Timeline() {
   const toggleTimelineSelection = useStore((s) => s.toggleTimelineSelection)
   const clearTimelineSelection = useStore((s) => s.clearTimelineSelection)
   const setSnappingEnabled = useStore((s) => s.setSnappingEnabled)
+  const setAnimationDuration = useStore((s) => s.setAnimationDuration)
   const setKeyframeTime = useStore((s) => s.setKeyframeTime)
   const moveSelectionByDelta = useStore((s) => s.moveSelectionByDelta)
   const resizeStickerClip = useStore((s) => s.resizeStickerClip)
@@ -403,6 +404,7 @@ export function Timeline() {
         playbackTimeMs={playbackTimeMs}
         fps={fps}
         pxPerMs={pxPerMs}
+        onDurationChange={(ms) => setAnimationDuration(ms)}
         onZoomChange={(v) => setPxPerMs(Math.min(MAX_PX_PER_MS, Math.max(MIN_PX_PER_MS, v)))}
         onZoomToFit={zoomToFit}
         snappingEnabled={snappingEnabled}

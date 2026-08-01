@@ -908,6 +908,7 @@ const PLAYER_CODE = `#ifndef EYES_EYE_PLAYER_H
 #define EYES_EYE_PLAYER_H
 
 #include <math.h>
+#include <initializer_list>
 
 // ---- Easing — same curves as the studio's Easing picker ----
 inline float eyesEase(float t, uint8_t type, int8_t bx1, int8_t by1, int8_t bx2, int8_t by2) {
@@ -2517,27 +2518,71 @@ inline bool eyesPlayAnimationPair(const EyeAnimation& anim, unsigned long& start
 // eyesPlayer directly (to merge in whichever expression's/animation's own stickers are
 // currently active — see the Stickers comment further up) as an ordinary, non-dependent name.
 const unsigned long EYES_BLEND_MS = 250;
+constexpr uint8_t EYES_MAX_ANIMATION_SEQUENCE = 32;
 
 struct EyesPlayerState {
-  bool playingAnimation;
-  const EyeExpression* expression;
-  EyeAnimation animation;
-  unsigned long animStart;
-  uint16_t frameIndex;
-  LiveEye live;
+  bool playingAnimation = false;
+  const EyeExpression* expression = nullptr;
+  EyeAnimation animation = {};
+  unsigned long animStart = 0;
+  uint16_t frameIndex = 0;
+  LiveEye live = {};
   // Right eye's pose, only ever different from \`live\` while playing an animation whose
   // EyeAnimation.framesRight is non-null (see UpdateEyes()/UpdateEyesRight()) — mirrors \`live\`
   // for static expressions, matching the studio's own "expressions/idle never diverge per eye
   // during Animate playback" behavior (only Design mode's live pose and animations with an
   // authored Left Eye/Right Eye track ever do).
-  LiveEye liveRight;
-  LiveEye blendFrom;
-  unsigned long blendStart;
-  bool blending;
-  EyeColorSet colorsLeft;
-  EyeColorSet colorsRight;
+  LiveEye liveRight = {};
+  LiveEye blendFrom = {};
+  unsigned long blendStart = 0;
+  bool blending = false;
+  EyeColorSet colorsLeft = EYE_COLORS_LEFT;
+  EyeColorSet colorsRight = EYE_COLORS_RIGHT;
+  bool sequencePlaying = false;
+  EyeAnimation sequence[EYES_MAX_ANIMATION_SEQUENCE] = {};
+  uint8_t sequenceCount = 0;
+  uint8_t sequenceIndex = 0;
+  bool sequenceLoop = false;
 };
-static EyesPlayerState eyesPlayer = { false, nullptr, { nullptr, 0, false, nullptr, nullptr, 0 }, 0, 0, {}, {}, {}, 0, false, EYE_COLORS_LEFT, EYE_COLORS_RIGHT };
+static EyesPlayerState eyesPlayer;
+
+inline void eyesStartAnimation(const EyeAnimation& animation) {
+  eyesPlayer.playingAnimation = true;
+  eyesPlayer.animation = animation;
+  eyesPlayer.animStart = millis();
+  eyesPlayer.frameIndex = 0;
+  eyesPlayer.blending = false;
+}
+
+inline unsigned long eyesAnimationDurationMs(const EyeAnimation& animation) {
+  if (animation.count == 0) return 0;
+  unsigned long duration = 0;
+  uint16_t segments = animation.loop ? animation.count : (animation.count - 1);
+  for (uint16_t i = 0; i < segments; i++) {
+    unsigned long frameDuration = animation.frames[i].durationMs;
+    if (frameDuration == 0) frameDuration = 1;
+    duration += frameDuration;
+  }
+  return duration == 0 ? 1 : duration;
+}
+
+inline bool eyesAdvanceAnimationSequence() {
+  if (!eyesPlayer.sequencePlaying || eyesPlayer.sequenceCount == 0) return false;
+  uint8_t nextIndex = (uint8_t)(eyesPlayer.sequenceIndex + 1);
+  if (nextIndex < eyesPlayer.sequenceCount) {
+    eyesPlayer.sequenceIndex = nextIndex;
+  } else if (eyesPlayer.sequenceLoop) {
+    eyesPlayer.sequenceIndex = 0;
+  } else {
+    eyesPlayer.sequencePlaying = false;
+    eyesPlayer.sequenceCount = 0;
+    eyesPlayer.sequenceIndex = 0;
+    eyesPlayer.sequenceLoop = false;
+    return false;
+  }
+  eyesStartAnimation(eyesPlayer.sequence[eyesPlayer.sequenceIndex]);
+  return true;
+}
 
 // Shows a static expression, crossfading smoothly from whatever's currently on screen —
 // call it with any Expr_* constant, e.g. SetExpression(Expr_Happy). Also switches this
@@ -2551,17 +2596,50 @@ inline void SetExpression(const EyeExpression& expression) {
   eyesPlayer.expression = &expression;
   eyesPlayer.colorsLeft = *expression.colorsLeft;
   eyesPlayer.colorsRight = *expression.colorsRight;
+  eyesPlayer.sequencePlaying = false;
+  eyesPlayer.sequenceCount = 0;
+  eyesPlayer.sequenceIndex = 0;
+  eyesPlayer.sequenceLoop = false;
 }
 
 // Plays (or restarts) an animation from its first keyframe — call it with any Anim_*
 // constant, e.g. PlayAnimation(Anim_Blink). Colors are left untouched (matching the studio,
 // where Animate mode never changes the color theme — only expressions can).
 inline void PlayAnimation(const EyeAnimation& animation) {
-  eyesPlayer.playingAnimation = true;
-  eyesPlayer.animation = animation;
-  eyesPlayer.animStart = millis();
-  eyesPlayer.frameIndex = 0;
-  eyesPlayer.blending = false;
+  eyesPlayer.sequencePlaying = false;
+  eyesPlayer.sequenceCount = 0;
+  eyesPlayer.sequenceIndex = 0;
+  eyesPlayer.sequenceLoop = false;
+  eyesStartAnimation(animation);
+}
+
+// Plays several Anim_* constants in order, automatically advancing to the next one when the
+// current animation finishes one full cycle. Looping animations still get to run their own
+// looped cycle first; the sequence advances only after that cycle completes. The helper keeps
+// a tiny fixed buffer in player state so it stays heap-free on ESP32 and other embedded targets.
+inline void PlayAnimationSequence(std::initializer_list<EyeAnimation> animations, bool loop = false) {
+  uint8_t count = 0;
+  for (const EyeAnimation& animation : animations) {
+    if (count >= EYES_MAX_ANIMATION_SEQUENCE) break;
+    eyesPlayer.sequence[count++] = animation;
+  }
+  if (count == 0) {
+    eyesPlayer.sequencePlaying = false;
+    eyesPlayer.sequenceCount = 0;
+    eyesPlayer.sequenceIndex = 0;
+    eyesPlayer.sequenceLoop = false;
+    return;
+  }
+  eyesPlayer.sequenceCount = count;
+  eyesPlayer.sequenceIndex = 0;
+  eyesPlayer.sequenceLoop = loop;
+  eyesPlayer.sequencePlaying = true;
+  eyesStartAnimation(eyesPlayer.sequence[0]);
+}
+
+// Friendly alias for the sequence helper, matching the example usage in the exported header.
+inline void AnimationCombination(std::initializer_list<EyeAnimation> animations, bool loop = false) {
+  PlayAnimationSequence(animations, loop);
 }
 
 // Advances whatever's currently playing and returns the pose to draw this frame. Call this
@@ -2577,7 +2655,14 @@ inline LiveEye UpdateEyes() {
     eyesPlayer.live = eyesLerpLive(eyesPlayer.blendFrom, target, t);
     eyesPlayer.liveRight = eyesPlayer.live;
   } else if (eyesPlayer.playingAnimation) {
-    eyesPlayAnimationPair(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live, eyesPlayer.liveRight);
+    unsigned long sequenceElapsed = millis() - eyesPlayer.animStart;
+    bool stillPlaying = eyesPlayAnimationPair(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live, eyesPlayer.liveRight);
+    bool animationFinished = eyesPlayer.animation.loop
+      ? sequenceElapsed >= eyesAnimationDurationMs(eyesPlayer.animation)
+      : !stillPlaying;
+    if (animationFinished && eyesPlayer.sequencePlaying) {
+      eyesAdvanceAnimationSequence();
+    }
   } else if (eyesPlayer.expression) {
     eyesPlayer.live = eyesLerpFrame(*eyesPlayer.expression->frame, *eyesPlayer.expression->frame, 0);
     eyesPlayer.liveRight = eyesPlayer.live;
@@ -3038,11 +3123,12 @@ function exportQuickReference(project: Project): string {
 
   const lines: string[] = []
   lines.push('// ---- Quick Reference --------------------------------------------------------')
-  lines.push('// Everything you can pass to PlayAnimation(...) / SetExpression(...) below.')
+  lines.push('// Everything you can pass to PlayAnimation(...) / PlayAnimationSequence(...) / SetExpression(...) below.')
   lines.push('//')
   if (project.animations.length > 0) {
     lines.push('// Animations:')
     for (const a of project.animations) lines.push(`//   PlayAnimation(Anim_${toIdentifier(a.name)});`)
+    lines.push('//   PlayAnimationSequence({ Anim_Idle, Anim_Curious, Anim_Blink, Anim_Happy });')
   } else {
     lines.push('// Animations: (this project has none yet)')
   }
