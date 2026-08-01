@@ -181,8 +181,10 @@ export function drawEye(
     lowerEyelidTilt,
     upperEyelidCurvature,
     lowerEyelidCurvature,
-    upperEyelidRoundness,
-    lowerEyelidRoundness,
+    upperEyelidLeftRoundness,
+    upperEyelidRightRoundness,
+    lowerEyelidLeftRoundness,
+    lowerEyelidRightRoundness,
     upperEyelidStretchX,
     lowerEyelidStretchX,
     upperEyelidStretchY,
@@ -411,19 +413,28 @@ export function drawEye(
   // Roundness/stretchX/stretchY/skew reshape this same taper — each one guaranteed to
   // preserve the "exactly 0, exactly zero-slope at u=±1" edge property above, so none of them
   // can ever reintroduce the corner kink the squared taper was chosen to avoid:
-  //   - roundness (0-100) inserts a flat "plateau" of width `plateau` around u=0 where
-  //     taper=1, then re-runs the same quartic taper over the *remaining* span out to u=±1
-  //     (rescaled so it still lands on exactly 0 there) — this is what turns a single narrow
-  //     peaked bump into a wider, flatter-topped dome that reads as a continuous rounded
-  //     oval/egg arc. roundness=0 makes plateau=0, exactly reproducing the original formula.
+  //   - leftRoundness/rightRoundness (0-100 each, independent) each insert a flat "plateau"
+  //     of width `plateau` on their own side of u=0 where taper=1, then re-run the same
+  //     quartic taper over the *remaining* span out to u=±1 (rescaled so it still lands on
+  //     exactly 0 there) — this is what turns a single narrow peaked bump into a wider,
+  //     flatter-topped dome that reads as a continuous rounded oval/egg arc, independently on
+  //     each end. Both 0 makes plateau=0 on both sides, exactly reproducing the original
+  //     single-roundness formula. Splitting one shared knob into two independent ones is safe
+  //     at every value: `taper`'s derivative at the plateau boundary is `-4·uu·(1-uu²)/span`,
+  //     which is exactly 0 at `uu=0` (i.e. right at the boundary) *regardless of `span`* — so
+  //     the flat plateau and the descending quartic already glue together with zero slope for
+  //     any plateau width, on either side, independently. That's also why this was already
+  //     safe when skew (below) biased one side's plateau wider than the other's — giving each
+  //     side its own base plateau width reuses that exact same guarantee.
   //   - stretchX (0-100%) is roundness's inverse-direction complement: it compresses the
   //     taper into a narrower portion of the remaining (non-plateau) span, leaving the rest
   //     flat at 0 — narrows the bump instead of widening it. 100% reproduces the original
   //     span exactly.
   //   - stretchY (0-200%) is a plain multiply on curveOffset — safe at any value since it
   //     never touches the taper's horizontal domain at all.
-  //   - skew (-100 to 100) biases the plateau to be wider on one side than the other,
-  //     shifting the bump's visual peak left/right instead of leaving it centered.
+  //   - skew (-100 to 100) additionally biases each side's own plateau to be wider or
+  //     narrower than its independently-set base width, shifting the bump's visual peak
+  //     left/right on top of whatever left/right roundness already authored.
   // Canvas has no built-in primitive for this curve, so the path is built by sampling it at
   // one point per device pixel column and connecting with lineTo — with that many samples the
   // polyline is visually indistinguishable from a true smooth curve, and it guarantees this
@@ -438,7 +449,8 @@ export function drawEye(
     yBase: number,
     curveOffset: number,
     sign: 1 | -1,
-    roundness: number,
+    leftRoundness: number,
+    rightRoundness: number,
     stretchX: number,
     stretchY: number,
     skew: number
@@ -448,7 +460,8 @@ export function drawEye(
       pts.push([0, yBase])
       return pts
     }
-    const roundFrac = Math.max(0, Math.min(100, roundness)) / 100
+    const leftRoundFrac = Math.max(0, Math.min(100, leftRoundness)) / 100
+    const rightRoundFrac = Math.max(0, Math.min(100, rightRoundness)) / 100
     const compress = Math.max(0.0001, Math.max(0, Math.min(100, stretchX)) / 100)
     const skewFrac = Math.max(-100, Math.min(100, skew)) / 100
     const offset = curveOffset * (Math.max(0, Math.min(200, stretchY)) / 100)
@@ -456,6 +469,7 @@ export function drawEye(
       const x = halfW - (2 * halfW * i) / curveSamples
       const u = x / halfW
       const side = u >= 0 ? 1 : -1
+      const roundFrac = side >= 0 ? rightRoundFrac : leftRoundFrac
       // Wider plateau on the side skew leans toward — always < 1 so a taper span always
       // remains, which is what keeps taper(u=±1) pinned at exactly 0 regardless of skew.
       const plateau = Math.max(0, Math.min(0.85, roundFrac * 0.7 * (1 + side * skewFrac * 0.6)))
@@ -485,7 +499,8 @@ export function drawEye(
     ctx.moveTo(-lidMargin, -lidMargin)
     ctx.lineTo(lidMargin, -lidMargin)
     ctx.lineTo(lidMargin, yBase)
-    for (const [x, y] of eyelidCurvePoints(yBase, curveOffset, 1, upperEyelidRoundness, upperEyelidStretchX, upperEyelidStretchY, upperEyelidSkew)) ctx.lineTo(x, y)
+    for (const [x, y] of eyelidCurvePoints(yBase, curveOffset, 1, upperEyelidLeftRoundness, upperEyelidRightRoundness, upperEyelidStretchX, upperEyelidStretchY, upperEyelidSkew))
+      ctx.lineTo(x, y)
     ctx.lineTo(-lidMargin, yBase)
     ctx.closePath()
     ctx.fill()
@@ -502,7 +517,8 @@ export function drawEye(
     ctx.moveTo(-lidMargin, lidMargin)
     ctx.lineTo(lidMargin, lidMargin)
     ctx.lineTo(lidMargin, yBase)
-    for (const [x, y] of eyelidCurvePoints(yBase, curveOffset, -1, lowerEyelidRoundness, lowerEyelidStretchX, lowerEyelidStretchY, lowerEyelidSkew)) ctx.lineTo(x, y)
+    for (const [x, y] of eyelidCurvePoints(yBase, curveOffset, -1, lowerEyelidLeftRoundness, lowerEyelidRightRoundness, lowerEyelidStretchX, lowerEyelidStretchY, lowerEyelidSkew))
+      ctx.lineTo(x, y)
     ctx.lineTo(-lidMargin, yBase)
     ctx.closePath()
     ctx.fill()

@@ -10,11 +10,13 @@ import { collectAnimationBreakpoints } from './cppExport'
 // width/height/radius/rotation/distance/eyePosX/eyePosY/irisWidth/irisHeight/pupilWidth/
 // pupilHeight/pupilX/pupilY = 13 single-byte fields -> offset 13; pupilRotation (uint16) needs
 // 2-byte alignment, so 1 pad byte -> offset 14, +2 bytes -> offset 16; upperEyelid through
-// highlightSize = 17 more single-byte fields -> offset 33; durationMs (uint16) needs 2-byte
-// alignment, so 1 pad byte -> offset 34, +2 bytes -> offset 36; easing through
-// lowerEyelidVisible = 17 more single-byte fields -> offset 53; rounded up to the struct's own
-// 2-byte alignment (from its uint16 members) -> 54.
-const EYE_FRAME_BYTES = 54
+// highlightSize = 19 more single-byte fields (upperEyelidLeftRoundness/RightRoundness and
+// lowerEyelidLeftRoundness/RightRoundness replaced the old single upperEyelidRoundness/
+// lowerEyelidRoundness pair, +2 fields net) -> offset 35; durationMs (uint16) needs 2-byte
+// alignment, so 1 pad byte -> offset 36, +2 bytes -> offset 38; easing through
+// lowerEyelidVisible = 17 more single-byte fields -> offset 55; rounded up to the struct's own
+// 2-byte alignment (from its uint16 members) -> 56.
+const EYE_FRAME_BYTES = 56
 
 // Pupil Shapes section flash cost (see exportPupilShapes() in cppExport.ts) — separate from
 // EYE_FRAME_BYTES since it's per-project, not per-keyframe: the 5 built-in shape tables

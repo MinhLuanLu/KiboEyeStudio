@@ -95,8 +95,29 @@ export function removeRecentProject(path: string): void {
   }
 }
 
+/** Old saved projects/animation JSON only ever had one shared `upperEyelidRoundness`/
+ * `lowerEyelidRoundness` field per lid — split into independent Left/Right End Roundness
+ * fields since. If the raw params object still only has the old field (no new ones), copy
+ * that single value into both new fields so an old project renders byte-identical to before;
+ * if the new fields are already present (saved after this change), they win as-is. */
+function migrateEyelidRoundness(params: Partial<EyeParams>): Partial<EyeParams> {
+  const raw = params as unknown as Record<string, unknown>
+  const oldUpper = raw.upperEyelidRoundness
+  const oldLower = raw.lowerEyelidRoundness
+  const patch: Partial<EyeParams> = {}
+  if (typeof oldUpper === 'number' && params.upperEyelidLeftRoundness === undefined && params.upperEyelidRightRoundness === undefined) {
+    patch.upperEyelidLeftRoundness = oldUpper
+    patch.upperEyelidRightRoundness = oldUpper
+  }
+  if (typeof oldLower === 'number' && params.lowerEyelidLeftRoundness === undefined && params.lowerEyelidRightRoundness === undefined) {
+    patch.lowerEyelidLeftRoundness = oldLower
+    patch.lowerEyelidRightRoundness = oldLower
+  }
+  return patch
+}
+
 function normalizeEyeParams(params: Partial<EyeParams> | undefined): EyeParams {
-  return { ...DEFAULT_EYE_PARAMS, ...(params ?? {}) }
+  return { ...DEFAULT_EYE_PARAMS, ...(params ?? {}), ...migrateEyelidRoundness(params ?? {}) }
 }
 
 function normalizeEyeParamsOverride(params: Partial<EyeParams> | null | undefined): EyeParams | null {

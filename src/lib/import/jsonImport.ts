@@ -39,12 +39,31 @@ function isEyeParams(value: unknown): value is EyeParams {
  * enum lookups and silently emit `undefined` into the generated C++ literal instead of a valid
  * enum identifier. Booleans spread from DEFAULT_EYE_PARAMS first so a missing field backfills
  * to its default rather than becoming `undefined`. */
+// Old hand-authored/exported animation JSON only ever had one shared `upperEyelidRoundness`/
+// `lowerEyelidRoundness` field per lid — split into independent Left/Right End Roundness
+// fields since (see the identical migration in persistence.ts's normalizeEyeParams()). If the
+// raw params object still only has the old field (no new ones), copy that value into both new
+// fields so an old file imports byte-identical to before.
+function migrateEyelidRoundness(raw: Record<string, unknown>): Partial<EyeParams> {
+  const patch: Partial<EyeParams> = {}
+  if (typeof raw.upperEyelidRoundness === 'number' && raw.upperEyelidLeftRoundness === undefined && raw.upperEyelidRightRoundness === undefined) {
+    patch.upperEyelidLeftRoundness = raw.upperEyelidRoundness
+    patch.upperEyelidRightRoundness = raw.upperEyelidRoundness
+  }
+  if (typeof raw.lowerEyelidRoundness === 'number' && raw.lowerEyelidLeftRoundness === undefined && raw.lowerEyelidRightRoundness === undefined) {
+    patch.lowerEyelidLeftRoundness = raw.lowerEyelidRoundness
+    patch.lowerEyelidRightRoundness = raw.lowerEyelidRoundness
+  }
+  return patch
+}
+
 function normalizeImportedParams(params: EyeParams): EyeParams {
   const shape = params.pupilShape
   const eyeShape = params.eyeShape
   return {
     ...DEFAULT_EYE_PARAMS,
     ...params,
+    ...migrateEyelidRoundness(params as unknown as Record<string, unknown>),
     pupilShape: PUPIL_SHAPE_IDS.includes(shape) ? shape : DEFAULT_EYE_PARAMS.pupilShape,
     pupilCustomShapeId: typeof params.pupilCustomShapeId === 'string' ? params.pupilCustomShapeId : null,
     eyeShape: EYE_SHAPE_IDS.includes(eyeShape) ? eyeShape : DEFAULT_EYE_PARAMS.eyeShape,

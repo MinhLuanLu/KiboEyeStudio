@@ -75,12 +75,21 @@ export interface EyeParams {
   /** How pronounced each lid's soft curved edge is: 0 (flat/neutral), -100 (curved inward) to 100 (curved outward). */
   upperEyelidCurvature: number
   lowerEyelidCurvature: number
-  /** 0-100: blends the curve's taper from today's pinched quartic bump (0) toward a wider,
-   * flatter-topped profile (100) that reads as a continuous rounded oval/egg arc instead of a
-   * single narrow peak — see eyelidCurvePoints() in drawEye.ts for the exact formula. Backward
-   * compatible: 0 reproduces the original formula exactly. */
-  upperEyelidRoundness: number
-  lowerEyelidRoundness: number
+  /** 0-100 each: independently blends each END's taper from today's pinched quartic bump (0)
+   * toward a wider, flatter-topped profile (100) that reads as a continuous rounded oval/egg
+   * arc instead of a single narrow peak — see eyelidCurvePoints() in drawEye.ts for the exact
+   * formula. "Left"/"Right" mean the rendered left/right side of THIS eye's own eyelid (not
+   * mirrored per-eye — same convention *Skew already uses below), so a left-eye and right-eye
+   * both read "Left End Roundness" as their own screen-left end. Splitting one shared knob into
+   * two independent ones is safe at every value: the taper's plateau-to-quartic seam has zero
+   * slope regardless of plateau width (see eyelidCurvePoints()'s comment), so two differently-
+   * sized plateaus glued at u=0 never introduces a corner. Backward compatible: old saved
+   * projects/animation JSON only had one `upperEyelidRoundness`/`lowerEyelidRoundness` field —
+   * normalizeEyeParams()/normalizeImportedParams() copy that value into both new fields on load. */
+  upperEyelidLeftRoundness: number
+  upperEyelidRightRoundness: number
+  lowerEyelidLeftRoundness: number
+  lowerEyelidRightRoundness: number
   /** 0-100: compresses the taper into a narrower central portion (100 = today's full-width
    * taper, lower = more pinched) — the inverse-direction complement to roundness, so together
    * they cover the full range from "very narrow bump" to "very wide/flat" while always staying
@@ -235,8 +244,10 @@ export const EYELID_TRACK_FIELDS: (keyof EyeParams)[] = [
   'lowerEyelidTilt',
   'upperEyelidCurvature',
   'lowerEyelidCurvature',
-  'upperEyelidRoundness',
-  'lowerEyelidRoundness',
+  'upperEyelidLeftRoundness',
+  'upperEyelidRightRoundness',
+  'lowerEyelidLeftRoundness',
+  'lowerEyelidRightRoundness',
   'upperEyelidStretchX',
   'lowerEyelidStretchX',
   'upperEyelidStretchY',
@@ -510,8 +521,10 @@ export const STYLE_EYE_PARAM_FIELDS: (keyof EyeParams)[] = [
   'eyeShapeFlipV',
   'upperEyelidCurvature',
   'lowerEyelidCurvature',
-  'upperEyelidRoundness',
-  'lowerEyelidRoundness',
+  'upperEyelidLeftRoundness',
+  'upperEyelidRightRoundness',
+  'lowerEyelidLeftRoundness',
+  'lowerEyelidRightRoundness',
   'upperEyelidStretchX',
   'lowerEyelidStretchX',
   'upperEyelidStretchY',
@@ -908,8 +921,10 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   lowerEyelidTilt: 0,
   upperEyelidCurvature: 0,
   lowerEyelidCurvature: 0,
-  upperEyelidRoundness: 0,
-  lowerEyelidRoundness: 0,
+  upperEyelidLeftRoundness: 0,
+  upperEyelidRightRoundness: 0,
+  lowerEyelidLeftRoundness: 0,
+  lowerEyelidRightRoundness: 0,
   upperEyelidStretchX: 100,
   lowerEyelidStretchX: 100,
   upperEyelidStretchY: 100,
@@ -1053,8 +1068,10 @@ export const EYE_PARAM_RANGES: Record<
   lowerEyelidTilt: [-45, 45],
   upperEyelidCurvature: [-100, 100],
   lowerEyelidCurvature: [-100, 100],
-  upperEyelidRoundness: [0, 100],
-  lowerEyelidRoundness: [0, 100],
+  upperEyelidLeftRoundness: [0, 100],
+  upperEyelidRightRoundness: [0, 100],
+  lowerEyelidLeftRoundness: [0, 100],
+  lowerEyelidRightRoundness: [0, 100],
   upperEyelidStretchX: [0, 100],
   lowerEyelidStretchX: [0, 100],
   upperEyelidStretchY: [0, 200],
