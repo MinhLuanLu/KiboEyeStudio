@@ -1,5 +1,5 @@
-import type { Animation, EyeParams, Keyframe } from '@/types'
-import { PUPIL_TRACK_FIELDS, EYELID_TRACK_FIELDS, SHAPE_TRACK_FIELDS } from '@/types'
+import type { Animation, EyeParams, EyeSide, Keyframe } from '@/types'
+import { PUPIL_TRACK_FIELDS, EYELID_TRACK_FIELDS, SHAPE_TRACK_FIELDS, keyframeParamsFor } from '@/types'
 import { applyEasing } from './easing'
 
 const EYE_PARAM_KEYS = [
@@ -8,6 +8,8 @@ const EYE_PARAM_KEYS = [
   'radius',
   'distance',
   'rotation',
+  'eyePosX',
+  'eyePosY',
   'irisWidth',
   'irisHeight',
   'pupilWidth',
@@ -101,15 +103,25 @@ export function wrapMs(timeMs: number, durationMs: number, loop: boolean): numbe
  * the normal/default state for every animation that hasn't had that track authored yet. A
  * single-keyframe track holds that one pose constant for the whole animation. `kfs` is assumed
  * sorted by `timeMs` ascending — every store action that writes to a keyframe track re-sorts
- * after mutating (see store.ts), so callers never need to sort defensively here. */
-export function sampleTrack(kfs: Keyframe[], loop: boolean, durationMs: number, timeMs: number): SampleResult | null {
+ * after mutating (see store.ts), so callers never need to sort defensively here.
+ *
+ * `eye`, when given, resolves each sampled keyframe's per-eye divergence (keyframeParamsFor —
+ * `leftParams`/`rightParams`, null-means-follow-`params`) instead of always reading `params`
+ * directly — this is what lets a single keyframe on the pose/pupils/eyelids track hold distinct
+ * Both/Left/Right poses without needing a separate leftEye/rightEye TRACK at all. Omitted (or
+ * 'both') reproduces the exact pre-existing behavior (always `params`), which is also correct
+ * for sampling a dedicated leftEye/rightEye track's own keyframes — those are already tied to
+ * one side by which array they're in, so their own leftParams/rightParams (always null) are
+ * never consulted. */
+export function sampleTrack(kfs: Keyframe[], loop: boolean, durationMs: number, timeMs: number, eye?: EyeSide): SampleResult | null {
   if (kfs.length === 0) return null
-  if (kfs.length === 1) return { params: kfs[0].params, segmentIndex: 0, segmentT: 0 }
+  const at = (kf: Keyframe): EyeParams => (eye ? keyframeParamsFor(kf, eye) : kf.params)
+  if (kfs.length === 1) return { params: at(kfs[0]), segmentIndex: 0, segmentT: 0 }
 
   const t = wrapMs(timeMs, durationMs, loop)
   const last = kfs[kfs.length - 1]
 
-  if (t <= kfs[0].timeMs) return { params: kfs[0].params, segmentIndex: 0, segmentT: 0 }
+  if (t <= kfs[0].timeMs) return { params: at(kfs[0]), segmentIndex: 0, segmentT: 0 }
 
   for (let i = 0; i < kfs.length - 1; i++) {
     const from = kfs[i]
@@ -118,12 +130,12 @@ export function sampleTrack(kfs: Keyframe[], loop: boolean, durationMs: number, 
       const span = Math.max(1, to.timeMs - from.timeMs)
       const localT = Math.min(1, Math.max(0, (t - from.timeMs) / span))
       const eased = applyEasing(localT, from.easing, from.customBezier)
-      return { params: lerpParams(from.params, to.params, eased), segmentIndex: i, segmentT: localT }
+      return { params: lerpParams(at(from), at(to), eased), segmentIndex: i, segmentT: localT }
     }
   }
 
   if (!loop || durationMs <= last.timeMs) {
-    return { params: last.params, segmentIndex: kfs.length - 1, segmentT: 1 }
+    return { params: at(last), segmentIndex: kfs.length - 1, segmentT: 1 }
   }
 
   // Loop-back segment: from the last keyframe, wrapping past durationMs back to the first
@@ -132,7 +144,7 @@ export function sampleTrack(kfs: Keyframe[], loop: boolean, durationMs: number, 
   const span = Math.max(1, durationMs - last.timeMs)
   const localT = Math.min(1, Math.max(0, (t - last.timeMs) / span))
   const eased = applyEasing(localT, last.easing, last.customBezier)
-  return { params: lerpParams(last.params, kfs[0].params, eased), segmentIndex: kfs.length - 1, segmentT: localT }
+  return { params: lerpParams(at(last), at(kfs[0]), eased), segmentIndex: kfs.length - 1, segmentT: localT }
 }
 
 /** Merges the pose track with the pupils/eyelids/left-or-right-eye tracks into one final
@@ -144,20 +156,27 @@ export function sampleTrack(kfs: Keyframe[], loop: boolean, durationMs: number, 
  * what makes an animation with no left/right/pupil/eyelid tracks authored yet (every pre-
  * Phase-1 project) behave byte-identically to the old single-track model. */
 export function sampleAnimationEye(anim: Animation, timeMs: number, eye: 'left' | 'right'): EyeParams {
-  const pose = sampleTrack(anim.keyframes, anim.loop, anim.durationMs, timeMs)
+  // `eye` passed through so each track's own per-keyframe leftParams/rightParams (see
+  // keyframeParamsFor()) resolve for this side before lerping/merging — this is the primary way
+  // a single pose/pupils/eyelids keyframe now carries Both/Left/Right divergence, without
+  // needing a dedicated leftEye/rightEye track at all.
+  const pose = sampleTrack(anim.keyframes, anim.loop, anim.durationMs, timeMs, eye)
   if (!pose) {
     throw new Error('Cannot sample an animation with no pose keyframes')
   }
   const merged = { ...pose.params }
 
-  const pupils = sampleTrack(anim.pupilKeyframes, anim.loop, anim.durationMs, timeMs)
+  const pupils = sampleTrack(anim.pupilKeyframes, anim.loop, anim.durationMs, timeMs, eye)
   if (pupils) {
     for (const field of PUPIL_TRACK_FIELDS) (merged as unknown as Record<string, unknown>)[field] = (pupils.params as unknown as Record<string, unknown>)[field]
   }
-  const eyelids = sampleTrack(anim.eyelidKeyframes, anim.loop, anim.durationMs, timeMs)
+  const eyelids = sampleTrack(anim.eyelidKeyframes, anim.loop, anim.durationMs, timeMs, eye)
   if (eyelids) {
     for (const field of EYELID_TRACK_FIELDS) (merged as unknown as Record<string, unknown>)[field] = (eyelids.params as unknown as Record<string, unknown>)[field]
   }
+  // The dedicated leftEye/rightEye tracks (still reachable via the Timeline's explicit "+
+  // Track") stay a separate, higher-precedence override on top of the above — no `eye` passed
+  // here since each array is already tied to one side by which array it is.
   const sideKfs = eye === 'left' ? anim.leftEyeKeyframes : anim.rightEyeKeyframes
   const side = sampleTrack(sideKfs, anim.loop, anim.durationMs, timeMs)
   if (side) {

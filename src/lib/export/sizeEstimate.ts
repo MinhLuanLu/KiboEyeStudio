@@ -2,18 +2,19 @@ import type { Project } from '@/types'
 import { expressionShapeDiverges } from '@/types'
 import { collectAnimationBreakpoints } from './cppExport'
 
-// Matches sizeof(EyeFrame) from cppExport.ts's struct layout, with typical compiler
-// padding: 3x uint8 + 1x int8 + 1x uint8 + 2x uint8 (irisWidth/Height) + 2x uint8
-// (pupilWidth/Height) + 2x int8 (pupilX/Y) = 11 bytes, then uint16 pupilRotation needs
-// 2-byte alignment so 1 pad byte is inserted (-> offset 12) + 2 bytes = 14, + 2x uint8
-// (eyelids) + 2x int8 (eyelid tilt) + 2x int8 (eyelid curvature) + 2x uint8 (eyelid
-// roundness) + 2x uint8 (eyelid stretchX) + 2x uint8 (eyelid stretchY) + 2x int8 (eyelid
-// skew) + 2x int8 (highlight X/Y) + 1x uint8 (highlightSize) = 31 (all packed tightly, no
-// further padding since offset 14 was already 2-byte aligned), then uint16 durationMs needs
-// 2-byte alignment so 1 more pad byte (-> offset 32) + 2 bytes = 34, + uint8 easing + 4x int8
-// bezier = 39, + uint8 pupilShape + uint8 pupilCustomShapeIndex = 41, rounded up to 42 for
-// the struct's own 2-byte alignment (from its uint16 members).
-const EYE_FRAME_BYTES = 42
+// Matches sizeof(EyeFrame) from cppExport.ts's struct layout, with typical compiler padding.
+// Recomputed field-by-field from the struct's current (full) member list, not incrementally
+// patched — the previous version of this comment predated several fields (pupilVisible,
+// eyeShape/eyeCustomShapeIndex/eyeShapeScale/eyeShapeOffsetX/Y/eyeShapeFlipH/V,
+// upperEyelidVisible/lowerEyelidVisible) and had drifted out of sync with the real struct.
+// width/height/radius/rotation/distance/eyePosX/eyePosY/irisWidth/irisHeight/pupilWidth/
+// pupilHeight/pupilX/pupilY = 13 single-byte fields -> offset 13; pupilRotation (uint16) needs
+// 2-byte alignment, so 1 pad byte -> offset 14, +2 bytes -> offset 16; upperEyelid through
+// highlightSize = 17 more single-byte fields -> offset 33; durationMs (uint16) needs 2-byte
+// alignment, so 1 pad byte -> offset 34, +2 bytes -> offset 36; easing through
+// lowerEyelidVisible = 17 more single-byte fields -> offset 53; rounded up to the struct's own
+// 2-byte alignment (from its uint16 members) -> 54.
+const EYE_FRAME_BYTES = 54
 
 // Pupil Shapes section flash cost (see exportPupilShapes() in cppExport.ts) — separate from
 // EYE_FRAME_BYTES since it's per-project, not per-keyframe: the 5 built-in shape tables

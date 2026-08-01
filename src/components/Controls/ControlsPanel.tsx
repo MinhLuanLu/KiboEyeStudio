@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useStore, getActiveAnimation } from '@/state/store'
-import { effectiveEyeParams, effectiveVisualReferenceParams, EYE_PARAM_RANGES, DEFAULT_EYE_PARAMS } from '@/types'
-import type { EyeParams, EyeShapeId, PupilShapeId } from '@/types'
+import type { KeyframeTrackKind } from '@/state/store'
+import { effectiveEyeParams, effectiveVisualReferenceParams, keyframeParamsFor, EYE_PARAM_RANGES, DEFAULT_EYE_PARAMS } from '@/types'
+import type { EyeParams, EyeShapeId, PupilShapeId, Keyframe, EyeSide } from '@/types'
 import { Slider } from '@/components/ui/Slider'
 import { EyeTargetSelector } from '@/components/ui/EyeTargetSelector'
 import { StyleFieldRow } from '@/components/ui/StyleFieldRow'
@@ -17,6 +18,33 @@ const CONTROLS_TABS: { value: ControlsTab; label: string }[] = [
   { value: 'eyelids', label: 'Eyelids' },
   { value: 'timing', label: 'Timing' }
 ]
+
+/** A selected Timeline keyframe can live on any of the 5 keyframe tracks, not just the pose
+ * ("Expression") track — this is the one place that mapping is spelled out for ControlsPanel,
+ * mirroring the identical local helper TimelineInspector.tsx already has for the same reason
+ * (no shared export exists for it, matching that file's own precedent). */
+function keyframeListForKind(anim: NonNullable<ReturnType<typeof getActiveAnimation>>, trackKind: KeyframeTrackKind): Keyframe[] {
+  switch (trackKind) {
+    case 'pose':
+      return anim.keyframes
+    case 'leftEye':
+      return anim.leftEyeKeyframes
+    case 'rightEye':
+      return anim.rightEyeKeyframes
+    case 'pupils':
+      return anim.pupilKeyframes
+    case 'eyelids':
+      return anim.eyelidKeyframes
+  }
+}
+
+const TRACK_KIND_LABEL: Record<KeyframeTrackKind, string> = {
+  pose: 'shared, both eyes',
+  leftEye: 'Left Eye',
+  rightEye: 'Right Eye',
+  pupils: 'Pupils, both eyes',
+  eyelids: 'Eyelids, both eyes'
+}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -53,25 +81,52 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
   const checkpoint = useStore((s) => s.checkpoint)
 
   const mode = useStore((s) => s.mode)
-  const selectedKeyframeId = useStore((s) => s.selectedKeyframeId)
+  const timelineSelection = useStore((s) => s.timelineSelection)
   const selectedExpressionId = useStore((s) => s.selectedExpressionId)
-  const updateKeyframeParams = useStore((s) => s.updateKeyframeParams)
+  const updateTrackKeyframeParams = useStore((s) => s.updateTrackKeyframeParams)
+  const updateTrackKeyframeEyeParams = useStore((s) => s.updateTrackKeyframeEyeParams)
   const anim = useStore(() => getActiveAnimation())
-  const selectedKeyframe = editTarget === 'live' && mode === 'animate' ? anim?.keyframes.find((k) => k.id === selectedKeyframeId) : undefined
+
+  // Which single keyframe (if any) the Timeline currently has selected, and which of the 5
+  // tracks it lives on — a leftEye/rightEye/pupils/eyelids selection used to be silently
+  // invisible here (this panel only ever looked in the pose track's keyframes), so editing
+  // while one of those was selected actually edited the live base pose instead, with no
+  // indication anything was wrong. updateTrackKeyframeParams is the track-aware write path
+  // every field below now goes through (via setParam) instead of the pose-only legacy action.
+  const selectedItem =
+    editTarget === 'live' && mode === 'animate' && timelineSelection.length === 1 && timelineSelection[0].kind === 'keyframe'
+      ? timelineSelection[0]
+      : null
+  const selectedTrackKind: KeyframeTrackKind | null = selectedItem ? (selectedItem.trackId as KeyframeTrackKind) : null
+  const selectedKeyframe = selectedTrackKind && anim ? keyframeListForKind(anim, selectedTrackKind).find((k) => k.id === selectedItem!.id) : undefined
+
+  // What the Eye Target selector shows/does while a keyframe is selected. 'leftEye'/'rightEye'
+  // tracks are already tied to one specific side by which track they're on — the selector is
+  // disabled there and just displays that side. 'pupils'/'eyelids' have no left/right concept at
+  // all, so they're disabled and shown as 'both'. 'pose' is the one case with real per-keyframe
+  // divergence (Keyframe.leftParams/rightParams, see keyframeParamsFor()) — there the selector
+  // stays fully interactive and reads/writes the global `eyeTarget`, exactly like the live base
+  // pose does; switching it never creates a new keyframe or jumps tracks, it only changes which
+  // of the SAME keyframe's params/leftParams/rightParams is being edited.
+  const keyframeEyeTargetValue: EyeSide | undefined =
+    selectedTrackKind === 'leftEye' ? 'left' : selectedTrackKind === 'rightEye' ? 'right' : selectedTrackKind === 'pose' ? undefined : 'both'
+  const keyframeEyeTargetDisabled = selectedTrackKind === 'leftEye' || selectedTrackKind === 'rightEye' || selectedTrackKind === 'pupils' || selectedTrackKind === 'eyelids'
 
   const [tab, setTab] = useState<ControlsTab>('shape')
 
-  // Keyframes stay a single shared pose (mirrored for both eyes) — the Eye Target selector
-  // only applies to the live base pose, so it's disabled while a keyframe is selected.
   const target: EyeParams =
     editTarget === 'visual-reference'
       ? effectiveVisualReferenceParams(project.visualReference, eyeTarget)
       : selectedKeyframe
-        ? selectedKeyframe.params
+        ? selectedTrackKind === 'pose'
+          ? keyframeParamsFor(selectedKeyframe, eyeTarget)
+          : selectedKeyframe.params
         : effectiveEyeParams(project, eyeTarget)
   const setParam = <K extends keyof EyeParams>(key: K, value: EyeParams[K]) => {
     if (editTarget === 'visual-reference') setVisualReferenceParam(key, value)
-    else if (selectedKeyframe) updateKeyframeParams(selectedKeyframe.id, { [key]: value } as Partial<EyeParams>)
+    else if (selectedKeyframe && selectedTrackKind === 'pose' && eyeTarget !== 'both')
+      updateTrackKeyframeEyeParams('pose', selectedKeyframe.id, eyeTarget, { [key]: value } as Partial<EyeParams>)
+    else if (selectedKeyframe && selectedTrackKind) updateTrackKeyframeParams(selectedTrackKind, selectedKeyframe.id, { [key]: value } as Partial<EyeParams>)
     else setEyeParam(key, value)
   }
 
@@ -121,11 +176,19 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
   const editingContext: 'keyframe' | 'expression' | 'base' | null =
     editTarget === 'visual-reference' ? null : selectedKeyframe ? 'keyframe' : selectedExpressionId ? 'expression' : 'base'
   const visualReference = project.visualReference
-  // Keyframes have no left/right concept (always one shared pose), so they always compare
-  // against/reset to the VR's shared base regardless of the current Eye Target; expressions
-  // and the base pose resolve whichever VR variant (base/left/right) matches the eye being
-  // edited, same resolution rule as `target` above.
-  const vrReference: EyeParams = selectedKeyframe ? visualReference.params : effectiveVisualReferenceParams(visualReference, eyeTarget)
+  // Pupils/eyelids keyframes have no left/right concept (always one shared pose), so they
+  // compare against/reset to the VR's shared base regardless of the current Eye Target. A
+  // leftEye/rightEye-track keyframe IS tied to one specific side by which track it's on, so it
+  // compares against that side's own VR variant instead. A pose-track keyframe now has real
+  // per-eye divergence of its own (leftParams/rightParams), so it resolves exactly like the base
+  // pose/expressions do — via the current `eyeTarget`.
+  const vrReference: EyeParams = selectedKeyframe
+    ? selectedTrackKind === 'leftEye' || selectedTrackKind === 'rightEye'
+      ? effectiveVisualReferenceParams(visualReference, selectedTrackKind === 'leftEye' ? 'left' : 'right')
+      : selectedTrackKind === 'pose'
+        ? effectiveVisualReferenceParams(visualReference, eyeTarget)
+        : visualReference.params
+    : effectiveVisualReferenceParams(visualReference, eyeTarget)
   const isStyleOverridden = (field: keyof EyeParams) => target[field] !== vrReference[field]
   const resetStyleField = (field: keyof EyeParams) => {
     checkpoint()
@@ -163,9 +226,9 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
           <div className="text-xs bg-studio-accent/15 text-studio-accent border border-studio-accent/40 rounded-md px-2 py-1.5">
             Editing the Visual Reference's default shape — {eyeTarget === 'both' ? 'Both Eyes' : eyeTarget === 'left' ? 'Left Eye' : 'Right Eye'}
           </div>
-        ) : selectedKeyframe ? (
+        ) : selectedKeyframe && selectedTrackKind ? (
           <div className="text-xs bg-studio-accent/15 text-studio-accent border border-studio-accent/40 rounded-md px-2 py-1.5">
-            Editing selected keyframe (shared, both eyes)
+            Editing selected keyframe — {TRACK_KIND_LABEL[selectedTrackKind]}
           </div>
         ) : (
           <div className="text-xs bg-studio-panel2 text-studio-muted border border-studio-border rounded-md px-2 py-1.5">
@@ -180,7 +243,25 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
           </p>
         )}
 
-        <EyeTargetSelector disabled={!!selectedKeyframe} />
+        {selectedKeyframe && keyframeEyeTargetDisabled && (
+          <p className="text-[11px] text-studio-muted -mt-1">
+            {selectedTrackKind === 'pupils'
+              ? "This track only contributes the Iris & Pupil tab's pupil fields when merged with the Expression track — values on other tabs are stored but not used from here. Pupils has no separate left/right track, so Eye Target isn't switchable here."
+              : selectedTrackKind === 'eyelids'
+                ? "This track only contributes the Eyelids tab's fields when merged with the Expression track — values on other tabs are stored but not used from here. Eyelids has no separate left/right track, so Eye Target isn't switchable here."
+                : `This keyframe is on its own dedicated ${selectedTrackKind === 'leftEye' ? 'Left' : 'Right'} Eye track, so it's already tied to that side — Eye Target isn't switchable here.`}
+          </p>
+        )}
+
+        <EyeTargetSelector disabled={selectedKeyframe ? keyframeEyeTargetDisabled : false} value={selectedKeyframe ? keyframeEyeTargetValue : undefined} />
+
+        {selectedKeyframe && !keyframeEyeTargetDisabled && (
+          <p className="text-[11px] text-studio-muted -mt-1">
+            {selectedTrackKind === 'pose'
+              ? 'Picking Left Eye or Right Eye edits this same keyframe’s own per-eye values — it never creates a new keyframe or track.'
+              : "This track only contributes the Shape tab's fields (position, size, rotation, eye shape) when merged with the Expression track — values on other tabs are stored but not used from here."}
+          </p>
+        )}
       </div>
 
       <PanelTabs tabs={CONTROLS_TABS} active={tab} onChange={setTab} />
@@ -202,6 +283,11 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
               )}
               <Slider label="Eye Distance" value={target.distance} min={EYE_PARAM_RANGES.distance[0]} max={EYE_PARAM_RANGES.distance[1]} onCommitStart={checkpoint} onChange={(v) => setParam('distance', v)} />
               <Slider label="Eye Rotation" value={target.rotation} min={EYE_PARAM_RANGES.rotation[0]} max={EYE_PARAM_RANGES.rotation[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('rotation', v)} />
+              {/* Moves the whole eye around the display, on top of the symmetric ±distance/2
+                  placement above — see EyeParams.eyePosX's own comment. Distinct from "Shape
+                  Offset X/Y" below, which only nudges the traced silhouette within its own box. */}
+              <Slider label="Eye Position X" value={target.eyePosX} min={EYE_PARAM_RANGES.eyePosX[0]} max={EYE_PARAM_RANGES.eyePosX[1]} suffix="px" onCommitStart={checkpoint} onChange={(v) => setParam('eyePosX', v)} />
+              <Slider label="Eye Position Y" value={target.eyePosY} min={EYE_PARAM_RANGES.eyePosY[0]} max={EYE_PARAM_RANGES.eyePosY[1]} suffix="px" onCommitStart={checkpoint} onChange={(v) => setParam('eyePosY', v)} />
               {editTarget === 'visual-reference' && <PreviewOnlyNote />}
             </Section>
 
@@ -228,34 +314,40 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
               </StyleFieldRow>
 
               {target.eyeShape !== 'default' && (
+                <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('eyeShapeScale')} onReset={() => resetStyleField('eyeShapeScale')}>
+                  <Slider
+                    label="Shape Scale"
+                    value={target.eyeShapeScale}
+                    min={EYE_PARAM_RANGES.eyeShapeScale[0]}
+                    max={EYE_PARAM_RANGES.eyeShapeScale[1]}
+                    suffix="%"
+                    onCommitStart={checkpoint}
+                    onChange={(v) => setParam('eyeShapeScale', v)}
+                  />
+                </StyleFieldRow>
+              )}
+              {/* Shape Offset X/Y works for every eye shape, including 'default' (the plain
+                  rounded-rect/ellipse boundary) — see roundedRectPath()'s offsetX/offsetY
+                  params in drawEye.ts and eyesEyeHalfWidthAtShape()/eyesEyeHalfHeightAtShape()'s
+                  default branch in cppExport.ts, both of which now honor it unconditionally. */}
+              <Slider
+                label="Shape Offset X"
+                value={target.eyeShapeOffsetX}
+                min={EYE_PARAM_RANGES.eyeShapeOffsetX[0]}
+                max={EYE_PARAM_RANGES.eyeShapeOffsetX[1]}
+                onCommitStart={checkpoint}
+                onChange={(v) => setParam('eyeShapeOffsetX', v)}
+              />
+              <Slider
+                label="Shape Offset Y"
+                value={target.eyeShapeOffsetY}
+                min={EYE_PARAM_RANGES.eyeShapeOffsetY[0]}
+                max={EYE_PARAM_RANGES.eyeShapeOffsetY[1]}
+                onCommitStart={checkpoint}
+                onChange={(v) => setParam('eyeShapeOffsetY', v)}
+              />
+              {target.eyeShape !== 'default' && (
                 <>
-                  <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('eyeShapeScale')} onReset={() => resetStyleField('eyeShapeScale')}>
-                    <Slider
-                      label="Shape Scale"
-                      value={target.eyeShapeScale}
-                      min={EYE_PARAM_RANGES.eyeShapeScale[0]}
-                      max={EYE_PARAM_RANGES.eyeShapeScale[1]}
-                      suffix="%"
-                      onCommitStart={checkpoint}
-                      onChange={(v) => setParam('eyeShapeScale', v)}
-                    />
-                  </StyleFieldRow>
-                  <Slider
-                    label="Shape Offset X"
-                    value={target.eyeShapeOffsetX}
-                    min={EYE_PARAM_RANGES.eyeShapeOffsetX[0]}
-                    max={EYE_PARAM_RANGES.eyeShapeOffsetX[1]}
-                    onCommitStart={checkpoint}
-                    onChange={(v) => setParam('eyeShapeOffsetX', v)}
-                  />
-                  <Slider
-                    label="Shape Offset Y"
-                    value={target.eyeShapeOffsetY}
-                    min={EYE_PARAM_RANGES.eyeShapeOffsetY[0]}
-                    max={EYE_PARAM_RANGES.eyeShapeOffsetY[1]}
-                    onCommitStart={checkpoint}
-                    onChange={(v) => setParam('eyeShapeOffsetY', v)}
-                  />
                   <div className="flex gap-2">
                     <button
                       className={`studio-btn text-xs flex-1 ${target.eyeShapeFlipH ? 'border-studio-accent text-studio-accent' : ''}`}

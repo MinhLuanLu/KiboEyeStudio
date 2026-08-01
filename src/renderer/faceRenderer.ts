@@ -79,13 +79,17 @@ export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, opt
   // space, it's placed anywhere on the display.
   drawLayer('behind')
 
+  // eyePosX/Y move the whole eye (not just its silhouette — see EyeParams.eyePosX's own
+  // comment) on top of the symmetric ±distance/2 placement — eyePosX is sign-mirrored for the
+  // right eye exactly like pupilX/highlightX/eyeShapeOffsetX, eyePosY never is (vertical
+  // position is already symmetric).
   ctx.save()
-  ctx.translate(cx - halfLeft, cy)
+  ctx.translate(cx - halfLeft + params.eyePosX, cy + params.eyePosY)
   drawEye(ctx, params, theme, false, backgroundColor, customShapes, customEyeShapes, firmwareSim)
   ctx.restore()
 
   ctx.save()
-  ctx.translate(cx + halfRight, cy)
+  ctx.translate(cx + halfRight - rightParams.eyePosX, cy + rightParams.eyePosY)
   drawEye(ctx, rightParams, rightTheme, true, backgroundColor, customShapes, customEyeShapes, firmwareSim)
   ctx.restore()
 

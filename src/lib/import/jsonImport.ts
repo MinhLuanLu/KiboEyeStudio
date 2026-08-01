@@ -85,6 +85,8 @@ export function parseAnimationJson(json: string): Animation {
       easing: kf.easing as Animation['keyframes'][number]['easing'],
       customBezier: kf.customBezier as [number, number, number, number] | undefined,
       params: normalizeImportedParams(kf.params as EyeParams),
+      leftParams: isEyeParams(kf.leftParams) ? normalizeImportedParams(kf.leftParams as EyeParams) : null,
+      rightParams: isEyeParams(kf.rightParams) ? normalizeImportedParams(kf.rightParams as EyeParams) : null,
       styleOverrides: Array.isArray(kf.styleOverrides) ? (kf.styleOverrides as string[]) : []
     }
   })

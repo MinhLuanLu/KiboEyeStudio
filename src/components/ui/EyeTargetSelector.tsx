@@ -7,12 +7,29 @@ const OPTIONS: { value: EyeSide; label: string }[] = [
   { value: 'right', label: 'Right Eye' }
 ]
 
-/** Shared Both/Left/Right segmented control — backed by the one store-level `eyeTarget`,
- * so it reads the same regardless of which panel (Controls, Colors) renders it. Switching
- * it never touches project data by itself; only a subsequent slider/color edit does. */
-export function EyeTargetSelector({ disabled = false }: { disabled?: boolean }) {
-  const eyeTarget = useStore((s) => s.eyeTarget)
+/** Shared Both/Left/Right segmented control — backed by the one store-level `eyeTarget` by
+ * default, so it reads the same regardless of which panel (Controls, Colors) renders it.
+ * Switching it never touches project data by itself; only a subsequent slider/color edit does.
+ * It's also what a selected keyframe's Left/Right editing routes through (see
+ * keyframeParamsFor()/updateTrackKeyframeEyeParams in ControlsPanel.tsx) — switching it while a
+ * keyframe is selected never creates or jumps to a different keyframe/track, it just changes
+ * which of that same keyframe's params/leftParams/rightParams is being read/written.
+ *
+ * `value` lets ControlsPanel override only what's *shown* as selected (never what a click does)
+ * for the two track kinds that are already tied to one side by which track they're on
+ * (leftEye/rightEye) — the control is disabled there, `value` just makes it display the
+ * track-implied side instead of the unrelated global `eyeTarget`. */
+export function EyeTargetSelector({
+  disabled = false,
+  value
+}: {
+  disabled?: boolean
+  value?: EyeSide
+}) {
+  const storeEyeTarget = useStore((s) => s.eyeTarget)
   const setEyeTarget = useStore((s) => s.setEyeTarget)
+  const eyeTarget = value ?? storeEyeTarget
+  const handleSelect = setEyeTarget
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -26,7 +43,7 @@ export function EyeTargetSelector({ disabled = false }: { disabled?: boolean }) 
           <button
             key={o.value}
             className={`studio-tab flex-1 ${eyeTarget === o.value ? 'studio-tab-active' : ''}`}
-            onClick={() => setEyeTarget(o.value)}
+            onClick={() => handleSelect(o.value)}
           >
             {o.label}
           </button>

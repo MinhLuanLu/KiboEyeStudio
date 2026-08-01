@@ -6,6 +6,17 @@ export interface EyeParams {
   radius: number
   distance: number
   rotation: number
+  /** -100..100px: moves this ENTIRE eye (silhouette, iris, pupil, eyelids, highlight, glow,
+   * border — everything drawEye() draws) around the display, on top of the symmetric ±distance/2
+   * placement every eye pair already has — unlike eyeShapeOffsetX/Y (which only nudges the
+   * traced silhouette within its own box, leaving iris/pupil/eyelids centered), this moves the
+   * whole eye as one unit. Sign-mirrored for the right eye exactly like pupilX/highlightX/
+   * eyeShapeOffsetX (see faceRenderer.ts's own `sign` convention), so a positive value reads as
+   * the same relative direction on both eyes rather than the same absolute screen direction. */
+  eyePosX: number
+  /** -100..100px, vertical twin of eyePosX — never sign-mirrored (vertical position is already
+   * symmetric between the two eyes, same as pupilY/highlightY/eyeShapeOffsetY). */
+  eyePosY: number
   irisWidth: number
   irisHeight: number
   pupilWidth: number
@@ -41,8 +52,9 @@ export interface EyeParams {
    * (which control the eye's overall footprint that iris/pupil/eyelid math keys off) — lets the
    * silhouette shrink/grow inside that same footprint. No effect when eyeShape === 'default'. */
   eyeShapeScale: number
-  /** -30..30px: nudges the traced eye-shape polygon within the eye's own box without moving
-   * iris/pupil/eyelids, which stay centered on the box. No effect when eyeShape === 'default'. */
+  /** -30..30px: nudges the eye's own silhouette within its box without moving iris/pupil/
+   * eyelids, which stay centered on the box — applies to every eyeShape, including 'default'
+   * (the plain rounded-rect/ellipse boundary), not just the traced polygon shapes. */
   eyeShapeOffsetX: number
   eyeShapeOffsetY: number
   /** Mirrors the traced polygon horizontally/vertically before rotation. No effect when
@@ -242,6 +254,8 @@ export const SHAPE_TRACK_FIELDS: (keyof EyeParams)[] = [
   'radius',
   'distance',
   'rotation',
+  'eyePosX',
+  'eyePosY',
   'irisWidth',
   'irisHeight',
   'highlightX',
@@ -270,6 +284,18 @@ export interface Keyframe {
   easing: EasingType
   customBezier?: [number, number, number, number]
   params: EyeParams
+  /** Per-eye divergence for THIS keyframe, `null` meaning "no divergence, follows `params`" —
+   * the exact same pattern Expression.leftParams/rightParams already uses (see
+   * expressionLeftParams()/expressionRightParams() below). This is what lets the Eye Target
+   * selector (Both/Left/Right) act as a pure editing lens on one keyframe — switching it never
+   * creates a new keyframe or track; it just changes which of params/leftParams/rightParams the
+   * Controls panel reads from and writes to (see keyframeParamsFor()/ControlsPanel.tsx). Only
+   * meaningful on pose/pupils/eyelids-track keyframes; a leftEye/rightEye-track keyframe is
+   * already tied to one side by which track it's on, so these stay null there and the track's
+   * own SHAPE_TRACK_FIELDS-scoped divergence (a separate, explicit mechanism the user still
+   * reaches via "+ Track") takes over instead. */
+  leftParams: EyeParams | null
+  rightParams: EyeParams | null
   /** Names of `params` fields (from STYLE_EYE_PARAM_FIELDS) that are pinned as intentional
    * customizations for this keyframe — e.g. a blink's eyelid values, a look's pupil offset.
    * Fields NOT listed here track the project's Visual Reference and get overwritten whenever
@@ -854,6 +880,8 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   radius: 26,
   distance: 96,
   rotation: 0,
+  eyePosX: 0,
+  eyePosY: 0,
   irisWidth: 58,
   irisHeight: 58,
   pupilWidth: 32,
@@ -1007,6 +1035,8 @@ export const EYE_PARAM_RANGES: Record<
   radius: [0, 130],
   distance: [0, 160],
   rotation: [-45, 45],
+  eyePosX: [-100, 100],
+  eyePosY: [-100, 100],
   irisWidth: [10, 100],
   irisHeight: [10, 100],
   pupilWidth: [5, 100],
@@ -1097,6 +1127,17 @@ export function effectiveVisualReferenceColors(vr: VisualReferenceStyle, target:
   if (target === 'left') return leftVisualReferenceColors(vr)
   if (target === 'right') return rightVisualReferenceColors(vr)
   return vr.colors
+}
+
+/** Resolves a keyframe's effective EyeParams for a given side — the one place this "leftParams/
+ * rightParams null-means-follow-params" resolution happens, mirroring
+ * expressionLeftParams()/expressionRightParams() below exactly. Used by both the studio's own
+ * sampling (sampleTrack() in interpolate.ts) and ControlsPanel's read/write of whichever
+ * keyframe is currently selected. */
+export function keyframeParamsFor(kf: Keyframe, side: EyeSide): EyeParams {
+  if (side === 'left') return kf.leftParams ?? kf.params
+  if (side === 'right') return kf.rightParams ?? kf.params
+  return kf.params
 }
 
 export function expressionLeftParams(e: Expression): EyeParams {

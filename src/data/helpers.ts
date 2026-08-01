@@ -41,6 +41,8 @@ export function anim(name: string, loop: boolean, specs: KfSpec[]): Animation {
       easing: spec.easing,
       customBezier: spec.customBezier,
       params: spec.params,
+      leftParams: null,
+      rightParams: null,
       styleOverrides: spec.styleOverrides
     }
     t += spec.msToNext

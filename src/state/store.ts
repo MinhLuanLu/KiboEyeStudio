@@ -330,6 +330,12 @@ interface StoreState {
    * of the 5 keyframe tracks — for the Timeline's Keyframe Inspector. */
   updateTrackKeyframeParams: (trackKind: KeyframeTrackKind, keyframeId: string, partial: Partial<EyeParams>) => void
   updateTrackKeyframeEasing: (trackKind: KeyframeTrackKind, keyframeId: string, easing: EasingType, customBezier?: [number, number, number, number]) => void
+  /** Writes into the given keyframe's leftParams/rightParams (Keyframe's own per-eye
+   * divergence — see its type comment), lazy-cloning from `params` on first use exactly like
+   * Expression's own leftParams/rightParams. This is what the Eye Target selector's Left/Right
+   * modes write through while a keyframe is selected — it never creates a new keyframe or
+   * track; Both Eyes keeps writing straight to `params` via updateTrackKeyframeParams above. */
+  updateTrackKeyframeEyeParams: (trackKind: KeyframeTrackKind, keyframeId: string, side: 'left' | 'right', partial: Partial<EyeParams>) => void
   /** Continuous-drag primitive for a sticker clip's start/end handle. */
   resizeStickerClip: (stickerId: string, edge: 'start' | 'end', newMs: number) => void
   /** Splits a keyframe-track segment (inserting a new keyframe with the interpolated pose at
@@ -1153,8 +1159,8 @@ export const useStore = create<StoreState>()(
           loop: false,
           durationMs: 500,
           keyframes: [
-            { id: nanoid(10), timeMs: 0, easing: 'easeInOut', params: { ...s.project.eyeBase }, styleOverrides: overrides },
-            { id: nanoid(10), timeMs: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, styleOverrides: overrides }
+            { id: nanoid(10), timeMs: 0, easing: 'easeInOut', params: { ...s.project.eyeBase }, leftParams: null, rightParams: null, styleOverrides: overrides },
+            { id: nanoid(10), timeMs: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, leftParams: null, rightParams: null, styleOverrides: overrides }
           ],
           leftEyeKeyframes: [],
           rightEyeKeyframes: [],
@@ -1271,6 +1277,8 @@ export const useStore = create<StoreState>()(
           timeMs,
           easing: 'easeInOut',
           params: newParams,
+          leftParams: null,
+          rightParams: null,
           styleOverrides: computeStyleOverrides(newParams, null, s.project.visualReference)
         }
         list.push(newKf)
@@ -1491,12 +1499,21 @@ export const useStore = create<StoreState>()(
           if (!sample) return
           checkpointDraft(s)
           const from = list[sample.segmentIndex]
+          // Preserves per-eye divergence through the split, when any neighboring keyframe on
+          // this track actually has some (see Keyframe.leftParams/rightParams) — sampled at the
+          // same instant so a split mid-blink-with-a-wink doesn't flatten the two eyes back
+          // together at the new keyframe.
+          const hasDivergence = list.some((k) => k.leftParams || k.rightParams)
+          const leftSample = hasDivergence ? sampleTrack(list, false, a.durationMs, t, 'left') : null
+          const rightSample = hasDivergence ? sampleTrack(list, false, a.durationMs, t, 'right') : null
           const newKf: Keyframe = {
             id: nanoid(10),
             timeMs: t,
             easing: from.easing,
             customBezier: from.customBezier,
             params: sample.params,
+            leftParams: leftSample?.params ?? null,
+            rightParams: rightSample?.params ?? null,
             styleOverrides: computeStyleOverrides(sample.params, null, s.project.visualReference)
           }
           list.push(newKf)
@@ -1586,6 +1603,8 @@ export const useStore = create<StoreState>()(
           timeMs: clamped,
           easing: 'easeInOut',
           params,
+          leftParams: null,
+          rightParams: null,
           styleOverrides: computeStyleOverrides(params, null, s.project.visualReference)
         }
         list.push(newKf)
@@ -1593,6 +1612,24 @@ export const useStore = create<StoreState>()(
         if (trackKind === 'pose' && clamped > a.durationMs) a.durationMs = clamped
         s.timelineSelection = [{ kind: 'keyframe', trackId: trackKind, id: newKf.id }]
         syncPrimarySelection(s)
+        s.dirty = true
+      }),
+
+    updateTrackKeyframeEyeParams: (trackKind, keyframeId, side, partial) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        const kf = keyframeListFor(a, trackKind).find((k) => k.id === keyframeId)
+        if (!kf) return
+        // Lazy-clone-on-first-divergence — same pattern Expression's own leftParams/rightParams
+        // already use (see setEyeParam's write path for the base pose): the first edit while
+        // Eye Target is Left/Right snapshots the currently-shared `params` into that side's slot,
+        // then every edit after just mutates it in place. Both sides end up independently
+        // editable without ever touching `params` (still read by 'both' and by whichever side
+        // never diverged) or creating a new keyframe/track.
+        const key = side === 'left' ? 'leftParams' : 'rightParams'
+        if (!kf[key]) kf[key] = { ...kf.params }
+        Object.assign(kf[key]!, partial)
         s.dirty = true
       }),
 
@@ -1717,6 +1754,8 @@ export const useStore = create<StoreState>()(
           easing: k.easing,
           customBezier: k.customBezier,
           params: { ...k.params },
+          leftParams: k.leftParams ? { ...k.leftParams } : null,
+          rightParams: k.rightParams ? { ...k.rightParams } : null,
           styleOverrides: [...k.styleOverrides]
         }))
         setKeyframeListFor(a, trackKind, seeded)

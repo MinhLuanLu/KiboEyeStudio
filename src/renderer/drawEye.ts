@@ -37,26 +37,28 @@ function quantizeThemeToRgb565(theme: EyeTheme): EyeTheme {
  * sides left over on the shorter axis (which is what a single circular corner radius,
  * clamped only by the smaller dimension, used to leave behind).
  */
-function roundedRectPath(ctx: CanvasRenderingContext2D, w: number, h: number, radius: number): void {
+function roundedRectPath(ctx: CanvasRenderingContext2D, w: number, h: number, radius: number, offsetX = 0, offsetY = 0): void {
   const hx = w / 2
   const hy = h / 2
   const rx = Math.max(0, Math.min(radius, hx))
   const ry = Math.max(0, Math.min(radius, hy))
+  const cx = offsetX
+  const cy = offsetY
   ctx.beginPath()
   if (rx < 0.01 || ry < 0.01) {
-    ctx.rect(-hx, -hy, w, h)
+    ctx.rect(cx - hx, cy - hy, w, h)
     ctx.closePath()
     return
   }
-  ctx.moveTo(-hx + rx, -hy)
-  ctx.lineTo(hx - rx, -hy)
-  ctx.ellipse(hx - rx, -hy + ry, rx, ry, 0, -Math.PI / 2, 0)
-  ctx.lineTo(hx, hy - ry)
-  ctx.ellipse(hx - rx, hy - ry, rx, ry, 0, 0, Math.PI / 2)
-  ctx.lineTo(-hx + rx, hy)
-  ctx.ellipse(-hx + rx, hy - ry, rx, ry, 0, Math.PI / 2, Math.PI)
-  ctx.lineTo(-hx, -hy + ry)
-  ctx.ellipse(-hx + rx, -hy + ry, rx, ry, 0, Math.PI, (3 * Math.PI) / 2)
+  ctx.moveTo(cx - hx + rx, cy - hy)
+  ctx.lineTo(cx + hx - rx, cy - hy)
+  ctx.ellipse(cx + hx - rx, cy - hy + ry, rx, ry, 0, -Math.PI / 2, 0)
+  ctx.lineTo(cx + hx, cy + hy - ry)
+  ctx.ellipse(cx + hx - rx, cy + hy - ry, rx, ry, 0, 0, Math.PI / 2)
+  ctx.lineTo(cx - hx + rx, cy + hy)
+  ctx.ellipse(cx - hx + rx, cy + hy - ry, rx, ry, 0, Math.PI / 2, Math.PI)
+  ctx.lineTo(cx - hx, cy - hy + ry)
+  ctx.ellipse(cx - hx + rx, cy - hy + ry, rx, ry, 0, Math.PI, (3 * Math.PI) / 2)
   ctx.closePath()
 }
 
@@ -211,7 +213,10 @@ export function drawEye(
       // absolute direction on both.
       traceEyeShapePolygon(ctx, eyeShapePolygon, width, height, eyeShapeScale, sign * eyeShapeOffsetX, eyeShapeOffsetY, eyeShapeFlipH, eyeShapeFlipV, extraPx)
     } else {
-      roundedRectPath(ctx, width + extraPx * 2, height + extraPx * 2, radius + extraPx)
+      // Same sign-mirroring convention as the polygon branch above (and pupilX/highlightX
+      // elsewhere) — a shape nudged e.g. outward reads as outward on both eyes, not the same
+      // absolute direction on both.
+      roundedRectPath(ctx, width + extraPx * 2, height + extraPx * 2, radius + extraPx, sign * eyeShapeOffsetX, eyeShapeOffsetY)
     }
   }
 

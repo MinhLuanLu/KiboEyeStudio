@@ -125,6 +125,8 @@ function eyeFrameLiteral(
     Math.round(params.radius),
     clampByte(params.rotation),
     Math.round(params.distance),
+    clampByte(params.eyePosX),
+    clampByte(params.eyePosY),
     Math.round(params.irisWidth),
     Math.round(params.irisHeight),
     Math.round(params.pupilWidth),
@@ -250,9 +252,12 @@ function bakeAnimationFrames(anim: Animation): BakedFrame[] {
 // that wrapper is what PlayAnimation() below takes, so playing an animation is just
 // `PlayAnimation(Anim_X)` instead of threading several separate globals through
 // eyesPlayAnimation() by hand. A second `_framesRight` array (and non-null `EyeAnimation.
-// framesRight`) is only emitted when this animation actually authored leftEye/rightEye track
-// keyframes — the overwhelmingly common case (no divergence) still exports exactly one shared
-// array, identical output to before this feature existed.
+// framesRight`) is only emitted when the baked left/right frames actually differ anywhere —
+// divergence can come from dedicated leftEye/rightEye track keyframes OR from a pose/pupils/
+// eyelids keyframe's own leftParams/rightParams (see Keyframe's type comment/keyframeParamsFor)
+// — checking the *baked* output rather than which tracks/fields were authored is what correctly
+// covers both sources in one place. The overwhelmingly common case (no divergence) still exports
+// exactly one shared array, identical output to before this feature existed.
 function exportAnimation(
   anim: Animation,
   customShapes: CustomPupilShape[],
@@ -262,7 +267,7 @@ function exportAnimation(
 ): string {
   const ident = toIdentifier(anim.name)
   const baked = bakeAnimationFrames(anim)
-  const diverges = anim.leftEyeKeyframes.length > 0 || anim.rightEyeKeyframes.length > 0
+  const diverges = baked.some((f) => JSON.stringify(f.leftParams) !== JSON.stringify(f.rightParams))
   const stickers = anim.stickers.filter((s) => s.visible)
 
   const lines = [
@@ -951,6 +956,7 @@ inline float eyesEase(float t, uint8_t type, int8_t bx1, int8_t by1, int8_t bx2,
 // ---- Live (interpolated) eye pose ----
 struct LiveEye {
   float width, height, radius, rotation, distance;
+  float eyePosX, eyePosY;
   float irisWidth, irisHeight, pupilWidth, pupilHeight;
   float pupilX, pupilY, pupilRotation;
   float upperEyelid, lowerEyelid;
@@ -995,6 +1001,8 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   r.radius = a.radius + (b.radius - a.radius) * t;
   r.rotation = a.rotation + (b.rotation - a.rotation) * t;
   r.distance = a.distance + (b.distance - a.distance) * t;
+  r.eyePosX = a.eyePosX + (b.eyePosX - a.eyePosX) * t;
+  r.eyePosY = a.eyePosY + (b.eyePosY - a.eyePosY) * t;
   r.irisWidth = a.irisWidth + (b.irisWidth - a.irisWidth) * t;
   r.irisHeight = a.irisHeight + (b.irisHeight - a.irisHeight) * t;
   r.pupilWidth = a.pupilWidth + (b.pupilWidth - a.pupilWidth) * t;
@@ -1045,6 +1053,8 @@ inline LiveEye eyesLerpLive(const LiveEye& a, const LiveEye& b, float t) {
   r.radius = a.radius + (b.radius - a.radius) * t;
   r.rotation = a.rotation + (b.rotation - a.rotation) * t;
   r.distance = a.distance + (b.distance - a.distance) * t;
+  r.eyePosX = a.eyePosX + (b.eyePosX - a.eyePosX) * t;
+  r.eyePosY = a.eyePosY + (b.eyePosY - a.eyePosY) * t;
   r.irisWidth = a.irisWidth + (b.irisWidth - a.irisWidth) * t;
   r.irisHeight = a.irisHeight + (b.irisHeight - a.irisHeight) * t;
   r.pupilWidth = a.pupilWidth + (b.pupilWidth - a.pupilWidth) * t;
@@ -1261,10 +1271,13 @@ inline uint8_t eyesEyeShapeColSpans(const EyeShapeCtx& shape, float scanX, float
 // clips all of them consistently.
 inline bool eyesEyeHalfWidthAtShape(float dy, float hx, float hy, float rx, float ry, const EyeShapeCtx& shape, float& loX, float& hiX) {
   if (!shape.points || shape.count < 3) {
-    float half = eyesEyeHalfWidthAt(dy, hx, hy, rx, ry);
+    // offsetX/offsetY shift the plain rounded-rect boundary too, not just a traced polygon —
+    // sample the row relative to the shifted shape's own center (dy - offsetY), then shift the
+    // resulting span back into the eye's absolute frame.
+    float half = eyesEyeHalfWidthAt(dy - shape.offsetY, hx, hy, rx, ry);
     if (half < 0) return false;
-    loX = -half;
-    hiX = half;
+    loX = shape.offsetX - half;
+    hiX = shape.offsetX + half;
     return true;
   }
   float loXs[EYE_MAX_SHAPE_SPANS], hiXs[EYE_MAX_SHAPE_SPANS];
@@ -1280,10 +1293,11 @@ inline bool eyesEyeHalfWidthAtShape(float dy, float hx, float hy, float rx, floa
 }
 inline bool eyesEyeHalfHeightAtShape(float dx, float hx, float hy, float rx, float ry, const EyeShapeCtx& shape, float& loY, float& hiY) {
   if (!shape.points || shape.count < 3) {
-    float half = eyesEyeHalfHeightAt(dx, hx, hy, rx, ry);
+    // Column-parameterized twin of eyesEyeHalfWidthAtShape()'s own offset handling above.
+    float half = eyesEyeHalfHeightAt(dx - shape.offsetX, hx, hy, rx, ry);
     if (half < 0) return false;
-    loY = -half;
-    hiY = half;
+    loY = shape.offsetY - half;
+    hiY = shape.offsetY + half;
     return true;
   }
   float loYs[EYE_MAX_SHAPE_SPANS], hiYs[EYE_MAX_SHAPE_SPANS];
@@ -1312,8 +1326,8 @@ inline bool eyesEyeHalfHeightAtShape(float dx, float hx, float hy, float rx, flo
 // *Spans() functions above) can't be reused directly once the eye itself is rotated.
 inline bool eyesPointInsideEyeShape(float lx, float ly, float hx, float hy, float rx, float ry, const EyeShapeCtx& shape) {
   if (!shape.points || shape.count < 3) {
-    float half = eyesEyeHalfWidthAt(ly, hx, hy, rx, ry);
-    return half >= 0 && lx >= -half && lx <= half;
+    float half = eyesEyeHalfWidthAt(ly - shape.offsetY, hx, hy, rx, ry);
+    return half >= 0 && lx >= shape.offsetX - half && lx <= shape.offsetX + half;
   }
   float wx[EYE_MAX_EYE_SHAPE_POLYGON_POINTS], wy[EYE_MAX_EYE_SHAPE_POLYGON_POINTS];
   uint8_t count = eyesTransformEyeShape(shape, wx, wy);
@@ -1384,7 +1398,11 @@ inline void eyesFillEyeBoundaryRing(T& gfx, int16_t cx, int16_t cy, int16_t w, i
                                      const EyeShapeCtx& eyeShape, float extraPx, float rotRad, uint16_t color) {
   if (rotRad == 0.0f) {
     if (!eyeShape.points || eyeShape.count < 3) {
-      eyesFillRoundedRect(gfx, cx, cy, w + (int16_t)(extraPx * 2), h + (int16_t)(extraPx * 2), radius + (int16_t)extraPx, color);
+      // eyesFillRoundedRect() itself has no shape/offset context, so the offset is applied here
+      // by shifting the center it fills around — same effect as eyesEyeHalfWidthAtShape()'s own
+      // offset handling above, for the one call site that doesn't already go through it.
+      eyesFillRoundedRect(gfx, cx + (int16_t)roundf(eyeShape.offsetX), cy + (int16_t)roundf(eyeShape.offsetY),
+                           w + (int16_t)(extraPx * 2), h + (int16_t)(extraPx * 2), radius + (int16_t)extraPx, color);
       return;
     }
     EyeShapeCtx widened = eyeShape;
@@ -2925,8 +2943,10 @@ inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const Li
   }
   eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs, screenCx, screenCy);
   eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs, screenCx, screenCy);
-  eyesDrawEye(gfx, screenCx - half, screenCy, left, false, bgColor, leftColors);
-  eyesDrawEye(gfx, screenCx + half, screenCy, right, true, bgColor, rightColors);
+  // eyePosX/Y move the whole eye on top of the ±distance/2 placement — eyePosX is sign-mirrored
+  // for the right eye exactly like the studio's faceRenderer.ts, eyePosY never is.
+  eyesDrawEye(gfx, screenCx - half + (int16_t)left.eyePosX, screenCy + (int16_t)left.eyePosY, left, false, bgColor, leftColors);
+  eyesDrawEye(gfx, screenCx + half - (int16_t)right.eyePosX, screenCy + (int16_t)right.eyePosY, right, true, bgColor, rightColors);
   eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
   eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
 }
@@ -3162,7 +3182,7 @@ export function generateCppHeader(project: Project): string {
  * Generated: ${new Date().toISOString()}
  *
  * Field order in EyeFrame matches the studio's EyeParams model:
- *   width, height, radius, rotation, distance, irisWidth, irisHeight, pupilWidth,
+ *   width, height, radius, rotation, distance, eyePosX, eyePosY, irisWidth, irisHeight, pupilWidth,
  *   pupilHeight, pupilX, pupilY, pupilRotation, upperEyelid, lowerEyelid, upperEyelidTilt,
  *   lowerEyelidTilt, upperEyelidCurvature, lowerEyelidCurvature, upperEyelidRoundness,
  *   lowerEyelidRoundness, upperEyelidStretchX, lowerEyelidStretchX, upperEyelidStretchY,
@@ -3326,6 +3346,7 @@ struct EyeFrame {
   uint8_t width, height, radius;
   int8_t rotation;
   uint8_t distance;
+  int8_t eyePosX, eyePosY; // -100..100px, moves this whole eye on top of the ±distance/2 placement — see EyeParams.eyePosX's own comment in the studio
   uint8_t irisWidth, irisHeight;
   uint8_t pupilWidth, pupilHeight;
   int8_t pupilX, pupilY;
@@ -3349,7 +3370,7 @@ struct EyeFrame {
                      // down to EYE_SHAPE_DEFAULT when the studio's eyeShapeVisible is false.
   uint8_t eyeCustomShapeIndex; // index into EYE_CUSTOM_SHAPES, only meaningful when eyeShape == EYE_SHAPE_CUSTOM
   uint8_t eyeShapeScale; // 50-200%, no effect when eyeShape == EYE_SHAPE_DEFAULT
-  int8_t eyeShapeOffsetX, eyeShapeOffsetY; // -30..30px, no effect when eyeShape == EYE_SHAPE_DEFAULT
+  int8_t eyeShapeOffsetX, eyeShapeOffsetY; // -30..30px, shifts the eye's own silhouette for every eyeShape, including EYE_SHAPE_DEFAULT
   bool eyeShapeFlipH, eyeShapeFlipV;
   bool upperEyelidVisible, lowerEyelidVisible; // Layers panel — false renders as if coverage were 0
 };

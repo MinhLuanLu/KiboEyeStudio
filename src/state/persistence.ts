@@ -189,6 +189,8 @@ function normalizeKeyframeList(raw: unknown, visualReference: VisualReferenceSty
       easing: (typeof k.easing === 'string' ? k.easing : 'linear') as EasingType,
       customBezier,
       params,
+      leftParams: normalizeEyeParamsOverride(k.leftParams as Partial<EyeParams> | null | undefined),
+      rightParams: normalizeEyeParamsOverride(k.rightParams as Partial<EyeParams> | null | undefined),
       styleOverrides
     }
     if (typeof k.sourceExpressionId === 'string') keyframe.sourceExpressionId = k.sourceExpressionId
