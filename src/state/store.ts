@@ -1370,12 +1370,36 @@ export const useStore = create<StoreState>()(
         const kf = a?.keyframes.find((k) => k.id === keyframeId)
         const expr = s.project.expressions.find((e) => e.id === expressionId)
         if (!kf || !expr) return
+        const exprLeft = expr.leftParams ?? expr.params
+        const exprRight = expr.rightParams ?? expr.params
         if (mode === 'replace') {
+          // "Replace all" means the keyframe ends up looking exactly like the expression,
+          // including its left/right divergence (or lack of it) — a hard overwrite of
+          // params/leftParams/rightParams, not just the shared baseline.
           kf.params = { ...expr.params }
+          kf.leftParams = expr.leftParams ? { ...expr.leftParams } : null
+          kf.rightParams = expr.rightParams ? { ...expr.rightParams } : null
         } else {
-          const target = kf.params as unknown as Record<string, number | string | null>
-          const source = expr.params as unknown as Record<string, number | string | null>
-          for (const field of STYLE_EYE_PARAM_FIELDS) target[field] = source[field]
+          const copyStyleFields = (target: EyeParams, source: EyeParams) => {
+            const t = target as unknown as Record<string, number | string | boolean | null>
+            const src = source as unknown as Record<string, number | string | boolean | null>
+            for (const field of STYLE_EYE_PARAM_FIELDS) t[field] = src[field]
+          }
+          copyStyleFields(kf.params, expr.params)
+          // Only touch a side's own divergent copy when it already exists (this keyframe has
+          // its own left/right override for some other reason, e.g. movement) or the expression
+          // itself diverges — otherwise leave it alone/null so a non-diverging expression never
+          // introduces new left/right divergence out of nothing. When touched, lazy-clone from
+          // the (already style-updated) shared params first, same pattern as
+          // updateTrackKeyframeEyeParams above.
+          if (kf.leftParams || expr.leftParams) {
+            if (!kf.leftParams) kf.leftParams = { ...kf.params }
+            copyStyleFields(kf.leftParams, exprLeft)
+          }
+          if (kf.rightParams || expr.rightParams) {
+            if (!kf.rightParams) kf.rightParams = { ...kf.params }
+            copyStyleFields(kf.rightParams, exprRight)
+          }
         }
         kf.styleOverrides = computeStyleOverrides(kf.params, null, s.project.visualReference)
         s.dirty = true
