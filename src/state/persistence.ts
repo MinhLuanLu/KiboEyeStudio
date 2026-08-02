@@ -1,6 +1,8 @@
 import { nanoid } from 'nanoid'
 import type {
   Animation,
+  AnimationCombo,
+  AnimationComboClip,
   CustomEyeShape,
   CustomPupilShape,
   EasingType,
@@ -527,6 +529,35 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
       markers
     }
   })
+  const animationIds = new Set(animations.map((a) => a.id))
+  const animationCombos: AnimationCombo[] = (raw.animationCombos ?? []).map((comboRaw) => {
+    const combo = comboRaw as unknown as Record<string, unknown>
+    const clips: AnimationComboClip[] = Array.isArray(combo.clips)
+      ? combo.clips
+          .map((clipRaw) => {
+            const clip = clipRaw as Partial<AnimationComboClip> & Record<string, unknown>
+            const animationId = typeof clip.animationId === 'string' && animationIds.has(clip.animationId) ? clip.animationId : ''
+            if (!animationId) return null
+            return {
+              id: typeof clip.id === 'string' ? clip.id : nanoid(8),
+              animationId,
+              startTimeMs: typeof clip.startTimeMs === 'number' ? Math.max(0, Math.round(clip.startTimeMs)) : 0,
+              loopCount: typeof clip.loopCount === 'number' && clip.loopCount > 0 ? Math.round(clip.loopCount) : 1,
+              playbackSpeed: typeof clip.playbackSpeed === 'number' && clip.playbackSpeed > 0 ? clip.playbackSpeed : 100,
+              transitionMs: typeof clip.transitionMs === 'number' ? Math.max(0, Math.round(clip.transitionMs)) : 0,
+              endDelayMs: typeof clip.endDelayMs === 'number' ? Math.max(0, Math.round(clip.endDelayMs)) : 0
+            }
+          })
+          .filter((clip): clip is AnimationComboClip => !!clip)
+          .sort((a, b) => a.startTimeMs - b.startTimeMs)
+      : []
+    return {
+      id: typeof combo.id === 'string' ? combo.id : nanoid(8),
+      name: typeof combo.name === 'string' ? combo.name : 'Untitled Combo',
+      loop: Boolean(combo.loop),
+      clips
+    }
+  })
   const expressions: Expression[] = (raw.expressions ?? []).map((e) => {
     const params = normalizeEyeParams(e.params)
     const exprColors = { ...DEFAULT_EYE_COLORS, ...(e.colors ?? {}) }
@@ -558,6 +589,7 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     personality: { ...DEFAULT_PERSONALITY, ...(raw.personality ?? {}) },
     timing: { ...DEFAULT_TIMING, ...(raw.timing ?? {}) },
     animations,
+    animationCombos,
     expressions,
     visualReference,
     customPupilShapes: normalizeCustomPupilShapes(raw.customPupilShapes),

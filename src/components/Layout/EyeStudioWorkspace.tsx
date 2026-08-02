@@ -5,6 +5,7 @@ import { Toolbar, type ToolbarActions } from './Toolbar'
 import { PreviewCanvas } from '@/components/Canvas/PreviewCanvas'
 import { Timeline } from '@/components/Timeline/Timeline'
 import { AnimationLibraryPanel } from '@/components/Library/AnimationLibraryPanel'
+import { AnimationCombinationPanel } from '@/components/Library/AnimationCombinationPanel'
 import { ExpressionLibraryPanel } from '@/components/Library/ExpressionLibraryPanel'
 import { ControlsPanel } from '@/components/Controls/ControlsPanel'
 import { PersonalityPanel } from '@/components/Personality/PersonalityPanel'
@@ -17,6 +18,7 @@ import { PanelTabs } from '@/components/ui/PanelTabs'
 
 const LEFT_TABS: { value: LeftTab; label: string }[] = [
   { value: 'animations', label: 'Animations' },
+  { value: 'combinations', label: 'Combinations' },
   { value: 'expressions', label: 'Expressions' }
 ]
 
@@ -59,6 +61,7 @@ export function EyeStudioWorkspace({ toolbarActions }: { toolbarActions: Toolbar
               <PanelTabs tabs={LEFT_TABS} active={leftTab} onChange={setLeftTab} />
               <div className="flex-1 min-h-0">
                 {leftTab === 'animations' && <AnimationLibraryPanel />}
+                {leftTab === 'combinations' && <AnimationCombinationPanel />}
                 {leftTab === 'expressions' && <ExpressionLibraryPanel />}
               </div>
             </div>

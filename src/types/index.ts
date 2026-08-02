@@ -321,14 +321,18 @@ export interface Keyframe {
   linked?: boolean
 }
 
-export type TrackKind = 'pose' | 'leftEye' | 'rightEye' | 'pupils' | 'eyelids' | 'sticker' | 'marker'
+export type TrackKind = 'pose' | 'leftEye' | 'rightEye' | 'pupils' | 'eyelids' | 'sticker' | 'marker' | 'comboClip'
 
 /** UI/organizational metadata for one timeline lane. The 5 fixed keyframe-track kinds (pose/
  * leftEye/rightEye/pupils/eyelids) and the single 'marker' track always exist, one each, for
  * every Animation; 'sticker' tracks are user-created (Add Track), any number, purely to group
  * StickerInstances visually — see StickerInstance.trackId. This type carries no actual
  * keyframe/clip data itself (that still lives in Animation.keyframes/leftEyeKeyframes/etc. and
- * StickerInstance) — it's deliberately just display order, name, and mute/lock state. */
+ * StickerInstance) — it's deliberately just display order, name, and mute/lock state.
+ * 'comboClip' is not a real Animation track kind at all — it exists only so the Timeline can
+ * build one synthetic, non-persisted Track for whichever AnimationCombo is selected (a combo
+ * has its own flat `clips` array, no Track[]/lane concept), reusing the same accent-color/
+ * ClipView rendering path as every other track kind. */
 export interface Track {
   id: string
   kind: TrackKind
@@ -396,12 +400,15 @@ export function createTrack(idFactory: () => string, kind: TrackKind, order: num
   }
 }
 
-export type SelectionItemKind = 'keyframe' | 'sticker' | 'marker'
+export type SelectionItemKind = 'keyframe' | 'sticker' | 'marker' | 'comboClip'
 
 /** One uniformly-shaped selectable timeline item, letting the Timeline's selection/clipboard/
- * drag code treat keyframes-on-any-track, sticker clips, and markers identically instead of
- * needing a parallel selection model per kind. `trackId` is one of the 5 fixed keyframe-track
- * kinds ('pose'/'leftEye'/'rightEye'/'pupils'/'eyelids'), a sticker Track.id, or 'marker'. */
+ * drag code treat keyframes-on-any-track, sticker clips, markers, and Combination clips
+ * identically instead of needing a parallel selection model per kind. `trackId` is one of the
+ * 5 fixed keyframe-track kinds ('pose'/'leftEye'/'rightEye'/'pupils'/'eyelids'), a sticker
+ * Track.id, 'marker', or (for kind 'comboClip') the owning AnimationCombo's own id — scoping a
+ * combo-clip selection to whichever combo is currently being edited, mirroring how a sticker's
+ * trackId scopes it to one sticker track. */
 export interface SelectionItem {
   kind: SelectionItemKind
   trackId: string
@@ -434,6 +441,27 @@ export interface Animation {
   stickers: StickerInstance[]
   /** Studio-only annotations — see Marker above. */
   markers: Marker[]
+}
+
+/** A single reference-only clip inside an animation combination. It points at an existing
+ * animation by id and stores only playback settings, so the combo can be edited and exported
+ * without copying frame data. */
+export interface AnimationComboClip {
+  id: string
+  animationId: string
+  startTimeMs: number
+  loopCount: number
+  playbackSpeed: number
+  transitionMs: number
+  endDelayMs: number
+}
+
+/** A reusable animation sequence made from references to existing animations. */
+export interface AnimationCombo {
+  id: string
+  name: string
+  loop: boolean
+  clips: AnimationComboClip[]
 }
 
 /** Which eye(s) the Controls/Colors panels currently write to. Editor/session state rather
@@ -833,6 +861,7 @@ export interface Project {
   personality: Personality
   timing: GlobalTiming
   animations: Animation[]
+  animationCombos: AnimationCombo[]
   expressions: Expression[]
   /** The project's single shared default appearance — see VisualReferenceStyle below. */
   visualReference: VisualReferenceStyle

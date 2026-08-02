@@ -38,23 +38,33 @@ interface ClipViewProps {
   selected: boolean
   locked: boolean
   label: string
+  /** True while this clip is the one currently driving playback (e.g. a Combination clip the
+   * playhead is inside of right now) — an extra highlight ring layered on top of `selected`,
+   * distinct from it (a clip can be selected but not playing, or playing but not selected).
+   * Defaults false; unused by keyframe/sticker/marker callers today. */
+  active?: boolean
   onBodyPointerDown: (e: React.PointerEvent) => void
   onStartHandlePointerDown: (e: React.PointerEvent) => void
   onEndHandlePointerDown: (e: React.PointerEvent) => void
 }
 
-/** A ranged clip (sticker instance, or in future an expression/effect clip) — a rectangular
- * block spanning [startMs, endMs] with visible drag handles on both edges. `endMs === null`
- * (a sticker with no configured end) renders as an open-ended clip stretching to the track's
- * full width, per StickerAnimSettings.endTimeMs's "null = stays visible indefinitely" contract. */
-export function ClipView({ trackKind, startMs, endMs, durationMs, pxPerMs, selected, locked, label, onBodyPointerDown, onStartHandlePointerDown, onEndHandlePointerDown }: ClipViewProps) {
+/** A ranged clip (sticker instance, Combination clip, or in future an expression/effect clip) —
+ * a rectangular block spanning [startMs, endMs] with visible drag handles on both edges.
+ * `endMs === null` (a sticker with no configured end) renders as an open-ended clip stretching
+ * to the track's full width, per StickerAnimSettings.endTimeMs's "null = stays visible
+ * indefinitely" contract. */
+export function ClipView({ trackKind, startMs, endMs, durationMs, pxPerMs, selected, locked, label, active, onBodyPointerDown, onStartHandlePointerDown, onEndHandlePointerDown }: ClipViewProps) {
   const accent = trackAccentClasses(trackKind)
   const left = msToPx(startMs, pxPerMs)
   const width = Math.max(6, msToPx((endMs ?? durationMs) - startMs, pxPerMs))
   return (
     <div
       className={`absolute top-1 bottom-1 rounded-md border overflow-hidden ${
-        selected ? `${accent.border} bg-studio-accent/30` : 'border-studio-border2 bg-studio-panel2 hover:bg-studio-border2/60'
+        active
+          ? `${accent.border} bg-studio-accent2/25 shadow-[0_0_0_1px_rgba(124,92,255,0.6)]`
+          : selected
+            ? `${accent.border} bg-studio-accent/30`
+            : 'border-studio-border2 bg-studio-panel2 hover:bg-studio-border2/60'
       } ${locked ? 'opacity-50' : ''}`}
       style={{ left, width }}
     >
@@ -63,6 +73,7 @@ export function ClipView({ trackKind, startMs, endMs, durationMs, pxPerMs, selec
         onPointerDown={locked ? undefined : onBodyPointerDown}
         title={label}
       >
+        {active && <span className="mr-1 text-studio-accent2 shrink-0">▶</span>}
         <span className={`w-1.5 h-1.5 rounded-full mr-1.5 shrink-0 ${accent.dot}`} />
         <span className="truncate">{label}</span>
         {endMs === null && <span className="ml-1 text-studio-muted shrink-0">→</span>}

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { useStore } from '@/state/store'
+import { useStore, isComboTimelineActive } from '@/state/store'
 import type { EditorState } from '@/types'
 import { AppShell } from '@/components/Layout/AppShell'
 import { useKeyboardShortcuts } from '@/lib/shortcuts'
@@ -260,7 +260,7 @@ export default function App() {
   const pasteKeyframeAtPlayhead = () => {
     const state = useStore.getState()
     if (state.timelineClipboard.length > 0) {
-      pasteSelectionAt(state.playbackTimeMs)
+      pasteSelectionAt(isComboTimelineActive(state) ? state.comboPreviewTimeMs : state.playbackTimeMs)
       return
     }
     if (!state.keyframeClipboard) return

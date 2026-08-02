@@ -49,6 +49,19 @@ function AddStickerButton({ onPick }: { onPick: (assetId: string) => void }) {
   )
 }
 
+/** One Combination clip laid out on the synthetic 'comboClip' track — a plain data shape
+ * (not AnimationComboClip directly) since TrackRow/ClipView only need the resolved timeline
+ * position, not the clip's own loop/speed/transition fields (those are edited in
+ * TimelineInspector). `active` mirrors ClipView's own prop — true for whichever clip
+ * sampleCombo() says is currently playing. */
+export interface ComboClipLayout {
+  id: string
+  startMs: number
+  durationMs: number
+  label: string
+  active: boolean
+}
+
 interface TrackRowProps {
   track: Track
   pxPerMs: number
@@ -57,11 +70,14 @@ interface TrackRowProps {
   keyframes?: Keyframe[]
   stickers?: StickerInstance[]
   markers?: Marker[]
+  comboClips?: ComboClipLayout[]
   isSelected: (id: string) => boolean
   onKeyframePointerDown?: (trackKind: KeyframeTrackKind, keyframeId: string, timeMs: number, e: React.PointerEvent) => void
   onStickerBodyPointerDown?: (stickerId: string, e: React.PointerEvent) => void
   onStickerHandlePointerDown?: (stickerId: string, edge: 'start' | 'end', e: React.PointerEvent) => void
   onMarkerPointerDown?: (markerId: string, e: React.PointerEvent) => void
+  onComboClipBodyPointerDown?: (clipId: string, e: React.PointerEvent) => void
+  onComboClipHandlePointerDown?: (clipId: string, edge: 'start' | 'end', e: React.PointerEvent) => void
   onToggleVisible: () => void
   onToggleLocked: () => void
   onRemove?: () => void
@@ -86,11 +102,14 @@ export function TrackRow({
   keyframes,
   stickers,
   markers,
+  comboClips,
   isSelected,
   onKeyframePointerDown,
   onStickerBodyPointerDown,
   onStickerHandlePointerDown,
   onMarkerPointerDown,
+  onComboClipBodyPointerDown,
+  onComboClipHandlePointerDown,
   onToggleVisible,
   onToggleLocked,
   onRemove,
@@ -225,6 +244,24 @@ export function TrackRow({
             selected={isSelected(m.id)}
             label={`${m.label || 'Marker'} — ${Math.round(m.timeMs)}ms`}
             onPointerDown={(e) => onMarkerPointerDown?.(m.id, e)}
+          />
+        ))}
+
+        {comboClips?.map((c) => (
+          <ClipView
+            key={c.id}
+            trackKind="comboClip"
+            startMs={c.startMs}
+            endMs={c.startMs + c.durationMs}
+            durationMs={durationMs}
+            pxPerMs={pxPerMs}
+            selected={isSelected(c.id)}
+            locked={track.locked}
+            active={c.active}
+            label={c.label}
+            onBodyPointerDown={(e) => onComboClipBodyPointerDown?.(c.id, e)}
+            onStartHandlePointerDown={(e) => onComboClipHandlePointerDown?.(c.id, 'start', e)}
+            onEndHandlePointerDown={(e) => onComboClipHandlePointerDown?.(c.id, 'end', e)}
           />
         ))}
       </div>

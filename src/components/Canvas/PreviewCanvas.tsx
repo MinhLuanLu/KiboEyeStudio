@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react'
-import { useStore, getActiveAnimation } from '@/state/store'
+import { useStore, getActiveAnimation, isComboTimelineActive } from '@/state/store'
 import { renderFace } from '@/renderer/faceRenderer'
 import { sampleAnimationEye, sampleTrack, animationDuration, wrapTime } from '@/engine/interpolate'
+import { computeComboTimeline, sampleCombo } from '@/engine/comboPlayback'
 import { IdleEngine } from '@/engine/idleEngine'
 import {
   clampFps,
@@ -110,6 +111,46 @@ export function PreviewCanvas() {
         theme = leftVisualReferenceColors(vr)
         rightTheme = rightVisualReferenceColors(vr)
         timeMs = 0
+      } else if (isComboTimelineActive(state)) {
+        // While a Combination is selected on the Combinations tab, this canvas (and the
+        // bottom Timeline, via the same shared predicate) shows the combo's own playback
+        // instead of Design/Animate/Idle — same reasoning as the Visual Reference branch
+        // above: leftTab+selectedComboId pick what's being authored right now, so the shared
+        // preview should reflect that regardless of `mode` (mode is left untouched, so
+        // switching back to Animations/Expressions resumes exactly where it was).
+        //
+        // isComboTimelineActive already excludes an actively-*playing* Animate-mode
+        // animation, even if leftTab is still (sticky-)showing 'combinations' — e.g. the user
+        // built a combo, then hit the Toolbar's own Play button for a regular animation
+        // without first clicking back to the Animations tab. Without this, leftTab's
+        // stickiness silently swallowed the Toolbar Play button's effect (reported as "no
+        // animation play"). Non-playing states (paused/stopped, or plain Design) still yield
+        // to the combo preview, since there's nothing actively animating to protect there.
+        idleEngineRef.current.reset()
+        const combo = state.project.animationCombos.find((c) => c.id === state.selectedComboId) ?? null
+        if (combo) {
+          const timeline = computeComboTimeline(combo, state.project.animations)
+          let t = state.comboPreviewTimeMs
+          if (state.comboPreviewPlaying && timeline.total > 0) {
+            t += dt * (state.project.timing.animationSpeed / 100)
+            if (t >= timeline.total) {
+              if (state.comboPreviewLoop) t %= timeline.total
+              else {
+                t = timeline.total
+                state.setComboPreviewPlaying(false)
+              }
+            }
+            state.setComboPreviewTimeMs(t)
+          }
+          const sample = sampleCombo(timeline, t)
+          if (sample) {
+            params = sample.params
+            rightParams = sample.rightParams
+            activeAnimation = sample.anim
+            timeMs = sample.animationTimeMs
+            isAnimateScrub = true
+          }
+        }
       } else if (state.mode === 'design') {
         idleEngineRef.current.reset()
         // Design mode is the only place the live pose can actually diverge per eye (Eye

@@ -348,6 +348,67 @@ function exportExpression(
   ].join('\n')
 }
 
+function exportAnimationCombos(project: Project): string {
+  const combos = project.animationCombos ?? []
+  const lines: string[] = []
+  lines.push('// ---- Animation Combinations -----------------------------------------------')
+  lines.push('/*')
+  lines.push(' * Animation Combinations')
+  lines.push(' *')
+  lines.push(' * Play multiple animations as one reusable sequence.')
+  lines.push(' *')
+  lines.push(' * Play:')
+  lines.push(' *')
+  lines.push(' *   Combo(IdleSequence);')
+  lines.push(' *')
+  lines.push(' * Stop:')
+  lines.push(' *')
+  lines.push(' *   StopCombo();')
+  lines.push(' *')
+  lines.push(' * Pause:')
+  lines.push(' *')
+  lines.push(' *   PauseCombo();')
+  lines.push(' *')
+  lines.push(' * Resume:')
+  lines.push(' *')
+  lines.push(' *   ResumeCombo();')
+  lines.push(' *')
+  lines.push(' * Restart:')
+  lines.push(' *')
+  lines.push(' *   RestartCombo();')
+  lines.push(' *')
+  lines.push(' * Status:')
+  lines.push(' *')
+  lines.push(' *   ComboPlaying();')
+  lines.push(' *   ComboPaused();')
+  lines.push(' *   ComboFinished();')
+  lines.push(' *')
+  lines.push(' */')
+
+  if (combos.length === 0) {
+    lines.push('// This project has no animation combinations yet.')
+    return lines.join('\n')
+  }
+
+  for (const combo of combos) {
+    const ident = toIdentifier(combo.name)
+    const clips = combo.clips
+      .map((clip) => {
+        const anim = project.animations.find((a) => a.id === clip.animationId)
+        if (!anim) return null
+        return `  { &Anim_${toIdentifier(anim.name)}, ${Math.max(0, Math.round(clip.startTimeMs))}, ${Math.max(1, Math.round(clip.loopCount || 1))}, ${Math.max(1, Math.round(clip.playbackSpeed || 100))}, ${Math.max(0, Math.round(clip.transitionMs || 0))}, ${Math.max(0, Math.round(clip.endDelayMs || 0))} }`
+      })
+      .filter((line): line is string => !!line)
+    lines.push(`const AnimationComboClip ${ident}_Clips[] PROGMEM = {`)
+    lines.push(clips.length > 0 ? clips.join(',\n') : '  { nullptr, 0, 1, 100, 0, 0 }')
+    lines.push('};')
+    lines.push(`const AnimationCombo ${ident} = { ${ident}_Clips, ${clips.length > 0 ? clips.length : 0}, ${combo.loop ? 'true' : 'false'} };`)
+    lines.push('')
+  }
+
+  return lines.join('\n')
+}
+
 function toRgb565Hex(hex: string): string {
   return `0x${hexToRgb565(hex).toString(16).toUpperCase().padStart(4, '0')}`
 }
@@ -2538,6 +2599,12 @@ struct EyesPlayerState {
   bool blending = false;
   EyeColorSet colorsLeft = EYE_COLORS_LEFT;
   EyeColorSet colorsRight = EYE_COLORS_RIGHT;
+  const AnimationCombo* combo = nullptr;
+  bool comboPlaying = false;
+  bool comboPaused = false;
+  bool comboFinished = false;
+  unsigned long comboStart = 0;
+  unsigned long comboPausedElapsed = 0;
   bool sequencePlaying = false;
   EyeAnimation sequence[EYES_MAX_ANIMATION_SEQUENCE] = {};
   uint8_t sequenceCount = 0;
@@ -2552,6 +2619,10 @@ inline void eyesStartAnimation(const EyeAnimation& animation) {
   eyesPlayer.animStart = millis();
   eyesPlayer.frameIndex = 0;
   eyesPlayer.blending = false;
+  eyesPlayer.comboPlaying = false;
+  eyesPlayer.comboPaused = false;
+  eyesPlayer.comboFinished = false;
+  eyesPlayer.combo = nullptr;
 }
 
 inline unsigned long eyesAnimationDurationMs(const EyeAnimation& animation) {
@@ -2564,6 +2635,120 @@ inline unsigned long eyesAnimationDurationMs(const EyeAnimation& animation) {
     duration += frameDuration;
   }
   return duration == 0 ? 1 : duration;
+}
+
+inline unsigned long eyesComboClipPlayDurationMs(const AnimationComboClip& clip) {
+  if (clip.animation == nullptr) return 0;
+  unsigned long animationMs = eyesAnimationDurationMs(*clip.animation);
+  if (animationMs == 0) return 0;
+  uint16_t loopCount = clip.loopCount == 0 ? 1 : clip.loopCount;
+  uint16_t speed = clip.playbackSpeed == 0 ? 100 : clip.playbackSpeed;
+  unsigned long scaled = (animationMs * loopCount * 100UL) / speed;
+  return scaled == 0 ? 1 : scaled;
+}
+
+inline unsigned long eyesComboClipDurationMs(const AnimationComboClip& clip) {
+  return eyesComboClipPlayDurationMs(clip) + clip.transitionMs + clip.endDelayMs;
+}
+
+inline unsigned long eyesComboDurationMs(const AnimationCombo& combo) {
+  unsigned long total = 0;
+  for (uint8_t i = 0; i < combo.count; i++) total += eyesComboClipDurationMs(combo.clips[i]);
+  return total;
+}
+
+inline void StopCombo() {
+  eyesPlayer.combo = nullptr;
+  eyesPlayer.comboPlaying = false;
+  eyesPlayer.comboPaused = false;
+  eyesPlayer.comboFinished = false;
+  eyesPlayer.comboStart = 0;
+  eyesPlayer.comboPausedElapsed = 0;
+}
+
+inline void Combo(const AnimationCombo& combo) {
+  eyesPlayer.combo = &combo;
+  eyesPlayer.comboPlaying = true;
+  eyesPlayer.comboPaused = false;
+  eyesPlayer.comboFinished = false;
+  eyesPlayer.comboStart = millis();
+  eyesPlayer.comboPausedElapsed = 0;
+  eyesPlayer.playingAnimation = false;
+  eyesPlayer.sequencePlaying = false;
+}
+
+inline void PauseCombo() {
+  if (!eyesPlayer.comboPlaying || eyesPlayer.comboPaused || !eyesPlayer.combo) return;
+  eyesPlayer.comboPausedElapsed = millis() - eyesPlayer.comboStart;
+  eyesPlayer.comboPaused = true;
+}
+
+inline void ResumeCombo() {
+  if (!eyesPlayer.comboPlaying || !eyesPlayer.comboPaused || !eyesPlayer.combo) return;
+  eyesPlayer.comboStart = millis() - eyesPlayer.comboPausedElapsed;
+  eyesPlayer.comboPaused = false;
+}
+
+inline void RestartCombo() {
+  if (!eyesPlayer.combo) return;
+  eyesPlayer.comboStart = millis();
+  eyesPlayer.comboPaused = false;
+  eyesPlayer.comboFinished = false;
+  eyesPlayer.comboPlaying = true;
+  eyesPlayer.comboPausedElapsed = 0;
+}
+
+inline bool ComboPlaying() {
+  return eyesPlayer.comboPlaying && !eyesPlayer.comboPaused && !eyesPlayer.comboFinished && eyesPlayer.combo != nullptr;
+}
+
+inline bool ComboPaused() {
+  return eyesPlayer.comboPaused;
+}
+
+inline bool ComboFinished() {
+  return eyesPlayer.comboFinished;
+}
+
+inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, LiveEye& outLeft, LiveEye& outRight) {
+  if (combo.count == 0) return false;
+  unsigned long totalDuration = eyesComboDurationMs(combo);
+  if (totalDuration == 0) return false;
+
+  unsigned long playMs = combo.loop ? (elapsedMs % totalDuration) : elapsedMs;
+  unsigned long acc = 0;
+  for (uint8_t i = 0; i < combo.count; i++) {
+    const AnimationComboClip& clip = combo.clips[i];
+    unsigned long clipDuration = eyesComboClipDurationMs(clip);
+    bool lastClip = (i == combo.count - 1);
+    if (playMs < acc + clipDuration || lastClip) {
+      unsigned long clipElapsed = playMs > acc ? playMs - acc : 0;
+      unsigned long playDuration = eyesComboClipPlayDurationMs(clip);
+      unsigned long localElapsed = clipElapsed;
+      if (localElapsed >= playDuration) localElapsed = playDuration > 0 ? playDuration - 1 : 0;
+      if (clip.animation == nullptr || clip.animation->count == 0) {
+        outLeft = {};
+        outRight = {};
+        return false;
+      }
+      EyeAnimation active = *clip.animation;
+      active.loop = false;
+      uint16_t speed = clip.playbackSpeed == 0 ? 100 : clip.playbackSpeed;
+      unsigned long scaledElapsed = (localElapsed * speed) / 100UL;
+      unsigned long animDuration = eyesAnimationDurationMs(active);
+      unsigned long animElapsed = animDuration > 0 ? (scaledElapsed % animDuration) : 0;
+      unsigned long localStartMillis = millis() - animElapsed;
+      uint16_t frameIndex = 0;
+      bool stillPlaying = eyesPlayAnimationPair(active, localStartMillis, frameIndex, outLeft, outRight);
+      if (!combo.loop && lastClip && playMs >= totalDuration) stillPlaying = false;
+      return stillPlaying;
+    }
+    acc += clipDuration;
+  }
+
+  outLeft = {};
+  outRight = {};
+  return false;
 }
 
 inline bool eyesAdvanceAnimationSequence() {
@@ -2593,6 +2778,7 @@ inline void SetExpression(const EyeExpression& expression) {
   eyesPlayer.blendStart = millis();
   eyesPlayer.blending = true;
   eyesPlayer.playingAnimation = false;
+  StopCombo();
   eyesPlayer.expression = &expression;
   eyesPlayer.colorsLeft = *expression.colorsLeft;
   eyesPlayer.colorsRight = *expression.colorsRight;
@@ -2606,6 +2792,7 @@ inline void SetExpression(const EyeExpression& expression) {
 // constant, e.g. PlayAnimation(Anim_Blink). Colors are left untouched (matching the studio,
 // where Animate mode never changes the color theme — only expressions can).
 inline void PlayAnimation(const EyeAnimation& animation) {
+  StopCombo();
   eyesPlayer.sequencePlaying = false;
   eyesPlayer.sequenceCount = 0;
   eyesPlayer.sequenceIndex = 0;
@@ -2654,6 +2841,21 @@ inline LiveEye UpdateEyes() {
     LiveEye target = eyesLerpFrame(*eyesPlayer.expression->frame, *eyesPlayer.expression->frame, 0);
     eyesPlayer.live = eyesLerpLive(eyesPlayer.blendFrom, target, t);
     eyesPlayer.liveRight = eyesPlayer.live;
+  } else if (ComboPlaying() && eyesPlayer.combo != nullptr) {
+    unsigned long elapsed = millis() - eyesPlayer.comboStart;
+    bool stillPlaying = eyesPlayCombo(*eyesPlayer.combo, elapsed, eyesPlayer.live, eyesPlayer.liveRight);
+    if (!eyesPlayer.combo->loop) {
+      unsigned long totalDuration = eyesComboDurationMs(*eyesPlayer.combo);
+      if (elapsed >= totalDuration) {
+        eyesPlayer.comboFinished = true;
+        eyesPlayer.comboPlaying = false;
+      } else {
+        eyesPlayer.comboFinished = false;
+      }
+    } else {
+      eyesPlayer.comboFinished = false;
+      eyesPlayer.comboPlaying = stillPlaying;
+    }
   } else if (eyesPlayer.playingAnimation) {
     unsigned long sequenceElapsed = millis() - eyesPlayer.animStart;
     bool stillPlaying = eyesPlayAnimationPair(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live, eyesPlayer.liveRight);
@@ -3123,14 +3325,20 @@ function exportQuickReference(project: Project): string {
 
   const lines: string[] = []
   lines.push('// ---- Quick Reference --------------------------------------------------------')
-  lines.push('// Everything you can pass to PlayAnimation(...) / PlayAnimationSequence(...) / SetExpression(...) below.')
+  lines.push('// Everything you can pass to PlayAnimation(...) / Combo(...) / SetExpression(...) below.')
   lines.push('//')
   if (project.animations.length > 0) {
     lines.push('// Animations:')
     for (const a of project.animations) lines.push(`//   PlayAnimation(Anim_${toIdentifier(a.name)});`)
-    lines.push('//   PlayAnimationSequence({ Anim_Idle, Anim_Curious, Anim_Blink, Anim_Happy });')
   } else {
     lines.push('// Animations: (this project has none yet)')
+  }
+  lines.push('//')
+  if ((project.animationCombos ?? []).length > 0) {
+    lines.push('// Animation Combinations:')
+    for (const combo of project.animationCombos) lines.push(`//   Combo(${toIdentifier(combo.name)});`)
+  } else {
+    lines.push('// Animation Combinations: (this project has none yet)')
   }
   lines.push('//')
   if (singleExpressions.length > 0) {
@@ -3256,9 +3464,12 @@ function exportDemo(project: Project): string {
     lines.push('')
   }
   lines.push('  LiveEye live = UpdateEyes();')
+  lines.push('  LiveEye liveRight = UpdateEyesRight();  // only differs from `live` while playing an animation that')
+  lines.push('                                          // authored real Left Eye/Right Eye track divergence in the')
+  lines.push('                                          // studio — always safe to call either way')
   lines.push('  tft.fillScreen(EYE_COLOR_BACKGROUND);')
   lines.push(
-    "  eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND, eyesPlayer.colorsLeft, eyesPlayer.colorsRight);  // also draws this project's/the active expression's/animation's stickers, and the active expression's own colors"
+    "  eyesDrawEyePair(tft, 120, 120, live, liveRight, EYE_COLOR_BACKGROUND, eyesPlayer.colorsLeft, eyesPlayer.colorsRight);  // also draws this project's/the active expression's/animation's stickers, and the active expression's own colors"
   )
   lines.push('  tft.present();')
   lines.push('  delay(EYE_FRAME_DELAY_MS);')
@@ -3361,8 +3572,11 @@ export function generateCppHeader(project: Project): string {
  *
  *   void loop() {
  *     LiveEye live = UpdateEyes();
+ *     LiveEye liveRight = UpdateEyesRight();  // only differs from "live" while playing an animation
+ *                                              // that authored real Left Eye/Right Eye track
+ *                                              // divergence in the studio — always safe to call
  *     tft.fillScreen(EYE_COLOR_BACKGROUND);
- *     eyesDrawEyePair(tft, 120, 120, live, EYE_COLOR_BACKGROUND, eyesPlayer.colorsLeft, eyesPlayer.colorsRight);
+ *     eyesDrawEyePair(tft, 120, 120, live, liveRight, EYE_COLOR_BACKGROUND, eyesPlayer.colorsLeft, eyesPlayer.colorsRight);
  *     tft.present();
  *     delay(EYE_FRAME_DELAY_MS);  // paces drawing to EYE_TARGET_FPS
  *   }
@@ -3541,6 +3755,27 @@ struct EyeAnimation {
   uint8_t stickerCount;
 };
 
+// A single clip inside a reusable animation combination. It references an existing
+// exported animation by pointer and only stores playback settings, so combo editing never
+// duplicates frame data.
+struct AnimationComboClip {
+  const EyeAnimation* animation;
+  uint16_t startTimeMs;
+  uint16_t loopCount;
+  uint16_t playbackSpeed;
+  uint16_t transitionMs;
+  uint16_t endDelayMs;
+};
+
+// A reusable sequence of animation references. The clips are ordered and timed by the
+// exported combo timeline; the runtime player walks that list without copying animation
+// frames.
+struct AnimationCombo {
+  const AnimationComboClip* clips;
+  uint8_t count;
+  bool loop;
+};
+
 // One static expression, bundled the same way EyeAnimation is: SetExpression(Expr_X) switches
 // pose, color palette, AND stickers all at once, matching the studio (applying an expression
 // there can change all three — see applyExpression()/saveExpression() in the studio's
@@ -3561,6 +3796,8 @@ ${PLAYER_CODE}
 // ---- Animations -----------------------------------------------------------
 
 ${project.animations.map((a) => exportAnimation(a, project.customPupilShapes, project.customEyeShapes, stickersExport.assetsById, stickersExport.rasterIndexByAssetId)).join('\n\n')}
+
+${exportAnimationCombos(project)}
 
 // ---- Expressions (static poses) -------------------------------------------
 

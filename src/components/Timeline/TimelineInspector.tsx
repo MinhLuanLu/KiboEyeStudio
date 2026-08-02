@@ -25,17 +25,20 @@ function keyframeListForKind(anim: NonNullable<ReturnType<typeof getActiveAnimat
 }
 
 /** The Timeline's bottom detail panel — shows and edits whatever the single selected timeline
- * item is (a keyframe on any track, a sticker clip's timing, or a marker). Multi-selections
- * just show a count, matching the old single-keyframe Timeline's "nothing to show" behavior
- * for anything more complex than one item. Full sticker property editing (position/scale/
- * rotation/entry-exit/loop/...) stays in StickerControls (the Stickers right panel) — selecting
- * a sticker clip here already drives that panel too, via syncPrimarySelection in the store, so
- * this panel only needs to surface clip *timing* for quick access without duplicating it. */
+ * item is (a keyframe on any track, a sticker clip's timing, a Combination clip's loop/speed/
+ * transition settings, or a marker). Multi-selections just show a count, matching the old
+ * single-keyframe Timeline's "nothing to show" behavior for anything more complex than one
+ * item. Full sticker property editing (position/scale/rotation/entry-exit/loop/...) stays in
+ * StickerControls (the Stickers right panel) — selecting a sticker clip here already drives
+ * that panel too, via syncPrimarySelection in the store, so this panel only needs to surface
+ * clip *timing* for quick access without duplicating it. */
 export function TimelineInspector() {
   const anim = useStore(() => getActiveAnimation())
   const selection = useStore((s) => s.timelineSelection)
   const fps = useStore((s) => s.project.display.fps)
   const expressions = useStore((s) => s.project.expressions)
+  const animations = useStore((s) => s.project.animations)
+  const animationCombos = useStore((s) => s.project.animationCombos)
   const checkpoint = useStore((s) => s.checkpoint)
   const setKeyframeTime = useStore((s) => s.setKeyframeTime)
   const updateTrackKeyframeEasing = useStore((s) => s.updateTrackKeyframeEasing)
@@ -44,15 +47,97 @@ export function TimelineInspector() {
   const updateSticker = useStore((s) => s.updateSticker)
   const updateMarker = useStore((s) => s.updateMarker)
   const setRightTab = useStore((s) => s.setRightTab)
+  const updateAnimationComboClip = useStore((s) => s.updateAnimationComboClip)
+  const deleteAnimationComboClip = useStore((s) => s.deleteAnimationComboClip)
 
   const [exprPickerOpen, setExprPickerOpen] = useState(false)
   const [exprSearch, setExprSearch] = useState('')
   const [exprMode, setExprMode] = useState<'styleOnly' | 'replace'>('styleOnly')
 
+  if (selection.length === 1 && selection[0].kind === 'comboClip') {
+    const item = selection[0]
+    const combo = animationCombos.find((c) => c.id === item.trackId)
+    const clip = combo?.clips.find((c) => c.id === item.id)
+    if (!combo || !clip) return null
+    const clipAnim = animations.find((a) => a.id === clip.animationId)
+    return (
+      <div className="flex flex-col gap-2.5 studio-panel p-2.5">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">{clipAnim?.name ?? 'Missing animation'}</span>
+          <button
+            className="studio-btn px-2 py-1 text-xs"
+            onClick={() => {
+              checkpoint()
+              deleteAnimationComboClip(combo.id, clip.id)
+            }}
+          >
+            Delete
+          </button>
+        </div>
+        <div className="grid grid-cols-2 gap-2 max-w-md">
+          <label className="flex flex-col gap-1">
+            <span className="studio-label">Start (ms)</span>
+            <input
+              type="number"
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+              value={clip.startTimeMs}
+              onFocus={checkpoint}
+              onChange={(e) => updateAnimationComboClip(combo.id, clip.id, { startTimeMs: Number(e.target.value) })}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="studio-label">Loops</span>
+            <input
+              type="number"
+              min={1}
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+              value={clip.loopCount}
+              onFocus={checkpoint}
+              onChange={(e) => updateAnimationComboClip(combo.id, clip.id, { loopCount: Number(e.target.value) })}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="studio-label">Speed %</span>
+            <input
+              type="number"
+              min={1}
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+              value={clip.playbackSpeed}
+              onFocus={checkpoint}
+              onChange={(e) => updateAnimationComboClip(combo.id, clip.id, { playbackSpeed: Number(e.target.value) })}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="studio-label">Transition ms</span>
+            <input
+              type="number"
+              min={0}
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+              value={clip.transitionMs}
+              onFocus={checkpoint}
+              onChange={(e) => updateAnimationComboClip(combo.id, clip.id, { transitionMs: Number(e.target.value) })}
+            />
+          </label>
+          <label className="col-span-2 flex flex-col gap-1">
+            <span className="studio-label">End delay ms</span>
+            <input
+              type="number"
+              min={0}
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+              value={clip.endDelayMs}
+              onFocus={checkpoint}
+              onChange={(e) => updateAnimationComboClip(combo.id, clip.id, { endDelayMs: Number(e.target.value) })}
+            />
+          </label>
+        </div>
+      </div>
+    )
+  }
+
   if (!anim) return null
 
   if (selection.length === 0) {
-    return <div className="text-xs text-studio-muted px-2 py-3">Select a keyframe, sticker clip, or marker to edit it here.</div>
+    return <div className="text-xs text-studio-muted px-2 py-3">Select a keyframe, sticker clip, Combination clip, or marker to edit it here.</div>
   }
   if (selection.length > 1) {
     return <div className="text-xs text-studio-muted px-2 py-3">{selection.length} items selected.</div>

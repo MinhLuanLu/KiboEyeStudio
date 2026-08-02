@@ -3,6 +3,8 @@ import { immer } from 'zustand/middleware/immer'
 import { nanoid } from 'nanoid'
 import type {
   Animation,
+  AnimationCombo,
+  AnimationComboClip,
   DisplaySettings,
   EasingType,
   EditorState,
@@ -50,6 +52,7 @@ import {
 import { builtinAnimations } from '@/data/builtinAnimations'
 import { builtinExpressions } from '@/data/builtinExpressions'
 import { MIN_SEGMENT_MS, animationDuration, sampleAnimationEye, sampleTrack } from '@/engine/interpolate'
+import { computeComboTimeline, loopCountForDuration } from '@/engine/comboPlayback'
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
 import { STICKER_PRESET_BUNDLES } from '@/data/stickerPresets'
 import { createDefaultUiDesign, createWidget } from '@/lib/uiDesign/widgetDefaults'
@@ -97,6 +100,7 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     personality: { ...DEFAULT_PERSONALITY },
     timing: { ...DEFAULT_TIMING },
     animations,
+    animationCombos: [],
     expressions,
     visualReference,
     customPupilShapes: [],
@@ -115,7 +119,7 @@ export interface DevStats {
 
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
-export type LeftTab = 'animations' | 'expressions'
+export type LeftTab = 'animations' | 'combinations' | 'expressions'
 export type RightTab = 'controls' | 'colors' | 'display' | 'personality' | 'visual-reference' | 'stickers'
 /** Which top-level screen is showing. 'home' is the landing screen shown at launch; 'eyeStudio'
  * is everything that existed before UI Design Mode (the panel tree in EyeStudioWorkspace.tsx);
@@ -143,11 +147,16 @@ export type KeyframeTrackKind = 'pose' | 'leftEye' | 'rightEye' | 'pupils' | 'ey
  * an equivalent track, including in a different animation), or nothing extra for stickers/
  * markers (a sticker already carries its own `layer`/`trackId`; pasting into a different
  * animation just leaves `trackId` unresolved — see normalizeTracks()'s dangling-trackId
- * handling in persistence.ts, same fallback). */
+ * handling in persistence.ts, same fallback). `comboClip` entries carry a full
+ * AnimationComboClip (including its own `animationId`) so pasting into a *different* combo
+ * just works, same reasoning as keyframes pasting into a different animation — a clip whose
+ * `animationId` doesn't resolve in the target project already renders as "Missing animation",
+ * an existing, reused fallback. */
 export type TimelineClipboardEntry =
   | { kind: 'keyframe'; trackKind: KeyframeTrackKind; data: Keyframe }
   | { kind: 'sticker'; data: StickerInstance }
   | { kind: 'marker'; data: Marker }
+  | { kind: 'comboClip'; data: AnimationComboClip }
 
 interface StoreState {
   project: Project
@@ -195,6 +204,20 @@ interface StoreState {
   mode: PlaybackMode
   playbackState: PlaybackState
   playbackTimeMs: number
+
+  /** Which combo the Combinations panel is editing/previewing, and (for the "Preview from
+   * selected timeline position" button) which of its clips. Live in the store rather than
+   * local component state so the shared center PreviewCanvas can render the same combo — same
+   * reasoning as activeAnimationId/selectedExpressionId above. */
+  selectedComboId: string | null
+  selectedComboClipId: string | null
+  /** Combo playback is its own tiny clock, separate from playbackState/playbackTimeMs (which
+   * belong to Animate-mode single-animation playback) so switching to the Combinations tab and
+   * back never stomps on either — PreviewCanvas checks leftTab === 'combinations' first and
+   * renders from these instead, regardless of `mode`. */
+  comboPreviewPlaying: boolean
+  comboPreviewTimeMs: number
+  comboPreviewLoop: boolean
 
   devModeOpen: boolean
   devStats: DevStats
@@ -287,6 +310,22 @@ interface StoreState {
   setAnimationLoop: (id: string, loop: boolean) => void
   importAnimation: (animation: Animation) => void
 
+  // animation combinations
+  addAnimationCombo: (name?: string) => string
+  duplicateAnimationCombo: (id: string) => string
+  renameAnimationCombo: (id: string, name: string) => void
+  deleteAnimationCombo: (id: string) => void
+  addAnimationComboClip: (comboId: string, animationId: string) => string
+  updateAnimationComboClip: (comboId: string, clipId: string, partial: Partial<AnimationComboClip>) => void
+  deleteAnimationComboClip: (comboId: string, clipId: string) => void
+  reorderAnimationComboClip: (comboId: string, clipId: string, newIndex: number) => void
+  // combo preview — drives the shared center PreviewCanvas while leftTab === 'combinations'
+  selectAnimationCombo: (id: string | null) => void
+  selectAnimationComboClip: (id: string | null) => void
+  setComboPreviewPlaying: (playing: boolean) => void
+  setComboPreviewTimeMs: (ms: number) => void
+  setComboPreviewLoop: (loop: boolean) => void
+
   // keyframes (pose track only — legacy single-keyframe API kept for ControlsPanel and the
   // shortcut fallback path; see the "timeline (multi-track)" section below for the general,
   // track-aware, multi-selection-capable actions the new Timeline UI drives)
@@ -343,6 +382,15 @@ interface StoreState {
   updateTrackKeyframeEyeParams: (trackKind: KeyframeTrackKind, keyframeId: string, side: 'left' | 'right', partial: Partial<EyeParams>) => void
   /** Continuous-drag primitive for a sticker clip's start/end handle. */
   resizeStickerClip: (stickerId: string, edge: 'start' | 'end', newMs: number) => void
+  /** Continuous-drag primitive for a Combination clip's edge handle — the Timeline's combo-mode
+   * equivalent of resizeStickerClip. A combo clip has no independent in/out-frame concept (it's
+   * loop-count-based, not a frame range), so "resize" means solving for the whole loop count
+   * that best fits the requested edge position, via loopCountForDuration (engine/comboPlayback):
+   * `edge:'end'` holds `startTimeMs` fixed and re-derives `loopCount` for the new end; `edge:
+   * 'start'` holds the clip's *current end* fixed and re-derives both `startTimeMs` and
+   * `loopCount` — the same "trim = solve loop count" semantics already verified in the original
+   * Combination Timeline this replaces. */
+  resizeComboClip: (comboId: string, clipId: string, edge: 'start' | 'end', newMs: number) => void
   /** Splits a keyframe-track segment (inserting a new keyframe with the interpolated pose at
    * `atMs`) or a sticker clip (dividing it into two adjacent instances, preserving every other
    * setting on both sides) — a no-op if `atMs` isn't at least MIN_SEGMENT_MS from both
@@ -560,6 +608,19 @@ function activeAnimationOf(project: Project, id: string): Animation | undefined 
   return project.animations.find((a) => a.id === id)
 }
 
+function activeComboOf(project: Project, id: string | null): AnimationCombo | undefined {
+  return id ? project.animationCombos.find((c) => c.id === id) : undefined
+}
+
+/** The single source of truth for "is the bottom Timeline / center PreviewCanvas currently
+ * showing a Combination instead of the active Animation" — shared by both so they can never
+ * disagree (the exact bug class hit previously: PreviewCanvas's own inline version of this
+ * condition silently blocked real Animate-mode playback whenever leftTab was still stuck on
+ * 'combinations'). A genuinely-playing real animation always wins over a merely-selected combo. */
+export function isComboTimelineActive(s: Pick<StoreState, 'leftTab' | 'selectedComboId' | 'mode' | 'playbackState'>): boolean {
+  return s.leftTab === 'combinations' && s.selectedComboId != null && !(s.mode === 'animate' && s.playbackState === 'playing')
+}
+
 /** Resolves whichever sticker list `scope` currently points to. Called from inside a `set()`
  * producer with `project` being the live Immer draft, so the returned array is a reference
  * into that draft — mutating it (push/splice/etc.) mutates the project, same as every other
@@ -645,7 +706,11 @@ function syncPrimarySelection(s: StoreState): void {
 
 /** Deep-copies whatever `selection` currently points to into clipboard-entry shape — shared by
  * copySelection (session clipboard) and duplicateSelection (which builds entries from the
- * live selection directly, without touching whatever's already in the clipboard). */
+ * live selection directly, without touching whatever's already in the clipboard). Only ever
+ * called for the animation-editing path (comboClip selections go through
+ * collectComboClipboardEntries instead) — the final branch is guarded explicitly rather than a
+ * catch-all `else`, so a stray comboClip-kind item in `selection` (which should never happen,
+ * but costs nothing to guard) is skipped instead of mis-handled as a marker. */
 function collectClipboardEntries(project: Project, a: Animation, selection: SelectionItem[]): TimelineClipboardEntry[] {
   const entries: TimelineClipboardEntry[] = []
   for (const item of selection) {
@@ -656,10 +721,24 @@ function collectClipboardEntries(project: Project, a: Animation, selection: Sele
     } else if (item.kind === 'sticker') {
       const owner = findStickerOwner(project, item.id)
       if (owner) entries.push({ kind: 'sticker', data: JSON.parse(JSON.stringify(owner.list[owner.index])) })
-    } else {
+    } else if (item.kind === 'marker') {
       const m = a.markers.find((mk) => mk.id === item.id)
       if (m) entries.push({ kind: 'marker', data: JSON.parse(JSON.stringify(m)) })
     }
+  }
+  return entries
+}
+
+/** Deep-copies whatever `selection` currently points to (comboClip items only) into
+ * clipboard-entry shape — the combo-editing sibling of collectClipboardEntries, sharing the
+ * same TimelineClipboardEntry shape so one timelineClipboard can hold either kind (the paste
+ * side filters by kind, see pasteSelectionAt/duplicateSelection). */
+function collectComboClipboardEntries(combo: AnimationCombo, selection: SelectionItem[]): TimelineClipboardEntry[] {
+  const entries: TimelineClipboardEntry[] = []
+  for (const item of selection) {
+    if (item.kind !== 'comboClip') continue
+    const clip = combo.clips.find((c) => c.id === item.id)
+    if (clip) entries.push({ kind: 'comboClip', data: JSON.parse(JSON.stringify(clip)) })
   }
   return entries
 }
@@ -668,10 +747,12 @@ function collectClipboardEntries(project: Project, a: Animation, selection: Sele
  * entry lands exactly at `atMs` and every other entry keeps its original offset from that one
  * — shared by pasteSelectionAt (entries = timelineClipboard) and duplicateSelection (entries =
  * a fresh copy of the current selection, anchored just after the group's own end instead of
- * the playhead). Returns the newly-inserted items as a ready-to-select SelectionItem[]. */
+ * the playhead). Returns the newly-inserted items as a ready-to-select SelectionItem[]. Only
+ * ever called with keyframe/sticker/marker entries (comboClip entries go through
+ * insertComboClipEntriesAt instead) — callers filter by kind before calling this. */
 function insertTimelineEntriesAt(a: Animation, entries: TimelineClipboardEntry[], atMs: number): SelectionItem[] {
   if (entries.length === 0) return []
-  const timeOf = (e: TimelineClipboardEntry) => (e.kind === 'sticker' ? e.data.anim.startTimeMs : e.data.timeMs)
+  const timeOf = (e: TimelineClipboardEntry) => (e.kind === 'sticker' ? e.data.anim.startTimeMs : e.kind === 'comboClip' ? e.data.startTimeMs : e.data.timeMs)
   const anchor = Math.min(...entries.map(timeOf))
   const delta = Math.max(0, Math.round(atMs)) - anchor
   const newSelection: SelectionItem[] = []
@@ -691,7 +772,7 @@ function insertTimelineEntriesAt(a: Animation, entries: TimelineClipboardEntry[]
       copy.anim.endTimeMs = span != null ? copy.anim.startTimeMs + span : null
       a.stickers.push(copy)
       newSelection.push({ kind: 'sticker', trackId: copy.trackId, id: copy.id })
-    } else {
+    } else if (entry.kind === 'marker') {
       const copy: Marker = { ...entry.data, id: nanoid(8) }
       copy.timeMs = Math.max(0, copy.timeMs + delta)
       a.markers.push(copy)
@@ -699,6 +780,26 @@ function insertTimelineEntriesAt(a: Animation, entries: TimelineClipboardEntry[]
       newSelection.push({ kind: 'marker', trackId: 'marker', id: copy.id })
     }
   }
+  return newSelection
+}
+
+/** Inserts comboClip clipboard entries into `combo`, same anchor-earliest-at-atMs/preserve-
+ * relative-offset contract as insertTimelineEntriesAt — the combo-editing sibling. Every
+ * pasted/duplicated clip gets a fresh id; `animationId` carries through verbatim (see
+ * TimelineClipboardEntry's comment on the "Missing animation" fallback for a dangling id). */
+function insertComboClipEntriesAt(combo: AnimationCombo, entries: TimelineClipboardEntry[], atMs: number): SelectionItem[] {
+  const comboEntries = entries.filter((e): e is Extract<TimelineClipboardEntry, { kind: 'comboClip' }> => e.kind === 'comboClip')
+  if (comboEntries.length === 0) return []
+  const anchor = Math.min(...comboEntries.map((e) => e.data.startTimeMs))
+  const delta = Math.max(0, Math.round(atMs)) - anchor
+  const newSelection: SelectionItem[] = []
+  for (const entry of comboEntries) {
+    const copy: AnimationComboClip = { ...entry.data, id: nanoid(10) }
+    copy.startTimeMs = Math.max(0, Math.round(copy.startTimeMs + delta))
+    combo.clips.push(copy)
+    newSelection.push({ kind: 'comboClip', trackId: combo.id, id: copy.id })
+  }
+  combo.clips.sort((x, y) => x.startTimeMs - y.startTimeMs)
   return newSelection
 }
 
@@ -728,6 +829,12 @@ export const useStore = create<StoreState>()(
     mode: 'design',
     playbackState: 'stopped',
     playbackTimeMs: 0,
+
+    selectedComboId: null,
+    selectedComboClipId: null,
+    comboPreviewPlaying: false,
+    comboPreviewTimeMs: 0,
+    comboPreviewLoop: true,
 
     devModeOpen: false,
     esp32PreviewMode: false,
@@ -1265,6 +1372,129 @@ export const useStore = create<StoreState>()(
         s.dirty = true
       }),
 
+    addAnimationCombo: (name = 'New Combo') => {
+      const id = nanoid(10)
+      set((s) => {
+        s.project.animationCombos.push({ id, name, loop: false, clips: [] })
+        s.dirty = true
+      })
+      return id
+    },
+
+    duplicateAnimationCombo: (id) => {
+      const newId = nanoid(10)
+      set((s) => {
+        const src = s.project.animationCombos.find((combo) => combo.id === id)
+        if (!src) return
+        s.project.animationCombos.push({
+          ...JSON.parse(JSON.stringify(src)),
+          id: newId,
+          name: `${src.name} Copy`,
+          clips: src.clips.map((clip) => ({ ...clip, id: nanoid(10) }))
+        })
+        s.dirty = true
+      })
+      return newId
+    },
+
+    renameAnimationCombo: (id, name) =>
+      set((s) => {
+        const combo = s.project.animationCombos.find((item) => item.id === id)
+        if (combo) combo.name = name
+        s.dirty = true
+      }),
+
+    deleteAnimationCombo: (id) =>
+      set((s) => {
+        s.project.animationCombos = s.project.animationCombos.filter((combo) => combo.id !== id)
+        s.dirty = true
+      }),
+
+    addAnimationComboClip: (comboId, animationId) => {
+      const id = nanoid(10)
+      set((s) => {
+        const combo = s.project.animationCombos.find((item) => item.id === comboId)
+        if (!combo) return
+        // Appends right after the last clip actually *finishes* (its own end time on the
+        // combo's timeline — start + its real duration, accounting for loop/speed/transition/
+        // end-delay), not just after the last clip's start — the latter stacked every new clip
+        // at the same instant as whichever clip already had the greatest start time, so
+        // "Add clip" repeatedly produced overlapping clips instead of a sequential timeline.
+        // loopCount:1/playbackSpeed:100/transitionMs:0/endDelayMs:0 already give this new clip
+        // exactly the referenced animation's own default duration (see totalClipDuration).
+        const startTimeMs = computeComboTimeline(combo, s.project.animations).total
+        combo.clips.push({
+          id,
+          animationId,
+          startTimeMs,
+          loopCount: 1,
+          playbackSpeed: 100,
+          transitionMs: 0,
+          endDelayMs: 0
+        })
+        combo.clips.sort((a, b) => a.startTimeMs - b.startTimeMs)
+        s.dirty = true
+      })
+      return id
+    },
+
+    updateAnimationComboClip: (comboId, clipId, partial) =>
+      set((s) => {
+        const combo = s.project.animationCombos.find((item) => item.id === comboId)
+        const clip = combo?.clips.find((item) => item.id === clipId)
+        if (!combo || !clip) return
+        Object.assign(clip, partial)
+        clip.startTimeMs = Math.max(0, Math.round(clip.startTimeMs))
+        clip.loopCount = Math.max(1, Math.round(clip.loopCount || 1))
+        clip.playbackSpeed = Math.max(1, clip.playbackSpeed)
+        clip.transitionMs = Math.max(0, Math.round(clip.transitionMs))
+        clip.endDelayMs = Math.max(0, Math.round(clip.endDelayMs))
+        combo.clips.sort((a, b) => a.startTimeMs - b.startTimeMs)
+        s.dirty = true
+      }),
+
+    deleteAnimationComboClip: (comboId, clipId) =>
+      set((s) => {
+        const combo = s.project.animationCombos.find((item) => item.id === comboId)
+        if (!combo) return
+        combo.clips = combo.clips.filter((clip) => clip.id !== clipId)
+        s.dirty = true
+      }),
+
+    reorderAnimationComboClip: (comboId, clipId, newIndex) =>
+      set((s) => {
+        const combo = s.project.animationCombos.find((item) => item.id === comboId)
+        if (!combo) return
+        const idx = combo.clips.findIndex((clip) => clip.id === clipId)
+        if (idx === -1) return
+        const clamped = Math.max(0, Math.min(combo.clips.length - 1, newIndex))
+        const [clip] = combo.clips.splice(idx, 1)
+        combo.clips.splice(clamped, 0, clip)
+        combo.clips.forEach((item, index) => (item.startTimeMs = index === 0 ? 0 : Math.max(item.startTimeMs, combo.clips[index - 1].startTimeMs + 1)))
+        combo.clips.sort((a, b) => a.startTimeMs - b.startTimeMs)
+        s.dirty = true
+      }),
+
+    selectAnimationCombo: (id) =>
+      set((s) => {
+        s.selectedComboId = id
+        s.selectedComboClipId = null
+        s.comboPreviewPlaying = false
+        s.comboPreviewTimeMs = 0
+        // Prevents a stale keyframe/sticker/marker selection (or clipboard) from a previous
+        // animation-editing session from leaking into the Timeline's combo-editing mode, and
+        // vice versa when switching back — see Timeline.tsx's own comboMode-keyed effect for
+        // the belt-and-suspenders case where leftTab flips without a fresh call here.
+        s.timelineSelection = []
+        s.timelineClipboard = []
+        s.selectedKeyframeId = null
+        s.selectedStickerId = null
+      }),
+    selectAnimationComboClip: (id) => set((s) => void (s.selectedComboClipId = id)),
+    setComboPreviewPlaying: (playing) => set((s) => void (s.comboPreviewPlaying = playing)),
+    setComboPreviewTimeMs: (ms) => set((s) => void (s.comboPreviewTimeMs = Math.max(0, ms))),
+    setComboPreviewLoop: (loop) => set((s) => void (s.comboPreviewLoop = loop)),
+
     selectKeyframe: (id) => set((s) => void (s.selectedKeyframeId = id)),
 
     addKeyframe: (afterKeyframeId) =>
@@ -1512,6 +1742,34 @@ export const useStore = create<StoreState>()(
         s.dirty = true
       }),
 
+    resizeComboClip: (comboId, clipId, edge, newMs) =>
+      set((s) => {
+        const combo = s.project.animationCombos.find((c) => c.id === comboId)
+        const clip = combo?.clips.find((c) => c.id === clipId)
+        if (!combo || !clip) return
+        const anim = s.project.animations.find((a) => a.id === clip.animationId)
+        if (!anim) return
+        const animDurationMs = animationDuration(anim)
+        const clamped = Math.round(newMs)
+        if (edge === 'end') {
+          // Holds the clip's start fixed, solves a new loop count for the requested end.
+          const newEnd = Math.max(clip.startTimeMs + 1, clamped)
+          clip.loopCount = loopCountForDuration(animDurationMs, clip.playbackSpeed, clip.transitionMs, clip.endDelayMs, newEnd - clip.startTimeMs)
+        } else {
+          // Holds the clip's *current* end fixed (its own current duration, before this drag),
+          // solves both a new startTimeMs and loop count for the requested start.
+          const timeline = computeComboTimeline(combo, s.project.animations)
+          const entry = timeline.clips.find((e) => e.clip.id === clipId)
+          if (!entry) return
+          const fixedEnd = entry.end
+          const newStart = Math.min(fixedEnd - 1, Math.max(0, clamped))
+          clip.loopCount = loopCountForDuration(animDurationMs, clip.playbackSpeed, clip.transitionMs, clip.endDelayMs, fixedEnd - newStart)
+          clip.startTimeMs = Math.round(newStart)
+        }
+        combo.clips.sort((a, b) => a.startTimeMs - b.startTimeMs)
+        s.dirty = true
+      }),
+
     splitClipAt: (item, atMs) =>
       set((s) => {
         const a = activeAnimationOf(s.project, s.activeAnimationId)
@@ -1571,8 +1829,32 @@ export const useStore = create<StoreState>()(
 
     moveSelectionByDelta: (deltaMs) =>
       set((s) => {
+        if (s.timelineSelection.length === 0) return
+
+        if (isComboTimelineActive(s)) {
+          const combo = activeComboOf(s.project, s.selectedComboId)
+          if (!combo) return
+          let comboMinTime = Infinity
+          for (const item of s.timelineSelection) {
+            if (item.kind !== 'comboClip') continue
+            const clip = combo.clips.find((c) => c.id === item.id)
+            if (clip) comboMinTime = Math.min(comboMinTime, clip.startTimeMs)
+          }
+          if (comboMinTime === Infinity) return
+          const appliedComboDelta = Math.max(deltaMs, -comboMinTime)
+          if (appliedComboDelta === 0) return
+          for (const item of s.timelineSelection) {
+            if (item.kind !== 'comboClip') continue
+            const clip = combo.clips.find((c) => c.id === item.id)
+            if (clip) clip.startTimeMs = Math.max(0, Math.round(clip.startTimeMs + appliedComboDelta))
+          }
+          combo.clips.sort((x, y) => x.startTimeMs - y.startTimeMs)
+          s.dirty = true
+          return
+        }
+
         const a = activeAnimationOf(s.project, s.activeAnimationId)
-        if (!a || s.timelineSelection.length === 0) return
+        if (!a) return
 
         let minTime = Infinity
         for (const item of s.timelineSelection) {
@@ -1836,6 +2118,12 @@ export const useStore = create<StoreState>()(
 
     copySelection: () =>
       set((s) => {
+        if (isComboTimelineActive(s)) {
+          const combo = activeComboOf(s.project, s.selectedComboId)
+          if (!combo) return
+          s.timelineClipboard = collectComboClipboardEntries(combo, s.timelineSelection)
+          return
+        }
         const a = activeAnimationOf(s.project, s.activeAnimationId)
         if (!a) return
         s.timelineClipboard = collectClipboardEntries(s.project, a, s.timelineSelection)
@@ -1843,8 +2131,19 @@ export const useStore = create<StoreState>()(
 
     pasteSelectionAt: (atMs) =>
       set((s) => {
+        if (s.timelineClipboard.length === 0) return
+        if (isComboTimelineActive(s)) {
+          const combo = activeComboOf(s.project, s.selectedComboId)
+          if (!combo) return
+          checkpointDraft(s)
+          const newSelection = insertComboClipEntriesAt(combo, s.timelineClipboard, atMs)
+          if (newSelection.length === 0) return
+          s.timelineSelection = newSelection
+          s.dirty = true
+          return
+        }
         const a = activeAnimationOf(s.project, s.activeAnimationId)
-        if (!a || s.timelineClipboard.length === 0) return
+        if (!a) return
         checkpointDraft(s)
         const newSelection = insertTimelineEntriesAt(a, s.timelineClipboard, atMs)
         s.timelineSelection = newSelection
@@ -1854,12 +2153,26 @@ export const useStore = create<StoreState>()(
 
     duplicateSelection: () =>
       set((s) => {
+        if (s.timelineSelection.length === 0) return
+        if (isComboTimelineActive(s)) {
+          const combo = activeComboOf(s.project, s.selectedComboId)
+          if (!combo) return
+          checkpointDraft(s)
+          const entries = collectComboClipboardEntries(combo, s.timelineSelection)
+          if (entries.length === 0) return
+          const groupEnd = Math.max(...entries.map((e) => (e.kind === 'comboClip' ? e.data.startTimeMs : 0)))
+          const newSelection = insertComboClipEntriesAt(combo, entries, groupEnd + MIN_SEGMENT_MS)
+          if (newSelection.length === 0) return
+          s.timelineSelection = newSelection
+          s.dirty = true
+          return
+        }
         const a = activeAnimationOf(s.project, s.activeAnimationId)
-        if (!a || s.timelineSelection.length === 0) return
+        if (!a) return
         checkpointDraft(s)
         const entries = collectClipboardEntries(s.project, a, s.timelineSelection)
         if (entries.length === 0) return
-        const endTimeOf = (e: TimelineClipboardEntry) => (e.kind === 'sticker' ? (e.data.anim.endTimeMs ?? e.data.anim.startTimeMs) : e.data.timeMs)
+        const endTimeOf = (e: TimelineClipboardEntry) => (e.kind === 'sticker' ? (e.data.anim.endTimeMs ?? e.data.anim.startTimeMs) : e.kind === 'comboClip' ? e.data.startTimeMs : e.data.timeMs)
         const groupEnd = Math.max(...entries.map(endTimeOf))
         const newSelection = insertTimelineEntriesAt(a, entries, groupEnd + MIN_SEGMENT_MS)
         s.timelineSelection = newSelection
@@ -1869,8 +2182,19 @@ export const useStore = create<StoreState>()(
 
     deleteSelection: () =>
       set((s) => {
+        if (s.timelineSelection.length === 0) return
+        if (isComboTimelineActive(s)) {
+          const combo = activeComboOf(s.project, s.selectedComboId)
+          if (!combo) return
+          checkpointDraft(s)
+          const idsToDelete = new Set(s.timelineSelection.filter((i) => i.kind === 'comboClip').map((i) => i.id))
+          combo.clips = combo.clips.filter((c) => !idsToDelete.has(c.id))
+          s.timelineSelection = []
+          s.dirty = true
+          return
+        }
         const a = activeAnimationOf(s.project, s.activeAnimationId)
-        if (!a || s.timelineSelection.length === 0) return
+        if (!a) return
         checkpointDraft(s)
         for (const item of s.timelineSelection) {
           if (item.kind === 'keyframe') {
@@ -1884,7 +2208,7 @@ export const useStore = create<StoreState>()(
           } else if (item.kind === 'sticker') {
             const owner = findStickerOwner(s.project, item.id)
             if (owner) owner.list.splice(owner.index, 1)
-          } else {
+          } else if (item.kind === 'marker') {
             a.markers = a.markers.filter((m) => m.id !== item.id)
           }
         }

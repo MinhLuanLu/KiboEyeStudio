@@ -97,6 +97,8 @@ export function trackAccentClasses(kind: TrackKind): { dot: string; border: stri
       return { dot: 'bg-emerald-400', border: 'border-emerald-400', text: 'text-emerald-400' }
     case 'marker':
       return { dot: 'bg-studio-danger', border: 'border-studio-danger', text: 'text-studio-danger' }
+    case 'comboClip':
+      return { dot: 'bg-studio-accent2', border: 'border-studio-accent2', text: 'text-studio-accent2' }
   }
 }
 

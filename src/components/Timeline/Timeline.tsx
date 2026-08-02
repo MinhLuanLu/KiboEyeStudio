@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { useStore, getActiveAnimation } from '@/state/store'
+import { useStore, getActiveAnimation, isComboTimelineActive } from '@/state/store'
 import type { KeyframeTrackKind } from '@/state/store'
 import type { Animation, SelectionItem, TrackKind } from '@/types'
+import { computeComboTimeline, sampleCombo, type ComboTimeline } from '@/engine/comboPlayback'
 import { TimelineToolbar } from './TimelineToolbar'
 import { TimelineRuler } from './TimelineRuler'
-import { TrackRow } from './TrackRow'
+import { TrackRow, type ComboClipLayout } from './TrackRow'
 import { TimelineInspector } from './TimelineInspector'
 import {
   MIN_PX_PER_MS,
@@ -63,6 +64,20 @@ function collectAllTimes(anim: Animation, excludeKeys: Set<string>): number[] {
   return times
 }
 
+/** Every Combination clip's own start/end on the combo's timeline right now — the comboClip
+ * counterpart of collectAllTimes above, used to build snap candidates while dragging a clip in
+ * combo-editing mode. `excludeClipIds` are plain clip ids (not full itemKey()s — a combo's
+ * clips are unique by id within their own combo, so there's no need for the kind/trackId
+ * prefix collectAllTimes' keys use for keyframes-across-tracks). */
+function collectComboClipTimes(timeline: ComboTimeline, excludeClipIds: Set<string>): number[] {
+  const times: number[] = []
+  for (const entry of timeline.clips) {
+    if (excludeClipIds.has(entry.clip.id)) continue
+    times.push(entry.start, entry.end)
+  }
+  return times
+}
+
 function selectRangeOnTrack(anim: Animation, from: SelectionItem, to: SelectionItem): SelectionItem[] {
   if (from.kind !== to.kind || from.trackId !== to.trackId) return [to]
   if (to.kind === 'keyframe') {
@@ -97,6 +112,7 @@ interface DragState {
   anchorTimeMs: number
   singleKeyframe?: { trackKind: KeyframeTrackKind; keyframeId: string }
   stickerId?: string
+  comboClipId?: string
   edge?: 'start' | 'end'
   snapCandidates: number[]
   marqueeOriginX: number
@@ -117,6 +133,13 @@ export function Timeline() {
   const fps = useStore((s) => s.project.display.fps)
   const playbackTimeMs = useStore((s) => s.playbackTimeMs)
   const mode = useStore((s) => s.mode)
+  const playbackState = useStore((s) => s.playbackState)
+  const leftTab = useStore((s) => s.leftTab)
+  const selectedComboId = useStore((s) => s.selectedComboId)
+  const combos = useStore((s) => s.project.animationCombos)
+  const animations = useStore((s) => s.project.animations)
+  const comboPreviewTimeMs = useStore((s) => s.comboPreviewTimeMs)
+  const comboPreviewLoop = useStore((s) => s.comboPreviewLoop)
 
   const checkpoint = useStore((s) => s.checkpoint)
   const seek = useStore((s) => s.seek)
@@ -130,6 +153,7 @@ export function Timeline() {
   const setKeyframeTime = useStore((s) => s.setKeyframeTime)
   const moveSelectionByDelta = useStore((s) => s.moveSelectionByDelta)
   const resizeStickerClip = useStore((s) => s.resizeStickerClip)
+  const resizeComboClip = useStore((s) => s.resizeComboClip)
   const splitClipAt = useStore((s) => s.splitClipAt)
   const copySelection = useStore((s) => s.copySelection)
   const pasteSelectionAt = useStore((s) => s.pasteSelectionAt)
@@ -145,6 +169,10 @@ export function Timeline() {
   const addMarker = useStore((s) => s.addMarker)
   const addKeyframeAt = useStore((s) => s.addKeyframeAt)
   const addStickerToTrack = useStore((s) => s.addStickerToTrack)
+  const setComboPreviewTimeMs = useStore((s) => s.setComboPreviewTimeMs)
+  const setComboPreviewLoop = useStore((s) => s.setComboPreviewLoop)
+  const selectAnimationComboClip = useStore((s) => s.selectAnimationComboClip)
+  const addAnimationComboClip = useStore((s) => s.addAnimationComboClip)
 
   const contentRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<DragState | null>(null)
@@ -159,29 +187,79 @@ export function Timeline() {
   // mid-drag if the pointer briefly leaves the content area under pointer capture.
   const [hoverMs, setHoverMs] = useState<number | null>(null)
 
-  // Zoom-to-fit once whenever the active animation changes (a fresh, sensible starting zoom
-  // per animation, same spirit as the old Timeline always filling its container at 100%).
+  // Single source of truth for "is this Timeline currently editing a Combination instead of
+  // the active Animation" — the exact same predicate PreviewCanvas uses to decide what the
+  // shared center canvas renders, so the bottom Timeline and the canvas can never disagree
+  // about which mode is active (see isComboTimelineActive's own comment in store.ts).
+  const comboMode = isComboTimelineActive({ leftTab, selectedComboId, mode, playbackState })
+  const combo = comboMode ? (combos.find((c) => c.id === selectedComboId) ?? null) : null
+  const comboTimeline = combo ? computeComboTimeline(combo, animations) : null
+  // The active clip — whichever one sampleCombo() says is currently playing — computed via the
+  // exact same function PreviewCanvas's rAF loop samples from, so the Timeline's highlighted
+  // clip can never drift out of sync with what's actually rendering on screen.
+  const comboActiveClipId = comboTimeline ? (sampleCombo(comboTimeline, comboPreviewTimeMs)?.clipId ?? null) : null
+
+  // Zoom-to-fit once whenever the active animation OR the active combo changes (a fresh,
+  // sensible starting zoom per thing-being-edited, same spirit as the old Timeline always
+  // filling its container at 100%).
   const activeAnimId = anim?.id
   useEffect(() => {
-    if (!anim || !contentRef.current) return
+    if (!contentRef.current) return
+    if (comboMode && !comboTimeline) return
+    if (!comboMode && !anim) return
     const width = contentRef.current.parentElement?.getBoundingClientRect().width ?? 600
-    setPxPerMs(computeFitPxPerMs(anim.durationMs, width - TRACK_HEADER_WIDTH_PX))
+    const fitDurationMs = comboMode && comboTimeline ? comboTimeline.total : (anim?.durationMs ?? 1)
+    setPxPerMs(computeFitPxPerMs(fitDurationMs, width - TRACK_HEADER_WIDTH_PX))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeAnimId])
+  }, [activeAnimId, comboMode, selectedComboId])
+
+  // Belt-and-suspenders: selectAnimationCombo already clears timelineSelection/timelineClipboard
+  // when a combo is explicitly selected, but leftTab can also flip (e.g. clicking back to the
+  // Animations tab) without a fresh selectAnimationCombo call — clearing here on every comboMode
+  // transition guarantees a stale keyframe-kind or comboClip-kind selection never survives a
+  // mode switch either direction.
+  useEffect(() => {
+    clearTimelineSelection()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [comboMode])
 
   const isSelected = (kind: SelectionItem['kind'], trackId: string, id: string) => selection.some((i) => i.kind === kind && i.trackId === trackId && i.id === id)
 
+  // `anim` is required unconditionally, even in combo mode — every project always has at least
+  // one animation in practice (mirrors the assumption AnimationCombinationPanel's own animation
+  // picker already makes), so keeping this guard simple/non-null avoids threading optional
+  // chaining through every animation-mode-only code path below (all of which are unreachable,
+  // not merely unused, while comboMode is true).
   if (!anim) {
     return <div className="p-4 text-sm text-studio-muted">No animation selected.</div>
   }
   const activeAnim: Animation = anim
 
   const sortedTracks = [...activeAnim.tracks].sort((a, b) => a.order - b.order)
-  const durationMs = Math.max(1, activeAnim.durationMs)
+  const durationMs = comboMode && comboTimeline ? Math.max(1, comboTimeline.total) : Math.max(1, activeAnim.durationMs)
+  // The single playhead position the ruler/tracks/toolbar all read — Animate-mode's own
+  // playbackTimeMs while editing an animation, or the combo's own separate preview clock while
+  // editing a Combination (see comboPreviewTimeMs's own comment in store.ts for why it's kept
+  // deliberately separate from playbackTimeMs).
+  const playheadMs = comboMode ? comboPreviewTimeMs : playbackTimeMs
 
   function zoomToFit() {
     const width = contentRef.current?.parentElement?.getBoundingClientRect().width ?? 600
     setPxPerMs(computeFitPxPerMs(durationMs, width - TRACK_HEADER_WIDTH_PX))
+  }
+
+  /** Seeks the currently-relevant playhead — Animate-mode's shared seek() (which also stops
+   * playback and switches `mode`) while editing an animation, or just comboPreviewTimeMs while
+   * editing a Combination (deliberately leaves `mode`/`playbackState` untouched, matching how
+   * combo preview has always been independent of Animate-mode playback). */
+  function seekPlayhead(ms: number) {
+    if (comboMode) {
+      setComboPreviewTimeMs(ms)
+    } else {
+      if (mode !== 'animate') setMode('animate')
+      pause()
+      seek(ms)
+    }
   }
 
   function maybeSnap(rawMs: number, e: { altKey: boolean }): number {
@@ -219,7 +297,11 @@ export function Timeline() {
 
   function updateSelectionOnClick(item: SelectionItem, e: React.PointerEvent) {
     const additive = e.ctrlKey || e.metaKey
-    const range = e.shiftKey && lastPrimaryRef.current
+    // Shift-click range-select isn't implemented for combo clips this pass (only single-click,
+    // Ctrl/Cmd-click-additive, and marquee) — selectRangeOnTrack's track-position math is
+    // keyframe/sticker/marker-specific (keyed off Animation track order), so combo mode simply
+    // falls through to the additive/single branches below instead.
+    const range = !comboMode && e.shiftKey && lastPrimaryRef.current
     if (range && lastPrimaryRef.current) {
       setTimelineSelection(selectRangeOnTrack(activeAnim, lastPrimaryRef.current, item))
     } else if (additive) {
@@ -241,6 +323,15 @@ export function Timeline() {
     ;(e.target as Element).setPointerCapture(e.pointerId)
     const excludeKeys = new Set(resultingSelection.map(itemKey))
     const single = resultingSelection.length === 1 && resultingSelection[0].kind === 'keyframe' ? resultingSelection[0] : null
+    const snapCandidates =
+      comboMode && comboTimeline
+        ? buildSnapCandidates(
+            collectComboClipTimes(comboTimeline, new Set(resultingSelection.filter((i) => i.kind === 'comboClip').map((i) => i.id))),
+            playheadMs,
+            fps,
+            durationMs
+          )
+        : buildSnapCandidates(collectAllTimes(activeAnim, excludeKeys), playbackTimeMs, fps, durationMs)
     dragRef.current = {
       kind: 'move',
       pointerId: e.pointerId,
@@ -248,7 +339,7 @@ export function Timeline() {
       startClientY: e.clientY,
       anchorTimeMs: currentTimeMs,
       singleKeyframe: single ? { trackKind: single.trackId as KeyframeTrackKind, keyframeId: single.id } : undefined,
-      snapCandidates: buildSnapCandidates(collectAllTimes(activeAnim, excludeKeys), playbackTimeMs, fps, durationMs),
+      snapCandidates,
       marqueeOriginX: 0,
       marqueeOriginY: 0
     }
@@ -269,6 +360,30 @@ export function Timeline() {
       stickerId,
       edge,
       snapCandidates: buildSnapCandidates(collectAllTimes(activeAnim, new Set([itemKey(item)])), playbackTimeMs, fps, durationMs),
+      marqueeOriginX: 0,
+      marqueeOriginY: 0
+    }
+  }
+
+  /** The combo-editing sibling of beginResizeDrag — same shape, sourced from the combo's own
+   * clips instead of an Animation's stickers, and calling resizeComboClip (see its own comment
+   * in store.ts for the loop-count-based "trim" semantics) instead of resizeStickerClip. */
+  function beginComboClipResizeDrag(clipId: string, edge: 'start' | 'end', currentTimeMs: number, e: React.PointerEvent) {
+    if (!combo) return
+    e.stopPropagation()
+    const item: SelectionItem = { kind: 'comboClip', trackId: combo.id, id: clipId }
+    setTimelineSelection([item])
+    checkpoint()
+    ;(e.target as Element).setPointerCapture(e.pointerId)
+    dragRef.current = {
+      kind: 'resize',
+      pointerId: e.pointerId,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      anchorTimeMs: currentTimeMs,
+      comboClipId: clipId,
+      edge,
+      snapCandidates: comboTimeline ? buildSnapCandidates(collectComboClipTimes(comboTimeline, new Set([clipId])), playheadMs, fps, durationMs) : [],
       marqueeOriginX: 0,
       marqueeOriginY: 0
     }
@@ -297,6 +412,20 @@ export function Timeline() {
   function applyMarqueeSelection(x0: number, y0: number, x1: number, y1: number) {
     const msLo = pxToMs(Math.min(x0, x1) - TRACK_HEADER_WIDTH_PX, pxPerMs)
     const msHi = pxToMs(Math.max(x0, x1) - TRACK_HEADER_WIDTH_PX, pxPerMs)
+    if (comboMode) {
+      // Only ever one synthetic row in combo mode, so no row-index bounds check is needed —
+      // any clip whose [start,end] overlaps the marquee's horizontal span is a match.
+      if (!combo || !comboTimeline) {
+        setTimelineSelection([])
+        return
+      }
+      const comboItems: SelectionItem[] = []
+      for (const entry of comboTimeline.clips) {
+        if (entry.end >= msLo && entry.start <= msHi) comboItems.push({ kind: 'comboClip', trackId: combo.id, id: entry.clip.id })
+      }
+      setTimelineSelection(comboItems)
+      return
+    }
     const rowLo = Math.floor((Math.min(y0, y1) - RULER_HEIGHT_PX) / TRACK_ROW_HEIGHT_PX)
     const rowHi = Math.floor((Math.max(y0, y1) - RULER_HEIGHT_PX) / TRACK_ROW_HEIGHT_PX)
     const items: SelectionItem[] = []
@@ -338,6 +467,8 @@ export function Timeline() {
     setHoverMs(Math.max(0, Math.min(durationMs, newMs)))
     if (drag.kind === 'resize' && drag.stickerId && drag.edge) {
       resizeStickerClip(drag.stickerId, drag.edge, newMs)
+    } else if (drag.kind === 'resize' && drag.comboClipId && drag.edge && combo) {
+      resizeComboClip(combo.id, drag.comboClipId, drag.edge, newMs)
     } else if (drag.kind === 'move') {
       if (drag.singleKeyframe) {
         setKeyframeTime(drag.singleKeyframe.trackKind, drag.singleKeyframe.keyframeId, newMs)
@@ -383,7 +514,7 @@ export function Timeline() {
   }
 
   function handlePaste() {
-    pasteSelectionAt(playbackTimeMs)
+    pasteSelectionAt(playheadMs)
   }
 
   const existingTrackKinds = new Set<TrackKind>(activeAnim.tracks.map((t) => t.kind))
@@ -396,12 +527,39 @@ export function Timeline() {
     addStickerToTrack(trackId, assetId, Math.max(0, ms))
   }
 
+  /** The Timeline's own "+ Clip" control for combo mode (mirrors "+ Keyframe" for animation
+   * mode) — appends a new clip referencing `animationId` right after the combo's current last
+   * clip, at that animation's own default duration (see addAnimationComboClip's own comment),
+   * then selects it so it's immediately visible/editable in the Inspector below. */
+  function handleAddComboClip(animationId: string) {
+    if (!combo || !animationId) return
+    checkpoint()
+    const newId = addAnimationComboClip(combo.id, animationId)
+    setTimelineSelection([{ kind: 'comboClip', trackId: combo.id, id: newId }])
+    selectAnimationComboClip(newId)
+  }
+
+  const comboClipLayouts: ComboClipLayout[] = comboTimeline
+    ? comboTimeline.clips.map((entry) => ({
+        id: entry.clip.id,
+        startMs: entry.start,
+        durationMs: entry.dur,
+        label: `${entry.anim?.name ?? 'Missing animation'} — ${Math.round(entry.start)}ms · ${Math.round(entry.dur)}ms · x${entry.clip.loopCount} · ${entry.clip.playbackSpeed}%`,
+        active: entry.clip.id === comboActiveClipId
+      }))
+    : []
+  // Synthetic, non-persisted Track — a Combination has no Track[]/lane concept of its own (see
+  // TrackKind's own comment), so this is built fresh each render purely for TrackRow/ClipView's
+  // shared rendering path.
+  const comboTrack = combo ? { id: combo.id, kind: 'comboClip' as const, name: combo.name, order: 0, visible: true, locked: false } : null
+
   return (
     <div className="flex flex-col gap-1.5 p-2 h-full min-h-0">
       <TimelineToolbar
-        animName={anim.name}
+        variant={comboMode ? 'combo' : 'animation'}
+        animName={comboMode ? (combo?.name ?? 'Combination') : anim.name}
         durationMs={durationMs}
-        playbackTimeMs={playbackTimeMs}
+        playbackTimeMs={playheadMs}
         fps={fps}
         pxPerMs={pxPerMs}
         onDurationChange={(ms) => setAnimationDuration(ms)}
@@ -422,6 +580,10 @@ export function Timeline() {
         onDelete={deleteSelection}
         onJumpPrevKeyframe={() => jumpToKeyframe('prev')}
         onJumpNextKeyframe={() => jumpToKeyframe('next')}
+        comboAnimations={comboMode ? animations : undefined}
+        onAddComboClip={comboMode ? handleAddComboClip : undefined}
+        comboLoop={comboMode ? comboPreviewLoop : undefined}
+        onToggleComboLoop={comboMode ? () => setComboPreviewLoop(!comboPreviewLoop) : undefined}
       />
 
       <div className="flex-1 min-h-0 overflow-auto studio-panel">
@@ -436,18 +598,30 @@ export function Timeline() {
         >
           <div className="sticky top-0 z-20 flex bg-studio-panel">
             <div className="sticky left-0 z-30 shrink-0 border-r border-b border-studio-border bg-studio-panel" style={{ width: TRACK_HEADER_WIDTH_PX, height: RULER_HEIGHT_PX }} />
-            <TimelineRuler
-              durationMs={durationMs}
-              pxPerMs={pxPerMs}
-              onSeek={() => {
-                if (mode !== 'animate') setMode('animate')
-                pause()
-                seek(hoverMs ?? 0)
-              }}
-            />
+            <TimelineRuler durationMs={durationMs} pxPerMs={pxPerMs} onSeek={() => seekPlayhead(hoverMs ?? 0)} />
           </div>
 
-          {sortedTracks.map((track) => {
+          {comboMode && comboTrack && (
+            <div key={comboTrack.id} onPointerDown={beginMarquee}>
+              <TrackRow
+                track={comboTrack}
+                pxPerMs={pxPerMs}
+                durationMs={durationMs}
+                fps={fps}
+                comboClips={comboClipLayouts}
+                isSelected={(id) => isSelected('comboClip', comboTrack.id, id)}
+                onComboClipBodyPointerDown={(id, e) => beginMoveDrag({ kind: 'comboClip', trackId: comboTrack.id, id }, comboClipLayouts.find((c) => c.id === id)?.startMs ?? 0, e)}
+                onComboClipHandlePointerDown={(id, edge, e) => {
+                  const c = comboClipLayouts.find((cc) => cc.id === id)
+                  beginComboClipResizeDrag(id, edge, edge === 'start' ? (c?.startMs ?? 0) : (c ? c.startMs + c.durationMs : 0), e)
+                }}
+                onToggleVisible={() => {}}
+                onToggleLocked={() => {}}
+              />
+            </div>
+          )}
+
+          {!comboMode && sortedTracks.map((track) => {
             if (track.kind === 'sticker') {
               return (
                 <div
@@ -545,10 +719,13 @@ export function Timeline() {
             )
           })}
 
-          {/* Playhead — spans the full ruler+tracks height, drawn last so it's always on top. */}
+          {/* Playhead — spans the full ruler+tracks height, drawn last so it's always on top.
+              Position tracks playheadMs (playbackTimeMs in animation mode, comboPreviewTimeMs
+              in combo mode), so it's always the same clock the shared center canvas is
+              rendering from. */}
           <div
             className="absolute top-0 bottom-0 w-0.5 bg-studio-warn pointer-events-none z-40"
-            style={{ left: TRACK_HEADER_WIDTH_PX + Math.min(playbackTimeMs, durationMs) * pxPerMs }}
+            style={{ left: TRACK_HEADER_WIDTH_PX + Math.min(playheadMs, durationMs) * pxPerMs }}
           />
 
           {/* Yellow CapCut-style hover/scrub line — a mouse-position and drag-placement guide,
