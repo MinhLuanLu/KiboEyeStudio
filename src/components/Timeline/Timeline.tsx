@@ -197,7 +197,7 @@ export function Timeline() {
   // The active clip — whichever one sampleCombo() says is currently playing — computed via the
   // exact same function PreviewCanvas's rAF loop samples from, so the Timeline's highlighted
   // clip can never drift out of sync with what's actually rendering on screen.
-  const comboActiveClipId = comboTimeline ? (sampleCombo(comboTimeline, comboPreviewTimeMs)?.clipId ?? null) : null
+  const comboActiveClipId = comboTimeline ? (sampleCombo(comboTimeline, comboPreviewTimeMs, combo?.loop ?? false)?.clipId ?? null) : null
 
   // Zoom-to-fit once whenever the active animation OR the active combo changes (a fresh,
   // sensible starting zoom per thing-being-edited, same spirit as the old Timeline always

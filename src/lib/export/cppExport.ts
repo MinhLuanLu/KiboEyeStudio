@@ -2710,6 +2710,19 @@ inline bool ComboFinished() {
   return eyesPlayer.comboFinished;
 }
 
+// Crossfades outLeft/outRight toward "clip"'s own first frame, proportional to "t" (0..1) —
+// the shared tail end of eyesPlayCombo()'s per-clip transition blend, factored out since it's
+// needed both for the normal "next clip in sequence" case and the loop-wraparound-to-first-clip
+// case below.
+inline void eyesBlendTowardClipStart(const AnimationComboClip& clip, float t, LiveEye& outLeft, LiveEye& outRight) {
+  if (clip.animation == nullptr || clip.animation->count == 0) return;
+  const EyeFrame* rightFrames = clip.animation->framesRight ? clip.animation->framesRight : clip.animation->frames;
+  LiveEye targetLeft = eyesLerpFrame(clip.animation->frames[0], clip.animation->frames[0], 0);
+  LiveEye targetRight = eyesLerpFrame(rightFrames[0], rightFrames[0], 0);
+  outLeft = eyesLerpLive(outLeft, targetLeft, t);
+  outRight = eyesLerpLive(outRight, targetRight, t);
+}
+
 inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, LiveEye& outLeft, LiveEye& outRight) {
   if (combo.count == 0) return false;
   unsigned long totalDuration = eyesComboDurationMs(combo);
@@ -2740,6 +2753,26 @@ inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, 
       unsigned long localStartMillis = millis() - animElapsed;
       uint16_t frameIndex = 0;
       bool stillPlaying = eyesPlayAnimationPair(active, localStartMillis, frameIndex, outLeft, outRight);
+
+      // Crossfade into the next clip's own first frame during this clip's trailing
+      // transitionMs window (after its play duration + endDelayMs have elapsed) — previously
+      // transitionMs was silent extra hold time with an instant cut at the clip boundary, which
+      // is exactly what read as "sudden eye-position jumps" / "jerky switching" between clips.
+      // Mirrors sampleCombo()'s identical crossfade in comboPlayback.ts so studio and firmware
+      // agree frame-for-frame.
+      if (clip.transitionMs > 0) {
+        unsigned long holdEnd = playDuration + clip.endDelayMs;
+        if (clipElapsed >= holdEnd) {
+          bool hasNext = !lastClip || combo.loop;
+          if (hasNext) {
+            uint8_t nextIndex = lastClip ? 0 : (uint8_t)(i + 1);
+            float t = (float)(clipElapsed - holdEnd) / (float)clip.transitionMs;
+            if (t > 1.0f) t = 1.0f;
+            eyesBlendTowardClipStart(combo.clips[nextIndex], t, outLeft, outRight);
+          }
+        }
+      }
+
       if (!combo.loop && lastClip && playMs >= totalDuration) stillPlaying = false;
       return stillPlaying;
     }

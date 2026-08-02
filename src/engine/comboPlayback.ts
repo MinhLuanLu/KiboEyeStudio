@@ -1,5 +1,5 @@
 import type { Animation, AnimationCombo, EyeParams } from '@/types'
-import { animationDuration, sampleAnimationEye, wrapTime } from './interpolate'
+import { animationDuration, lerpParams, sampleAnimationEye, wrapTime } from './interpolate'
 
 /** Same formula as the Combinations panel's own clip-block sizing — how long one clip actually
  * occupies on the combo's timeline, including its own loop count, playback speed, and the
@@ -71,10 +71,21 @@ export interface ComboSample {
  * finds whichever clip window `timeMs` falls in (or the last one, once playback has run past
  * the end), then samples that clip's animation at its own local, loop/speed-scaled time. Returns
  * null when there's nothing to render (no clips, or the active clip's animation is missing/
- * empty), matching sampleAnimationEye's own "nothing to sample" contract. */
-export function sampleCombo(timeline: ComboTimeline, timeMs: number): ComboSample | null {
+ * empty), matching sampleAnimationEye's own "nothing to sample" contract.
+ *
+ * During a clip's own trailing `transitionMs` window (after its play duration + endDelayMs have
+ * elapsed, right before the next clip's window begins), this crossfades from the current clip's
+ * held final pose toward the *next* clip's own first frame, proportional to progress through
+ * that window — previously `transitionMs` was silent extra hold time with an instant cut at the
+ * boundary (every property, including eyePosX/Y, jumped discontinuously). `comboLoop` controls
+ * whether the last clip transitions into the first clip's opening frame (wrap-around) or just
+ * holds with no crossfade target, matching whether the combo itself loops. Mirrors
+ * eyesPlayCombo()'s identical crossfade in cppExport.ts so studio and firmware agree. */
+export function sampleCombo(timeline: ComboTimeline, timeMs: number, comboLoop = false): ComboSample | null {
   if (timeline.clips.length === 0) return null
-  const current = timeline.clips.find((entry) => timeMs >= entry.start && timeMs < entry.end) ?? timeline.clips[timeline.clips.length - 1]
+  const currentIdx = timeline.clips.findIndex((entry) => timeMs >= entry.start && timeMs < entry.end)
+  const idx = currentIdx === -1 ? timeline.clips.length - 1 : currentIdx
+  const current = timeline.clips[idx]
   if (!current.anim || current.anim.keyframes.length === 0) return null
 
   const localElapsed = Math.max(0, timeMs - current.start)
@@ -83,9 +94,27 @@ export function sampleCombo(timeline: ComboTimeline, timeMs: number): ComboSampl
   const looped = current.clip.loopCount > 1 || current.anim.loop
   const animationTimeMs = looped ? wrapTime(scaledElapsed, current.anim) : Math.min(duration, scaledElapsed)
 
+  let params = sampleAnimationEye(current.anim, animationTimeMs, 'left')
+  let rightParams = sampleAnimationEye(current.anim, animationTimeMs, 'right')
+
+  const transitionMs = current.clip.transitionMs
+  if (transitionMs > 0) {
+    const playDurationMs = current.dur - transitionMs - current.clip.endDelayMs
+    const transitionStart = current.start + Math.max(0, playDurationMs) + current.clip.endDelayMs
+    if (timeMs >= transitionStart) {
+      const nextIdx = idx + 1 < timeline.clips.length ? idx + 1 : comboLoop ? 0 : -1
+      const next = nextIdx === -1 ? null : timeline.clips[nextIdx]
+      if (next && next.anim && next.anim.keyframes.length > 0) {
+        const t = Math.min(1, (timeMs - transitionStart) / transitionMs)
+        params = lerpParams(params, sampleAnimationEye(next.anim, 0, 'left'), t)
+        rightParams = lerpParams(rightParams, sampleAnimationEye(next.anim, 0, 'right'), t)
+      }
+    }
+  }
+
   return {
-    params: sampleAnimationEye(current.anim, animationTimeMs, 'left'),
-    rightParams: sampleAnimationEye(current.anim, animationTimeMs, 'right'),
+    params,
+    rightParams,
     anim: current.anim,
     clipId: current.clip.id,
     animationTimeMs

@@ -142,7 +142,7 @@ export function PreviewCanvas() {
             }
             state.setComboPreviewTimeMs(t)
           }
-          const sample = sampleCombo(timeline, t)
+          const sample = sampleCombo(timeline, t, combo.loop)
           if (sample) {
             params = sample.params
             rightParams = sample.rightParams
