@@ -359,7 +359,8 @@ function exportAnimationCombos(project: Project): string {
   lines.push(' *')
   lines.push(' * Play:')
   lines.push(' *')
-  lines.push(' *   Combo(IdleSequence);')
+  lines.push(' *   Combo(IdleSequence);   // loop defaults to false -- see the Quick Reference at the')
+  lines.push(' *                          // top of this file for the optional loop argument')
   lines.push(' *')
   lines.push(' * Stop:')
   lines.push(' *')
@@ -2605,6 +2606,10 @@ struct EyesPlayerState {
   bool comboFinished = false;
   unsigned long comboStart = 0;
   unsigned long comboPausedElapsed = 0;
+  // The \`loop\` argument passed to Combo() — overrides the combo's own exported AnimationCombo::loop
+  // field for playback purposes, so the same exported combo can be played once or looped from the
+  // call site without re-exporting (see Combo()'s doc comment above its definition).
+  bool comboLoop = false;
   bool sequencePlaying = false;
   EyeAnimation sequence[EYES_MAX_ANIMATION_SEQUENCE] = {};
   uint8_t sequenceCount = 0;
@@ -2664,15 +2669,23 @@ inline void StopCombo() {
   eyesPlayer.comboFinished = false;
   eyesPlayer.comboStart = 0;
   eyesPlayer.comboPausedElapsed = 0;
+  eyesPlayer.comboLoop = false;
 }
 
-inline void Combo(const AnimationCombo& combo) {
+// Plays an exported AnimationCombo. \`loop\` overrides the combo's own baked
+// AnimationCombo::loop for this playback — pass true to repeat it forever, or omit/pass false to
+// play it once and stop (ComboFinished() then reports true). Examples:
+//   Combo(IdleSequence);          // Play once (default)
+//   Combo(IdleSequence, true);    // Loop forever
+//   Combo(IdleSequence, false);   // Play once (explicit)
+inline void Combo(const AnimationCombo& combo, bool loop = false) {
   eyesPlayer.combo = &combo;
   eyesPlayer.comboPlaying = true;
   eyesPlayer.comboPaused = false;
   eyesPlayer.comboFinished = false;
   eyesPlayer.comboStart = millis();
   eyesPlayer.comboPausedElapsed = 0;
+  eyesPlayer.comboLoop = loop;
   eyesPlayer.playingAnimation = false;
   eyesPlayer.sequencePlaying = false;
 }
@@ -2723,12 +2736,12 @@ inline void eyesBlendTowardClipStart(const AnimationComboClip& clip, float t, Li
   outRight = eyesLerpLive(outRight, targetRight, t);
 }
 
-inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, LiveEye& outLeft, LiveEye& outRight) {
+inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, bool loop, LiveEye& outLeft, LiveEye& outRight) {
   if (combo.count == 0) return false;
   unsigned long totalDuration = eyesComboDurationMs(combo);
   if (totalDuration == 0) return false;
 
-  unsigned long playMs = combo.loop ? (elapsedMs % totalDuration) : elapsedMs;
+  unsigned long playMs = loop ? (elapsedMs % totalDuration) : elapsedMs;
   unsigned long acc = 0;
   for (uint8_t i = 0; i < combo.count; i++) {
     const AnimationComboClip& clip = combo.clips[i];
@@ -2763,7 +2776,7 @@ inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, 
       if (clip.transitionMs > 0) {
         unsigned long holdEnd = playDuration + clip.endDelayMs;
         if (clipElapsed >= holdEnd) {
-          bool hasNext = !lastClip || combo.loop;
+          bool hasNext = !lastClip || loop;
           if (hasNext) {
             uint8_t nextIndex = lastClip ? 0 : (uint8_t)(i + 1);
             float t = (float)(clipElapsed - holdEnd) / (float)clip.transitionMs;
@@ -2773,7 +2786,7 @@ inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, 
         }
       }
 
-      if (!combo.loop && lastClip && playMs >= totalDuration) stillPlaying = false;
+      if (!loop && lastClip && playMs >= totalDuration) stillPlaying = false;
       return stillPlaying;
     }
     acc += clipDuration;
@@ -2876,8 +2889,8 @@ inline LiveEye UpdateEyes() {
     eyesPlayer.liveRight = eyesPlayer.live;
   } else if (ComboPlaying() && eyesPlayer.combo != nullptr) {
     unsigned long elapsed = millis() - eyesPlayer.comboStart;
-    bool stillPlaying = eyesPlayCombo(*eyesPlayer.combo, elapsed, eyesPlayer.live, eyesPlayer.liveRight);
-    if (!eyesPlayer.combo->loop) {
+    bool stillPlaying = eyesPlayCombo(*eyesPlayer.combo, elapsed, eyesPlayer.comboLoop, eyesPlayer.live, eyesPlayer.liveRight);
+    if (!eyesPlayer.comboLoop) {
       unsigned long totalDuration = eyesComboDurationMs(*eyesPlayer.combo);
       if (elapsed >= totalDuration) {
         eyesPlayer.comboFinished = true;
@@ -3369,6 +3382,9 @@ function exportQuickReference(project: Project): string {
   lines.push('//')
   if ((project.animationCombos ?? []).length > 0) {
     lines.push('// Animation Combinations:')
+    lines.push('//   Combo(IdleSequence);          // Play once (default)')
+    lines.push('//   Combo(IdleSequence, true);    // Loop forever')
+    lines.push('//   Combo(IdleSequence, false);   // Play once (explicit)')
     for (const combo of project.animationCombos) lines.push(`//   Combo(${toIdentifier(combo.name)});`)
   } else {
     lines.push('// Animation Combinations: (this project has none yet)')
@@ -3802,7 +3818,10 @@ struct AnimationComboClip {
 
 // A reusable sequence of animation references. The clips are ordered and timed by the
 // exported combo timeline; the runtime player walks that list without copying animation
-// frames.
+// frames. \`loop\` mirrors the studio's own "Loop preview" toggle at export time, but the
+// runtime player does not read it directly — Combo()'s own \`loop\` argument is what actually
+// controls playback (see Combo()'s doc comment), so the same exported combo can be played once
+// or repeated from the call site without re-exporting.
 struct AnimationCombo {
   const AnimationComboClip* clips;
   uint8_t count;

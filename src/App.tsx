@@ -1,10 +1,12 @@
 import { useEffect, useRef } from 'react'
-import { useStore, isComboTimelineActive } from '@/state/store'
+import { useStore, isComboTimelineActive, getActiveAnimation } from '@/state/store'
 import type { EditorState } from '@/types'
 import { AppShell } from '@/components/Layout/AppShell'
 import { useKeyboardShortcuts } from '@/lib/shortcuts'
 import { autosaveRead, autosaveWrite, openProjectDialog, openProjectFromPath, removeRecentProject, saveProjectAs, saveProjectToPath } from '@/state/persistence'
 import { getShowGuideOnStartup } from '@/components/Guide/UserGuideModal'
+import { animationDuration } from '@/engine/interpolate'
+import { computeComboTimeline } from '@/engine/comboPlayback'
 
 const AUTOSAVE_INTERVAL_MS = 20000
 const SAVE_STATUS_FLASH_MS = 2500
@@ -209,10 +211,44 @@ export default function App() {
     }
   }
 
+  // Spacebar (see lib/shortcuts.ts) and the Toolbar's own Play/Pause button both call this —
+  // one shared implementation, not a separate spacebar-specific path. Controls whichever of
+  // Animation-playback or Combination-preview is "currently selected", per the same
+  // isComboTimelineActive predicate PreviewCanvas/Timeline already use to decide what the
+  // shared canvas renders — so Space always acts on whatever's actually on screen.
   const playPause = () => {
     const state = useStore.getState()
+
+    if (isComboTimelineActive(state)) {
+      const combo = state.project.animationCombos.find((c) => c.id === state.selectedComboId)
+      if (!combo) return
+      if (state.comboPreviewPlaying) {
+        state.setComboPreviewPlaying(false)
+        return
+      }
+      // Finished (auto-paused at the end by PreviewCanvas's own non-looping-combo handling,
+      // see its comboPreviewPlaying/comboPreviewTimeMs comment) — restart from the beginning
+      // instead of "resuming" from a time that's already at the very end, matching Play/Pause's
+      // own Resume-vs-Restart distinction (AnimationCombinationPanel.tsx).
+      const timeline = computeComboTimeline(combo, state.project.animations)
+      if (timeline.total > 0 && state.comboPreviewTimeMs >= timeline.total) {
+        state.setComboPreviewTimeMs(0)
+      }
+      state.setComboPreviewPlaying(true)
+      return
+    }
+
+    // Matches PlaybackControls' own Play/Pause button, which is likewise only enabled in
+    // Animate mode — Space intentionally doesn't auto-switch modes, same as clicking the
+    // (otherwise-disabled) button wouldn't.
     if (state.mode !== 'animate') return
-    if (state.playbackState === 'playing') pause()
+    if (state.playbackState === 'playing') {
+      pause()
+      return
+    }
+    const anim = getActiveAnimation()
+    const duration = anim ? animationDuration(anim) : 0
+    if (duration > 0 && state.playbackTimeMs >= duration) restart()
     else play()
   }
 
