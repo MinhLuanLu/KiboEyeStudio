@@ -100,10 +100,35 @@ export interface EyeParams {
    * offset, safe at any value since it never touches the taper's horizontal (x) domain. */
   upperEyelidStretchY: number
   lowerEyelidStretchY: number
-  /** -100 to 100: shifts the bump's peak left/right by biasing how much of the flat "plateau"
-   * (see roundness) sits on each side, giving an asymmetric lean instead of a centered peak. */
+  /** -100 to 100: shifts the curve's center point (peak or valley — see centerDepth) left/right,
+   * off this eye's own u=0 midpoint. UI label "Center Position X" — reused directly by
+   * eyelidTaper()'s `centerX`, see src/renderer/eyelidCurve.ts for the full curve model this
+   * (and roundness/stretchX/centerDepth/smoothness/tension below) now feeds. */
   upperEyelidSkew: number
   lowerEyelidSkew: number
+  /** 0-100: how deep the curve's center point (see skew/"Center Position X" above) sits below
+   * the two edges' own roundness height — 0 = the center matches the (possibly asymmetric) edge
+   * heights, reproducing a flat-topped dome; 100 = the center drops all the way to the curve's
+   * own baseline, a full valley. Default 0, so an untouched project's curve keeps behaving like
+   * the plain roundness-only dome it always has. See eyelidTaper()'s `centerDepth`. */
+  upperEyelidCenterDepth: number
+  lowerEyelidCenterDepth: number
+  /** -100..100: nudges the WHOLE curve (not just its taper shape) up/down, independent of
+   * `upperEyelid`/`lowerEyelid` coverage — applied as a flat additive offset in drawEye.ts/
+   * eyesFillEyelid(), scaled by a fraction of the eye's own height. UI label "Center Position
+   * Y". Default 0 (no shift). */
+  upperEyelidCenterY: number
+  lowerEyelidCenterY: number
+  /** 0-100: blends eyelidTaper()'s transition ease between a cubic and quintic S-curve — purely
+   * a "how gradual does the curve leave its flat shoulder" knob, safe at any value (see
+   * eyelidCurve.ts's own doc comment for why this can never introduce a kink). UI label
+   * "Smoothness". */
+  upperEyelidSmoothness: number
+  lowerEyelidSmoothness: number
+  /** 0-100: biases the transition to linger near the edge height before rushing toward the
+   * center height (see eyelidTaper()'s `tension`). UI label "Tension". */
+  upperEyelidTension: number
+  lowerEyelidTension: number
   /** Layers-panel visibility/lock for the Upper/Lower Eyelid layers — see the comment on
    * eyeShapeVisible above. visible=false renders as if this lid's coverage were 0 without
    * discarding the actual authored eyelid settings (a real, exported behavior). */
@@ -254,6 +279,14 @@ export const EYELID_TRACK_FIELDS: (keyof EyeParams)[] = [
   'lowerEyelidStretchY',
   'upperEyelidSkew',
   'lowerEyelidSkew',
+  'upperEyelidCenterDepth',
+  'lowerEyelidCenterDepth',
+  'upperEyelidCenterY',
+  'lowerEyelidCenterY',
+  'upperEyelidSmoothness',
+  'lowerEyelidSmoothness',
+  'upperEyelidTension',
+  'lowerEyelidTension',
   'upperEyelidVisible',
   'lowerEyelidVisible',
   'upperEyelidLocked',
@@ -559,6 +592,14 @@ export const STYLE_EYE_PARAM_FIELDS: (keyof EyeParams)[] = [
   'lowerEyelidStretchY',
   'upperEyelidSkew',
   'lowerEyelidSkew',
+  'upperEyelidCenterDepth',
+  'lowerEyelidCenterDepth',
+  'upperEyelidCenterY',
+  'lowerEyelidCenterY',
+  'upperEyelidSmoothness',
+  'lowerEyelidSmoothness',
+  'upperEyelidTension',
+  'lowerEyelidTension',
   'highlightX',
   'highlightY',
   'highlightSize'
@@ -960,6 +1001,14 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   lowerEyelidStretchY: 100,
   upperEyelidSkew: 0,
   lowerEyelidSkew: 0,
+  upperEyelidCenterDepth: 0,
+  lowerEyelidCenterDepth: 0,
+  upperEyelidCenterY: 0,
+  lowerEyelidCenterY: 0,
+  upperEyelidSmoothness: 70,
+  lowerEyelidSmoothness: 70,
+  upperEyelidTension: 30,
+  lowerEyelidTension: 30,
   upperEyelidVisible: true,
   lowerEyelidVisible: true,
   upperEyelidLocked: false,
@@ -1107,6 +1156,14 @@ export const EYE_PARAM_RANGES: Record<
   lowerEyelidStretchY: [0, 200],
   upperEyelidSkew: [-100, 100],
   lowerEyelidSkew: [-100, 100],
+  upperEyelidCenterDepth: [0, 100],
+  lowerEyelidCenterDepth: [0, 100],
+  upperEyelidCenterY: [-100, 100],
+  lowerEyelidCenterY: [-100, 100],
+  upperEyelidSmoothness: [0, 100],
+  lowerEyelidSmoothness: [0, 100],
+  upperEyelidTension: [0, 100],
+  lowerEyelidTension: [0, 100],
   highlightX: [-40, 40],
   highlightY: [-40, 40],
   highlightSize: [0, 60],
@@ -1146,6 +1203,61 @@ export function effectiveEyeColors(project: Project, target: EyeSide): EyeColors
   if (target === 'left') return leftEyeColors(project)
   if (target === 'right') return rightEyeColors(project)
   return project.colors
+}
+
+// Fields that mean "this eye's own left/right end" rather than an absolute screen direction —
+// mirrored below so a shared (non-diverged) pose reads as symmetric across the eye pair (tall
+// outer corners on both eyes, both eyes' inner corners tapering toward the shared center) instead
+// of both eyes leaning the same visual direction.
+const EYELID_SIDED_ROUNDNESS_PAIRS: [keyof EyeParams, keyof EyeParams][] = [
+  ['upperEyelidLeftRoundness', 'upperEyelidRightRoundness'],
+  ['lowerEyelidLeftRoundness', 'lowerEyelidRightRoundness']
+]
+const EYELID_SIDED_SIGNED_FIELDS: (keyof EyeParams)[] = ['upperEyelidSkew', 'lowerEyelidSkew']
+const EYELID_SIDED_FIELDS: (keyof EyeParams)[] = [
+  ...EYELID_SIDED_ROUNDNESS_PAIRS.flat(),
+  ...EYELID_SIDED_SIGNED_FIELDS
+]
+
+/** True when `a`/`b`'s eyelid-sided fields are identical — i.e. nobody has intentionally
+ * diverged the two eyes' eyelid shape yet (the common "editing Both Eyes" case, where left/right
+ * literally share one object, but also true for a left/right override that was cloned from the
+ * base and never touched these specific fields). */
+function eyelidSidedFieldsMatch(a: EyeParams, b: EyeParams): boolean {
+  if (a === b) return true
+  for (const f of EYELID_SIDED_FIELDS) if (a[f] !== b[f]) return false
+  return true
+}
+
+/** Swaps each side's Left/Right End Roundness and negates Center Position X (skew) — the
+ * transform that turns "this eye's own left/right" into "this eye's own right/left", i.e. what
+ * the right eye of a symmetric pair actually needs so its OWN outer corner (not its own literal
+ * left) reads as tall/rounded and its OWN inner corner (facing the other eye) reads as the
+ * tapered one. */
+function mirroredEyelid(params: EyeParams): EyeParams {
+  const out = { ...params } as unknown as Record<string, number>
+  for (const [a, b] of EYELID_SIDED_ROUNDNESS_PAIRS) {
+    out[a] = params[b] as number
+    out[b] = params[a] as number
+  }
+  for (const f of EYELID_SIDED_SIGNED_FIELDS) out[f] = -(params[f] as number)
+  return out as unknown as EyeParams
+}
+
+/** The params actually used to RENDER (or export) the right eye's eyelids — identical to
+ * `rightParams` unless its eyelid-sided fields exactly match `leftParams`'s (see
+ * eyelidSidedFieldsMatch), in which case they're mirrored so the pair reads as symmetric. This is
+ * a pure rendering/export-time transform: it never writes back into the project, and any real
+ * per-eye customization of these specific fields — however small — opts a render out of
+ * auto-mirroring entirely, respecting "Left Eye"/"Right Eye" being edited independently.
+ * Deliberately generic over WHERE leftParams/rightParams came from (the shared base, a keyframe's
+ * own leftParams/rightParams, an animation track sample, a Visual Reference pose, ...) — every
+ * call site (studio renderer, ESP32 export baking) gets correct mirroring for free by routing
+ * whatever it already resolved as "this pair's left/right params" through this one function
+ * right before drawing/exporting, rather than needing pipeline-specific mirroring logic. */
+export function renderRightEyeParams(leftParams: EyeParams, rightParams: EyeParams): EyeParams {
+  if (!eyelidSidedFieldsMatch(leftParams, rightParams)) return rightParams
+  return mirroredEyelid(rightParams)
 }
 
 export function leftVisualReferenceParams(vr: VisualReferenceStyle): EyeParams {

@@ -38,6 +38,133 @@ function keyframeListForKind(anim: NonNullable<ReturnType<typeof getActiveAnimat
   }
 }
 
+/** Every field the new curvature curve model touches, per lid — used by the "Reset Curvature"
+ * button (resets exactly these back to DEFAULT_EYE_PARAMS, leaving coverage/tilt untouched) and
+ * by EYELID_STYLE_PRESETS below (each preset only needs to name the fields it actually wants to
+ * change; anything it omits keeps whatever the pose already had, same "partial patch" convention
+ * every other preset/bundle in this app already uses). */
+const EYELID_CURVATURE_FIELDS: (keyof EyeParams)[] = [
+  'upperEyelidCurvature',
+  'lowerEyelidCurvature',
+  'upperEyelidLeftRoundness',
+  'upperEyelidRightRoundness',
+  'lowerEyelidLeftRoundness',
+  'lowerEyelidRightRoundness',
+  'upperEyelidStretchX',
+  'lowerEyelidStretchX',
+  'upperEyelidStretchY',
+  'lowerEyelidStretchY',
+  'upperEyelidSkew',
+  'lowerEyelidSkew',
+  'upperEyelidCenterDepth',
+  'lowerEyelidCenterDepth',
+  'upperEyelidCenterY',
+  'lowerEyelidCenterY',
+  'upperEyelidSmoothness',
+  'lowerEyelidSmoothness',
+  'upperEyelidTension',
+  'lowerEyelidTension'
+]
+
+/** Bundles of curvature (+coverage/tilt where useful) field values that demonstrate the new
+ * curve model can produce genuinely different cartoon eye styles from the same handful of
+ * sliders — a starting point users can tweak further, not a locked/final look (same "flagged as
+ * subject to visual iteration" caveat this project's other hand-tuned presets — pupil/eye shape
+ * point tables, sticker presets — already carry). */
+const EYELID_STYLE_PRESETS: { id: string; label: string; patch: Partial<EyeParams> }[] = [
+  {
+    id: 'default',
+    label: 'Default',
+    patch: {
+      upperEyelidCurvature: 0,
+      lowerEyelidCurvature: 0,
+      upperEyelidLeftRoundness: 0,
+      upperEyelidRightRoundness: 0,
+      lowerEyelidLeftRoundness: 0,
+      lowerEyelidRightRoundness: 0,
+      upperEyelidCenterDepth: 0,
+      lowerEyelidCenterDepth: 0,
+      upperEyelidSkew: 0,
+      lowerEyelidSkew: 0
+    }
+  },
+  {
+    id: 'rounded',
+    label: 'Rounded',
+    patch: {
+      upperEyelidCurvature: 55,
+      lowerEyelidCurvature: 15,
+      upperEyelidLeftRoundness: 100,
+      upperEyelidRightRoundness: 100,
+      lowerEyelidLeftRoundness: 100,
+      lowerEyelidRightRoundness: 100,
+      upperEyelidStretchX: 80,
+      lowerEyelidStretchX: 85,
+      upperEyelidCenterDepth: 60,
+      lowerEyelidCenterDepth: 20,
+      upperEyelidSkew: 0,
+      lowerEyelidSkew: 0,
+      upperEyelidSmoothness: 90,
+      lowerEyelidSmoothness: 90
+    }
+  },
+  {
+    id: 'sleepy',
+    label: 'Sleepy',
+    patch: {
+      upperEyelid: 55,
+      lowerEyelid: 5,
+      upperEyelidCurvature: 20,
+      upperEyelidLeftRoundness: 60,
+      upperEyelidRightRoundness: 60,
+      upperEyelidStretchX: 90,
+      upperEyelidCenterDepth: 10
+    }
+  },
+  {
+    id: 'happy',
+    label: 'Happy',
+    patch: {
+      upperEyelid: 5,
+      lowerEyelid: 35,
+      lowerEyelidCurvature: -60,
+      lowerEyelidLeftRoundness: 100,
+      lowerEyelidRightRoundness: 100,
+      lowerEyelidStretchX: 70,
+      lowerEyelidCenterDepth: 0,
+      lowerEyelidSmoothness: 90
+    }
+  },
+  {
+    id: 'angry',
+    label: 'Angry',
+    patch: {
+      upperEyelid: 25,
+      upperEyelidTilt: -25,
+      lowerEyelidTilt: 25,
+      upperEyelidCurvature: -40,
+      lowerEyelidCurvature: -30,
+      upperEyelidLeftRoundness: 30,
+      upperEyelidRightRoundness: 30,
+      upperEyelidStretchX: 60,
+      upperEyelidCenterDepth: 40,
+      upperEyelidTension: 70
+    }
+  },
+  {
+    id: 'curious',
+    label: 'Curious',
+    patch: {
+      upperEyelidCurvature: 30,
+      upperEyelidSkew: 60,
+      upperEyelidLeftRoundness: 80,
+      upperEyelidRightRoundness: 40,
+      upperEyelidStretchX: 70,
+      upperEyelidCenterDepth: 30
+    }
+  }
+]
+
 const TRACK_KIND_LABEL: Record<KeyframeTrackKind, string> = {
   pose: 'shared, both eyes',
   leftEye: 'Left Eye',
@@ -148,6 +275,15 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
     selectPupilShape('circle', null)
     setParam('pupilWidth', DEFAULT_EYE_PARAMS.pupilWidth)
     setParam('pupilHeight', DEFAULT_EYE_PARAMS.pupilHeight)
+  }
+
+  const applyEyelidPreset = (patch: Partial<EyeParams>) => {
+    checkpoint()
+    for (const key of Object.keys(patch) as (keyof EyeParams)[]) setParam(key, patch[key] as never)
+  }
+  const resetCurvature = () => {
+    checkpoint()
+    for (const key of EYELID_CURVATURE_FIELDS) setParam(key, DEFAULT_EYE_PARAMS[key] as never)
   }
 
   const selectEyeShape = (shape: EyeShapeId, customShapeId: string | null) => {
@@ -426,47 +562,89 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
 
         {tab === 'eyelids' && (
           <Section title="Eyelids">
+            <div className="flex flex-col gap-1.5">
+              <span className="studio-label">Eyelid Style Preset</span>
+              <div className="flex flex-wrap gap-1.5">
+                {EYELID_STYLE_PRESETS.map((preset) => (
+                  <button key={preset.id} className="studio-btn text-xs" onClick={() => applyEyelidPreset(preset.patch)}>
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <Slider label="Upper Eyelid" value={target.upperEyelid} min={EYE_PARAM_RANGES.upperEyelid[0]} max={EYE_PARAM_RANGES.upperEyelid[1]} onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelid', v)} />
             <Slider label="Lower Eyelid" value={target.lowerEyelid} min={EYE_PARAM_RANGES.lowerEyelid[0]} max={EYE_PARAM_RANGES.lowerEyelid[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelid', v)} />
             <Slider label="Upper Eyelid Tilt" value={target.upperEyelidTilt} min={EYE_PARAM_RANGES.upperEyelidTilt[0]} max={EYE_PARAM_RANGES.upperEyelidTilt[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidTilt', v)} />
             <Slider label="Lower Eyelid Tilt" value={target.lowerEyelidTilt} min={EYE_PARAM_RANGES.lowerEyelidTilt[0]} max={EYE_PARAM_RANGES.lowerEyelidTilt[1]} suffix="°" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidTilt', v)} />
             {editTarget === 'visual-reference' && <PreviewOnlyNote />}
+
+            <span className="studio-label mt-1">Upper Eyelid Curvature</span>
             <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidCurvature')} onReset={() => resetStyleField('upperEyelidCurvature')}>
-              <Slider label="Upper Eyelid Arch Height" value={target.upperEyelidCurvature} min={EYE_PARAM_RANGES.upperEyelidCurvature[0]} max={EYE_PARAM_RANGES.upperEyelidCurvature[1]} onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidCurvature', v)} />
-            </StyleFieldRow>
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidCurvature')} onReset={() => resetStyleField('lowerEyelidCurvature')}>
-              <Slider label="Lower Eyelid Arch Height" value={target.lowerEyelidCurvature} min={EYE_PARAM_RANGES.lowerEyelidCurvature[0]} max={EYE_PARAM_RANGES.lowerEyelidCurvature[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidCurvature', v)} />
-            </StyleFieldRow>
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidLeftRoundness')} onReset={() => resetStyleField('upperEyelidLeftRoundness')}>
-              <Slider label="Upper Eyelid Left End Roundness" value={target.upperEyelidLeftRoundness} min={EYE_PARAM_RANGES.upperEyelidLeftRoundness[0]} max={EYE_PARAM_RANGES.upperEyelidLeftRoundness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidLeftRoundness', v)} />
-            </StyleFieldRow>
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidRightRoundness')} onReset={() => resetStyleField('upperEyelidRightRoundness')}>
-              <Slider label="Upper Eyelid Right End Roundness" value={target.upperEyelidRightRoundness} min={EYE_PARAM_RANGES.upperEyelidRightRoundness[0]} max={EYE_PARAM_RANGES.upperEyelidRightRoundness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidRightRoundness', v)} />
-            </StyleFieldRow>
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidLeftRoundness')} onReset={() => resetStyleField('lowerEyelidLeftRoundness')}>
-              <Slider label="Lower Eyelid Left End Roundness" value={target.lowerEyelidLeftRoundness} min={EYE_PARAM_RANGES.lowerEyelidLeftRoundness[0]} max={EYE_PARAM_RANGES.lowerEyelidLeftRoundness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidLeftRoundness', v)} />
-            </StyleFieldRow>
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidRightRoundness')} onReset={() => resetStyleField('lowerEyelidRightRoundness')}>
-              <Slider label="Lower Eyelid Right End Roundness" value={target.lowerEyelidRightRoundness} min={EYE_PARAM_RANGES.lowerEyelidRightRoundness[0]} max={EYE_PARAM_RANGES.lowerEyelidRightRoundness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidRightRoundness', v)} />
+              <Slider label="Curve Height" value={target.upperEyelidCurvature} min={EYE_PARAM_RANGES.upperEyelidCurvature[0]} max={EYE_PARAM_RANGES.upperEyelidCurvature[1]} onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidCurvature', v)} />
             </StyleFieldRow>
             <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidStretchX')} onReset={() => resetStyleField('upperEyelidStretchX')}>
-              <Slider label="Upper Eyelid Arch Width" value={target.upperEyelidStretchX} min={EYE_PARAM_RANGES.upperEyelidStretchX[0]} max={EYE_PARAM_RANGES.upperEyelidStretchX[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidStretchX', v)} />
+              <Slider label="Curve Width" value={target.upperEyelidStretchX} min={EYE_PARAM_RANGES.upperEyelidStretchX[0]} max={EYE_PARAM_RANGES.upperEyelidStretchX[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidStretchX', v)} />
             </StyleFieldRow>
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidStretchX')} onReset={() => resetStyleField('lowerEyelidStretchX')}>
-              <Slider label="Lower Eyelid Arch Width" value={target.lowerEyelidStretchX} min={EYE_PARAM_RANGES.lowerEyelidStretchX[0]} max={EYE_PARAM_RANGES.lowerEyelidStretchX[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidStretchX', v)} />
-            </StyleFieldRow>
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidStretchY')} onReset={() => resetStyleField('upperEyelidStretchY')}>
-              <Slider label="Upper Eyelid Arch Amplitude" value={target.upperEyelidStretchY} min={EYE_PARAM_RANGES.upperEyelidStretchY[0]} max={EYE_PARAM_RANGES.upperEyelidStretchY[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidStretchY', v)} />
-            </StyleFieldRow>
-            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidStretchY')} onReset={() => resetStyleField('lowerEyelidStretchY')}>
-              <Slider label="Lower Eyelid Arch Amplitude" value={target.lowerEyelidStretchY} min={EYE_PARAM_RANGES.lowerEyelidStretchY[0]} max={EYE_PARAM_RANGES.lowerEyelidStretchY[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidStretchY', v)} />
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidCenterDepth')} onReset={() => resetStyleField('upperEyelidCenterDepth')}>
+              <Slider label="Center Depth" value={target.upperEyelidCenterDepth} min={EYE_PARAM_RANGES.upperEyelidCenterDepth[0]} max={EYE_PARAM_RANGES.upperEyelidCenterDepth[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidCenterDepth', v)} />
             </StyleFieldRow>
             <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidSkew')} onReset={() => resetStyleField('upperEyelidSkew')}>
-              <Slider label="Upper Eyelid Center Peak Position" value={target.upperEyelidSkew} min={EYE_PARAM_RANGES.upperEyelidSkew[0]} max={EYE_PARAM_RANGES.upperEyelidSkew[1]} onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidSkew', v)} />
+              <Slider label="Center Position X" value={target.upperEyelidSkew} min={EYE_PARAM_RANGES.upperEyelidSkew[0]} max={EYE_PARAM_RANGES.upperEyelidSkew[1]} onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidSkew', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidCenterY')} onReset={() => resetStyleField('upperEyelidCenterY')}>
+              <Slider label="Center Position Y" value={target.upperEyelidCenterY} min={EYE_PARAM_RANGES.upperEyelidCenterY[0]} max={EYE_PARAM_RANGES.upperEyelidCenterY[1]} onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidCenterY', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidLeftRoundness')} onReset={() => resetStyleField('upperEyelidLeftRoundness')}>
+              <Slider label="Left End Roundness" value={target.upperEyelidLeftRoundness} min={EYE_PARAM_RANGES.upperEyelidLeftRoundness[0]} max={EYE_PARAM_RANGES.upperEyelidLeftRoundness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidLeftRoundness', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidRightRoundness')} onReset={() => resetStyleField('upperEyelidRightRoundness')}>
+              <Slider label="Right End Roundness" value={target.upperEyelidRightRoundness} min={EYE_PARAM_RANGES.upperEyelidRightRoundness[0]} max={EYE_PARAM_RANGES.upperEyelidRightRoundness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidRightRoundness', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidSmoothness')} onReset={() => resetStyleField('upperEyelidSmoothness')}>
+              <Slider label="Smoothness" value={target.upperEyelidSmoothness} min={EYE_PARAM_RANGES.upperEyelidSmoothness[0]} max={EYE_PARAM_RANGES.upperEyelidSmoothness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidSmoothness', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidTension')} onReset={() => resetStyleField('upperEyelidTension')}>
+              <Slider label="Tension" value={target.upperEyelidTension} min={EYE_PARAM_RANGES.upperEyelidTension[0]} max={EYE_PARAM_RANGES.upperEyelidTension[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidTension', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('upperEyelidStretchY')} onReset={() => resetStyleField('upperEyelidStretchY')}>
+              <Slider label="Curve Amplitude" value={target.upperEyelidStretchY} min={EYE_PARAM_RANGES.upperEyelidStretchY[0]} max={EYE_PARAM_RANGES.upperEyelidStretchY[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('upperEyelidStretchY', v)} />
+            </StyleFieldRow>
+
+            <span className="studio-label mt-1">Lower Eyelid Curvature</span>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidCurvature')} onReset={() => resetStyleField('lowerEyelidCurvature')}>
+              <Slider label="Curve Height" value={target.lowerEyelidCurvature} min={EYE_PARAM_RANGES.lowerEyelidCurvature[0]} max={EYE_PARAM_RANGES.lowerEyelidCurvature[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidCurvature', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidStretchX')} onReset={() => resetStyleField('lowerEyelidStretchX')}>
+              <Slider label="Curve Width" value={target.lowerEyelidStretchX} min={EYE_PARAM_RANGES.lowerEyelidStretchX[0]} max={EYE_PARAM_RANGES.lowerEyelidStretchX[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidStretchX', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidCenterDepth')} onReset={() => resetStyleField('lowerEyelidCenterDepth')}>
+              <Slider label="Center Depth" value={target.lowerEyelidCenterDepth} min={EYE_PARAM_RANGES.lowerEyelidCenterDepth[0]} max={EYE_PARAM_RANGES.lowerEyelidCenterDepth[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidCenterDepth', v)} />
             </StyleFieldRow>
             <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidSkew')} onReset={() => resetStyleField('lowerEyelidSkew')}>
-              <Slider label="Lower Eyelid Center Peak Position" value={target.lowerEyelidSkew} min={EYE_PARAM_RANGES.lowerEyelidSkew[0]} max={EYE_PARAM_RANGES.lowerEyelidSkew[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidSkew', v)} />
+              <Slider label="Center Position X" value={target.lowerEyelidSkew} min={EYE_PARAM_RANGES.lowerEyelidSkew[0]} max={EYE_PARAM_RANGES.lowerEyelidSkew[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidSkew', v)} />
             </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidCenterY')} onReset={() => resetStyleField('lowerEyelidCenterY')}>
+              <Slider label="Center Position Y" value={target.lowerEyelidCenterY} min={EYE_PARAM_RANGES.lowerEyelidCenterY[0]} max={EYE_PARAM_RANGES.lowerEyelidCenterY[1]} onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidCenterY', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidLeftRoundness')} onReset={() => resetStyleField('lowerEyelidLeftRoundness')}>
+              <Slider label="Left End Roundness" value={target.lowerEyelidLeftRoundness} min={EYE_PARAM_RANGES.lowerEyelidLeftRoundness[0]} max={EYE_PARAM_RANGES.lowerEyelidLeftRoundness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidLeftRoundness', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidRightRoundness')} onReset={() => resetStyleField('lowerEyelidRightRoundness')}>
+              <Slider label="Right End Roundness" value={target.lowerEyelidRightRoundness} min={EYE_PARAM_RANGES.lowerEyelidRightRoundness[0]} max={EYE_PARAM_RANGES.lowerEyelidRightRoundness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidRightRoundness', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidSmoothness')} onReset={() => resetStyleField('lowerEyelidSmoothness')}>
+              <Slider label="Smoothness" value={target.lowerEyelidSmoothness} min={EYE_PARAM_RANGES.lowerEyelidSmoothness[0]} max={EYE_PARAM_RANGES.lowerEyelidSmoothness[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidSmoothness', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidTension')} onReset={() => resetStyleField('lowerEyelidTension')}>
+              <Slider label="Tension" value={target.lowerEyelidTension} min={EYE_PARAM_RANGES.lowerEyelidTension[0]} max={EYE_PARAM_RANGES.lowerEyelidTension[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidTension', v)} />
+            </StyleFieldRow>
+            <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('lowerEyelidStretchY')} onReset={() => resetStyleField('lowerEyelidStretchY')}>
+              <Slider label="Curve Amplitude" value={target.lowerEyelidStretchY} min={EYE_PARAM_RANGES.lowerEyelidStretchY[0]} max={EYE_PARAM_RANGES.lowerEyelidStretchY[1]} suffix="%" onCommitStart={checkpoint} onChange={(v) => setParam('lowerEyelidStretchY', v)} />
+            </StyleFieldRow>
+
+            <button className="studio-btn self-start text-xs mt-1" onClick={resetCurvature}>
+              Reset Curvature
+            </button>
           </Section>
         )}
 

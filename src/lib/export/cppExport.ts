@@ -150,6 +150,14 @@ function eyeFrameLiteral(
     Math.round(params.lowerEyelidStretchY),
     clampByte(params.upperEyelidSkew),
     clampByte(params.lowerEyelidSkew),
+    Math.round(params.upperEyelidCenterDepth),
+    Math.round(params.lowerEyelidCenterDepth),
+    clampByte(params.upperEyelidCenterY),
+    clampByte(params.lowerEyelidCenterY),
+    Math.round(params.upperEyelidSmoothness),
+    Math.round(params.lowerEyelidSmoothness),
+    Math.round(params.upperEyelidTension),
+    Math.round(params.lowerEyelidTension),
     clampByte(params.highlightX),
     clampByte(params.highlightY),
     Math.round(params.highlightSize),
@@ -1032,6 +1040,10 @@ struct LiveEye {
   float upperEyelidStretchX, lowerEyelidStretchX;
   float upperEyelidStretchY, lowerEyelidStretchY;
   float upperEyelidSkew, lowerEyelidSkew;
+  float upperEyelidCenterDepth, lowerEyelidCenterDepth;
+  float upperEyelidCenterY, lowerEyelidCenterY;
+  float upperEyelidSmoothness, lowerEyelidSmoothness;
+  float upperEyelidTension, lowerEyelidTension;
   float highlightX, highlightY, highlightSize;
   float eyeShapeScale, eyeShapeOffsetX, eyeShapeOffsetY;
   // Not numeric, so not lerped like the fields above — eyesLerpFrame()/eyesLerpLive() step
@@ -1092,6 +1104,14 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   r.lowerEyelidStretchY = a.lowerEyelidStretchY + (b.lowerEyelidStretchY - a.lowerEyelidStretchY) * t;
   r.upperEyelidSkew = a.upperEyelidSkew + (b.upperEyelidSkew - a.upperEyelidSkew) * t;
   r.lowerEyelidSkew = a.lowerEyelidSkew + (b.lowerEyelidSkew - a.lowerEyelidSkew) * t;
+  r.upperEyelidCenterDepth = a.upperEyelidCenterDepth + (b.upperEyelidCenterDepth - a.upperEyelidCenterDepth) * t;
+  r.lowerEyelidCenterDepth = a.lowerEyelidCenterDepth + (b.lowerEyelidCenterDepth - a.lowerEyelidCenterDepth) * t;
+  r.upperEyelidCenterY = a.upperEyelidCenterY + (b.upperEyelidCenterY - a.upperEyelidCenterY) * t;
+  r.lowerEyelidCenterY = a.lowerEyelidCenterY + (b.lowerEyelidCenterY - a.lowerEyelidCenterY) * t;
+  r.upperEyelidSmoothness = a.upperEyelidSmoothness + (b.upperEyelidSmoothness - a.upperEyelidSmoothness) * t;
+  r.lowerEyelidSmoothness = a.lowerEyelidSmoothness + (b.lowerEyelidSmoothness - a.lowerEyelidSmoothness) * t;
+  r.upperEyelidTension = a.upperEyelidTension + (b.upperEyelidTension - a.upperEyelidTension) * t;
+  r.lowerEyelidTension = a.lowerEyelidTension + (b.lowerEyelidTension - a.lowerEyelidTension) * t;
   r.highlightX = a.highlightX + (b.highlightX - a.highlightX) * t;
   r.highlightY = a.highlightY + (b.highlightY - a.highlightY) * t;
   r.highlightSize = a.highlightSize + (b.highlightSize - a.highlightSize) * t;
@@ -1146,6 +1166,14 @@ inline LiveEye eyesLerpLive(const LiveEye& a, const LiveEye& b, float t) {
   r.lowerEyelidStretchY = a.lowerEyelidStretchY + (b.lowerEyelidStretchY - a.lowerEyelidStretchY) * t;
   r.upperEyelidSkew = a.upperEyelidSkew + (b.upperEyelidSkew - a.upperEyelidSkew) * t;
   r.lowerEyelidSkew = a.lowerEyelidSkew + (b.lowerEyelidSkew - a.lowerEyelidSkew) * t;
+  r.upperEyelidCenterDepth = a.upperEyelidCenterDepth + (b.upperEyelidCenterDepth - a.upperEyelidCenterDepth) * t;
+  r.lowerEyelidCenterDepth = a.lowerEyelidCenterDepth + (b.lowerEyelidCenterDepth - a.lowerEyelidCenterDepth) * t;
+  r.upperEyelidCenterY = a.upperEyelidCenterY + (b.upperEyelidCenterY - a.upperEyelidCenterY) * t;
+  r.lowerEyelidCenterY = a.lowerEyelidCenterY + (b.lowerEyelidCenterY - a.lowerEyelidCenterY) * t;
+  r.upperEyelidSmoothness = a.upperEyelidSmoothness + (b.upperEyelidSmoothness - a.upperEyelidSmoothness) * t;
+  r.lowerEyelidSmoothness = a.lowerEyelidSmoothness + (b.lowerEyelidSmoothness - a.lowerEyelidSmoothness) * t;
+  r.upperEyelidTension = a.upperEyelidTension + (b.upperEyelidTension - a.upperEyelidTension) * t;
+  r.lowerEyelidTension = a.lowerEyelidTension + (b.lowerEyelidTension - a.lowerEyelidTension) * t;
   r.highlightX = a.highlightX + (b.highlightX - a.highlightX) * t;
   r.highlightY = a.highlightY + (b.highlightY - a.highlightY) * t;
   r.highlightSize = a.highlightSize + (b.highlightSize - a.highlightSize) * t;
@@ -1414,28 +1442,49 @@ inline bool eyesPointInsideEyeShape(float lx, float ly, float hx, float hy, floa
   return (crossings & 1) != 0;
 }
 
+// f(0)=0, f(1)=1, f'(0)=f'(1)=0.
+inline float eyesSmoothstep(float s) { return s * s * (3.0f - 2.0f * s); }
+// f(0)=0, f(1)=1, f'(0)=f'(1)=0 AND f''(0)=f''(1)=0 (one degree smoother than smoothstep).
+inline float eyesSmootherstep(float s) { return s * s * s * (s * (s * 6.0f - 15.0f) + 10.0f); }
+
 // The eyelid taper law shared by eyesFillEyelid()'s fast (per-column) and rotated (per-point)
 // paths — factored out so there is exactly one copy of this formula in the firmware export,
-// matching eyelidCurvePoints()'s own derivation in the studio's drawEye.ts. \`u\` is the
-// normalized horizontal position (-1..1) the taper is evaluated at. leftRoundFrac/
-// rightRoundFrac let each end's plateau width be tuned independently — safe at any pair of
-// values since the plateau-to-quartic seam has zero slope regardless of plateau width (see
-// EyeParams.upperEyelidLeftRoundness's own comment in the studio for the derivation), so two
-// differently-sized plateaus glued at u=0 never introduces a corner.
-inline float eyesEyelidTaper(float u, float leftRoundFrac, float rightRoundFrac, float compress, float skewFrac) {
-  float side = u >= 0 ? 1.0f : -1.0f;
-  float roundFrac = side >= 0 ? rightRoundFrac : leftRoundFrac;
-  float plateau = roundFrac * 0.7f * (1.0f + side * skewFrac * 0.6f);
-  if (plateau < 0) plateau = 0;
-  if (plateau > 0.85f) plateau = 0.85f;
-  float au = u < 0 ? -u : u;
-  if (au <= plateau) return 1.0f;
-  float span = (1.0f - plateau) * compress;
-  if (span < 0.0001f) span = 0.0001f;
-  float uu = (au - plateau) / span;
-  if (uu > 1.0f) uu = 1.0f;
-  float tt = 1.0f - uu * uu;
-  return tt * tt;
+// ported verbatim from the studio's eyelidTaper() in src/renderer/eyelidCurve.ts (see that
+// file's own doc comment for the full C1-continuity derivation). \`u\` is the normalized
+// horizontal position (-1..1) the taper is evaluated at (-1 = this eye's own left edge, +1 =
+// its own right edge). leftRoundFrac/rightRoundFrac (0..1) set each edge's OWN height
+// independently; centerDepthFrac/centerXFrac position and depress a shared center point both
+// sides blend toward with zero slope; widthFrac/smoothFrac/tensionFrac (0..1) reshape the
+// transition. Every reshaping knob preserves the "flat run into a zero-slope-at-both-ends
+// ease, on both sides, meeting at the center with matching (zero) derivative" construction, so
+// this can never introduce a kink at any parameter combination.
+inline float eyesEyelidTaper(float u, float leftRoundFrac, float rightRoundFrac, float centerDepthFrac,
+                              float centerXFrac, float widthFrac, float smoothFrac, float tensionFrac) {
+  float centerH = 1.0f - centerDepthFrac;
+  float cx = centerXFrac * 0.9f;
+  float flatFrac = 1.0f - widthFrac;
+  if (flatFrac < 0.0f) flatFrac = 0.0f;
+  if (flatFrac > 0.85f) flatFrac = 0.85f;
+
+  float uc = u < -1.0f ? -1.0f : (u > 1.0f ? 1.0f : u);
+  bool onLeft = uc <= cx;
+  float edgeU = onLeft ? -1.0f : 1.0f;
+  float edgeH = onLeft ? leftRoundFrac : rightRoundFrac;
+  float shoulder = edgeU + (cx - edgeU) * flatFrac;
+  bool pastShoulder = onLeft ? (uc > shoulder) : (uc < shoulder);
+  if (!pastShoulder) return edgeH;
+
+  float shoulderSpan = cx - shoulder;
+  if (shoulderSpan < 0) shoulderSpan = -shoulderSpan;
+  if (shoulderSpan < 0.0001f) shoulderSpan = 0.0001f;
+  float s = uc - shoulder;
+  if (s < 0) s = -s;
+  s = s / shoulderSpan;
+  if (s > 1.0f) s = 1.0f;
+  if (s < 0.0f) s = 0.0f;
+  float eased = eyesSmoothstep(s) * (1.0f - smoothFrac) + eyesSmootherstep(s) * smoothFrac;
+  float shaped = powf(eased, 1.0f + tensionFrac * 2.0f);
+  return edgeH + (centerH - edgeH) * shaped;
 }
 
 // Fills a rounded-rect whose corners are quarter-*ellipses* (independent x/y radii), via
@@ -1794,16 +1843,12 @@ inline void eyesFillPupilShape(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eye
 // Fills one eyelid: a background-colored region from the eye's own TRUE rounded-rect boundary
 // down to a cutoff line that combines a linear tilt (shear) and a reshapeable curvature
 // offset —
-//   yCutoff(x) = yBase + slope*x + curveOffset * taper(x)
-// curvaturePct ranges -100 (curved inward) to 100 (curved outward) through 0 (flat/neutral):
-// at x=0 (lid center) taper is 1, so a positive curveOffset bulges the center further into
-// the eye (more coverage there than at the flat sides) while a negative one pulls it back
-// toward less coverage instead. leftRoundnessPct/rightRoundnessPct/stretchXPct/stretchYPct/
-// skewPct reshape taper() — see the matching comment above eyelidCurvePoints() in the
-// studio's drawEye.ts for the full derivation; ported here verbatim so studio and firmware
-// always agree pixel-for-pixel.
-// Every reshaping knob is guaranteed to still hit taper(u=±1) = 0 exactly, so — same as
-// before — the curve always blends into the flat sides with no kink, at any parameter value.
+//   yCutoff(x) = yBase + centerYOffset + slope*x + curveOffset * taper(x)
+// curvaturePct ranges -100 (curved inward) to 100 (curved outward) through 0 (flat/neutral).
+// leftRoundnessPct/rightRoundnessPct/centerDepthPct/centerXPct(=skew)/stretchXPct/smoothnessPct/
+// tensionPct reshape taper() — see eyesEyelidTaper()'s own comment (and eyelidCurve.ts in the
+// studio) for the full derivation; ported here verbatim so studio and firmware always agree
+// pixel-for-pixel. centerYPct is a flat additive offset, not part of taper() itself.
 //
 // What differs from a naive port: the studio gets its eyelid's OUTER edge trimmed to the
 // eye's true rounded-corner silhouette for free from the ctx.clip() already in effect when it
@@ -1819,7 +1864,8 @@ inline void eyesFillPupilShape(T& gfx, int16_t eyeCx, int16_t eyeCy, int16_t eye
 template <typename T>
 inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius, bool isUpper,
                             float coveragePct, float tiltDeg, float curvaturePct, float leftRoundnessPct, float rightRoundnessPct,
-                            float stretchXPct, float stretchYPct, float skewPct, const EyeShapeCtx& eyeShape, float rotRad, uint16_t color) {
+                            float stretchXPct, float stretchYPct, float skewPct, float centerDepthPct, float centerYPct,
+                            float smoothnessPct, float tensionPct, const EyeShapeCtx& eyeShape, float rotRad, uint16_t color) {
   if (coveragePct <= 0) return;
   float hx = w / 2.0f;
   float hy = h / 2.0f;
@@ -1827,13 +1873,18 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
   float ry = radius < hy ? (float)radius : hy;
   float coverage = (coveragePct / 100.0f) * h;
   float yBase = isUpper ? (-hy + coverage) : (hy - coverage);
+  float centerYOffset = (centerYPct / 100.0f) * h * 0.25f;
+  yBase += isUpper ? centerYOffset : -centerYOffset;
   float curveOffset = (curvaturePct / 100.0f) * h * 0.5f;
   float slope = tanf(tiltDeg * (float)PI / 180.0f);
 
   float leftRoundFrac = leftRoundnessPct < 0 ? 0 : (leftRoundnessPct > 100 ? 1.0f : leftRoundnessPct / 100.0f);
   float rightRoundFrac = rightRoundnessPct < 0 ? 0 : (rightRoundnessPct > 100 ? 1.0f : rightRoundnessPct / 100.0f);
-  float compress = stretchXPct < 0.01f ? 0.0001f : (stretchXPct > 100 ? 1.0f : stretchXPct / 100.0f);
+  float widthFrac = stretchXPct < 0 ? 0 : (stretchXPct > 100 ? 1.0f : stretchXPct / 100.0f);
   float skewFrac = skewPct < -100 ? -1.0f : (skewPct > 100 ? 1.0f : skewPct / 100.0f);
+  float centerDepthFrac = centerDepthPct < 0 ? 0 : (centerDepthPct > 100 ? 1.0f : centerDepthPct / 100.0f);
+  float smoothFrac = smoothnessPct < 0 ? 0 : (smoothnessPct > 100 ? 1.0f : smoothnessPct / 100.0f);
+  float tensionFrac = tensionPct < 0 ? 0 : (tensionPct > 100 ? 1.0f : tensionPct / 100.0f);
   float ampScale = stretchYPct < 0 ? 0 : (stretchYPct > 200 ? 2.0f : stretchYPct / 100.0f);
   float offset = curveOffset * ampScale;
 
@@ -1857,7 +1908,7 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
       float u = hx > 0.01f ? (float)dx / hx : 0.0f;
       if (u > 1.0f) u = 1.0f;
       if (u < -1.0f) u = -1.0f;
-      float taper = eyesEyelidTaper(u, leftRoundFrac, rightRoundFrac, compress, skewFrac);
+      float taper = eyesEyelidTaper(u, leftRoundFrac, rightRoundFrac, centerDepthFrac, skewFrac, widthFrac, smoothFrac, tensionFrac);
       float yCutoff = yBase + slope * (float)dx + offset * taper;
       int16_t worldX = cx + dx;
       // Applied per span — for a non-convex eye shape (Crescent, Star, Bean, Cloud) a column
@@ -1907,7 +1958,7 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
       float u = hx > 0.01f ? lx / hx : 0.0f;
       if (u > 1.0f) u = 1.0f;
       if (u < -1.0f) u = -1.0f;
-      float taper = eyesEyelidTaper(u, leftRoundFrac, rightRoundFrac, compress, skewFrac);
+      float taper = eyesEyelidTaper(u, leftRoundFrac, rightRoundFrac, centerDepthFrac, skewFrac, widthFrac, smoothFrac, tensionFrac);
       float yCutoff = yBase + slope * lx + offset * taper;
       if (yCutoff > eyeHiY) yCutoff = eyeHiY;
       if (yCutoff < eyeLoY) yCutoff = eyeLoY;
@@ -3251,11 +3302,13 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
 
   if (e.upperEyelidVisible) {
     eyesFillEyelid(gfx, cx, cy, w, h, radius, true, e.upperEyelid, e.upperEyelidTilt, e.upperEyelidCurvature,
-                   e.upperEyelidLeftRoundness, e.upperEyelidRightRoundness, e.upperEyelidStretchX, e.upperEyelidStretchY, e.upperEyelidSkew, eyeShape, rotRad, bgColor);
+                   e.upperEyelidLeftRoundness, e.upperEyelidRightRoundness, e.upperEyelidStretchX, e.upperEyelidStretchY, e.upperEyelidSkew,
+                   e.upperEyelidCenterDepth, e.upperEyelidCenterY, e.upperEyelidSmoothness, e.upperEyelidTension, eyeShape, rotRad, bgColor);
   }
   if (e.lowerEyelidVisible) {
     eyesFillEyelid(gfx, cx, cy, w, h, radius, false, e.lowerEyelid, e.lowerEyelidTilt, e.lowerEyelidCurvature,
-                   e.lowerEyelidLeftRoundness, e.lowerEyelidRightRoundness, e.lowerEyelidStretchX, e.lowerEyelidStretchY, e.lowerEyelidSkew, eyeShape, rotRad, bgColor);
+                   e.lowerEyelidLeftRoundness, e.lowerEyelidRightRoundness, e.lowerEyelidStretchX, e.lowerEyelidStretchY, e.lowerEyelidSkew,
+                   e.lowerEyelidCenterDepth, e.lowerEyelidCenterY, e.lowerEyelidSmoothness, e.lowerEyelidTension, eyeShape, rotRad, bgColor);
   }
 }
 
@@ -3274,6 +3327,30 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
 // comment above — eyesPlayer.colorsLeft/colorsRight) — when the studio's two eyes have
 // identical colors, EYE_COLORS_RIGHT is just a reference to EYE_COLORS_LEFT (see above), so
 // this always works whether or not the eyes actually differ.
+// True when left/right's eyelid-sided fields (Left/Right End Roundness, Center Position X aka
+// skew) are exactly equal — i.e. nobody has actually diverged the two eyes' eyelid shape yet
+// (always true for the shared-single-frame/shared-array fast paths above, since both sides are
+// computed from the same source data; also true for a genuinely authored pair that happens to
+// carry identical values). Mirrors the studio's own eyelidSidedFieldsMatch() in types/index.ts.
+inline bool eyesEyelidFieldsMatch(const LiveEye& a, const LiveEye& b) {
+  return a.upperEyelidLeftRoundness == b.upperEyelidLeftRoundness && a.upperEyelidRightRoundness == b.upperEyelidRightRoundness &&
+         a.lowerEyelidLeftRoundness == b.lowerEyelidLeftRoundness && a.lowerEyelidRightRoundness == b.lowerEyelidRightRoundness &&
+         a.upperEyelidSkew == b.upperEyelidSkew && a.lowerEyelidSkew == b.lowerEyelidSkew;
+}
+
+// Swaps each side's Left/Right End Roundness and negates Center Position X (skew) — mirrors the
+// studio's own mirroredEyelid() in types/index.ts.
+inline LiveEye eyesMirroredEyelid(const LiveEye& e) {
+  LiveEye m = e;
+  m.upperEyelidLeftRoundness = e.upperEyelidRightRoundness;
+  m.upperEyelidRightRoundness = e.upperEyelidLeftRoundness;
+  m.lowerEyelidLeftRoundness = e.lowerEyelidRightRoundness;
+  m.lowerEyelidRightRoundness = e.lowerEyelidLeftRoundness;
+  m.upperEyelidSkew = -e.upperEyelidSkew;
+  m.lowerEyelidSkew = -e.lowerEyelidSkew;
+  return m;
+}
+
 template <typename T>
 inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& left, const LiveEye& right, uint16_t bgColor,
                              const EyeColorSet& leftColors, const EyeColorSet& rightColors) {
@@ -3292,8 +3369,13 @@ inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const Li
   eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs, screenCx, screenCy);
   // eyePosX/Y move the whole eye on top of the ±distance/2 placement — eyePosX is sign-mirrored
   // for the right eye exactly like the studio's faceRenderer.ts, eyePosY never is.
+  // Eyelid roundness/skew auto-mirror for the right eye whenever they match the left eye's
+  // (see eyesEyelidFieldsMatch()'s own comment) — matches the studio's PreviewCanvas.tsx exactly,
+  // so this single runtime check correctly covers every export path (a single shared EyeFrame, a
+  // shared frames array, and genuinely-diverged per-eye data) with no export-time special-casing.
+  LiveEye rightForDraw = eyesEyelidFieldsMatch(left, right) ? eyesMirroredEyelid(right) : right;
   eyesDrawEye(gfx, screenCx - half + (int16_t)left.eyePosX, screenCy + (int16_t)left.eyePosY, left, false, bgColor, leftColors);
-  eyesDrawEye(gfx, screenCx + half - (int16_t)right.eyePosX, screenCy + (int16_t)right.eyePosY, right, true, bgColor, rightColors);
+  eyesDrawEye(gfx, screenCx + half - (int16_t)right.eyePosX, screenCy + (int16_t)right.eyePosY, rightForDraw, true, bgColor, rightColors);
   eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
   eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
 }
@@ -3547,7 +3629,9 @@ export function generateCppHeader(project: Project): string {
  *   lowerEyelidTilt, upperEyelidCurvature, lowerEyelidCurvature, upperEyelidLeftRoundness,
  *   upperEyelidRightRoundness, lowerEyelidLeftRoundness, lowerEyelidRightRoundness,
  *   upperEyelidStretchX, lowerEyelidStretchX, upperEyelidStretchY,
- *   lowerEyelidStretchY, upperEyelidSkew, lowerEyelidSkew, highlightX, highlightY,
+ *   lowerEyelidStretchY, upperEyelidSkew, lowerEyelidSkew, upperEyelidCenterDepth,
+ *   lowerEyelidCenterDepth, upperEyelidCenterY, lowerEyelidCenterY, upperEyelidSmoothness,
+ *   lowerEyelidSmoothness, upperEyelidTension, lowerEyelidTension, highlightX, highlightY,
  *   highlightSize, durationMs, easing, bezierX1, bezierY1, bezierX2, bezierY2, pupilShape,
  *   pupilCustomShapeIndex
  * (bezier fields only matter when easing == EYE_EASE_BEZIER, scaled 0-100)
@@ -3722,7 +3806,11 @@ struct EyeFrame {
   uint8_t lowerEyelidLeftRoundness, lowerEyelidRightRoundness; // 0-100 each
   uint8_t upperEyelidStretchX, lowerEyelidStretchX; // 0-100
   uint8_t upperEyelidStretchY, lowerEyelidStretchY; // 0-200
-  int8_t upperEyelidSkew, lowerEyelidSkew; // -100..100
+  int8_t upperEyelidSkew, lowerEyelidSkew; // -100..100, "Center Position X" — see eyesEyelidTaper()
+  uint8_t upperEyelidCenterDepth, lowerEyelidCenterDepth; // 0-100
+  int8_t upperEyelidCenterY, lowerEyelidCenterY; // -100..100
+  uint8_t upperEyelidSmoothness, lowerEyelidSmoothness; // 0-100
+  uint8_t upperEyelidTension, lowerEyelidTension; // 0-100
   int8_t highlightX, highlightY;
   uint8_t highlightSize;
   uint16_t durationMs;

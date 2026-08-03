@@ -11,6 +11,7 @@ import {
   leftEyeParams,
   leftVisualReferenceColors,
   leftVisualReferenceParams,
+  renderRightEyeParams,
   rightEyeColors,
   rightEyeParams,
   rightVisualReferenceColors,
@@ -206,10 +207,14 @@ export function PreviewCanvas() {
       const stickerElapsedMs = isAnimateScrub ? timeMs : (stickerElapsedRef.current += dt)
       const stickers = effectiveStickers(state.project, activeExpression, activeAnimation)
       lastStickersRef.current = stickers
+      // Auto-mirrors the right eye's eyelid taper (left/right roundness, Center Position X)
+      // whenever it isn't intentionally diverged from the left eye's — see
+      // renderRightEyeParams()'s own doc comment. Applied once, right here, so every mode branch
+      // above (Design/Animate/Idle/Visual Reference/Combo) gets correct mirroring for free.
       renderFace(ctx!, params, {
         ...state.project.display,
         theme,
-        rightParams,
+        rightParams: renderRightEyeParams(params, rightParams),
         rightTheme,
         customShapes: state.project.customPupilShapes,
         customEyeShapes: state.project.customEyeShapes,

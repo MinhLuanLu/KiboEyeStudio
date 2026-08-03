@@ -3,6 +3,7 @@ import { DEFAULT_EYE_COLORS } from '@/types'
 import { mixColors, shadeColor, quantizeToRgb565 } from '@/lib/color'
 import { PUPIL_SHAPE_POLYGONS, type PupilPolygon } from './pupilShapes'
 import { EYE_SHAPE_POLYGONS, type EyeShapePolygon } from './eyeShapes'
+import { eyelidTaper, type EyelidCurveShape } from './eyelidCurve'
 
 export type EyeTheme = EyeColors
 
@@ -191,6 +192,14 @@ export function drawEye(
     lowerEyelidStretchY,
     upperEyelidSkew,
     lowerEyelidSkew,
+    upperEyelidCenterDepth,
+    lowerEyelidCenterDepth,
+    upperEyelidCenterY,
+    lowerEyelidCenterY,
+    upperEyelidSmoothness,
+    lowerEyelidSmoothness,
+    upperEyelidTension,
+    lowerEyelidTension,
     upperEyelidVisible,
     lowerEyelidVisible,
     highlightX,
@@ -396,50 +405,19 @@ export function drawEye(
   // *angle* while keeping it anchored near the eye's own center — the standard technique for
   // this in 2D character rigs.
   //
-  // The curved edge itself is a quartic "bump" — a border-radius-style taper, not a plain
-  // parabola:
-  //   taper(u) = (1 - u^2)^2      for u = x/halfW in [-1, 1]
-  //   y(x)     = yBase + curveOffset * taper(u)
-  // At x=0 (lid center) taper=1, giving the full curveOffset offset. Curvature ranges -100
-  // (curved inward) to 100 (curved outward) through 0 (flat/neutral): a positive curveOffset
-  // bulges the lid center further into the eye (more coverage there than at the flat sides);
-  // a negative one pulls the center back toward less coverage instead. At x=±halfW (the
-  // eye's own flat-side edge) taper AND its slope both reach exactly 0 regardless of sign,
-  // so the curve blends into the flat sides — and from there into the eye's rounded corners
-  // — with no kink, at any eye width/height/radius or curvature value. (A plain parabola
-  // (1-u^2) reaches 0 at the edge but with a nonzero slope, which is what produced a visible
-  // corner there; squaring the taper fixes that while keeping the same closed form.)
-  //
-  // Roundness/stretchX/stretchY/skew reshape this same taper — each one guaranteed to
-  // preserve the "exactly 0, exactly zero-slope at u=±1" edge property above, so none of them
-  // can ever reintroduce the corner kink the squared taper was chosen to avoid:
-  //   - leftRoundness/rightRoundness (0-100 each, independent) each insert a flat "plateau"
-  //     of width `plateau` on their own side of u=0 where taper=1, then re-run the same
-  //     quartic taper over the *remaining* span out to u=±1 (rescaled so it still lands on
-  //     exactly 0 there) — this is what turns a single narrow peaked bump into a wider,
-  //     flatter-topped dome that reads as a continuous rounded oval/egg arc, independently on
-  //     each end. Both 0 makes plateau=0 on both sides, exactly reproducing the original
-  //     single-roundness formula. Splitting one shared knob into two independent ones is safe
-  //     at every value: `taper`'s derivative at the plateau boundary is `-4·uu·(1-uu²)/span`,
-  //     which is exactly 0 at `uu=0` (i.e. right at the boundary) *regardless of `span`* — so
-  //     the flat plateau and the descending quartic already glue together with zero slope for
-  //     any plateau width, on either side, independently. That's also why this was already
-  //     safe when skew (below) biased one side's plateau wider than the other's — giving each
-  //     side its own base plateau width reuses that exact same guarantee.
-  //   - stretchX (0-100%) is roundness's inverse-direction complement: it compresses the
-  //     taper into a narrower portion of the remaining (non-plateau) span, leaving the rest
-  //     flat at 0 — narrows the bump instead of widening it. 100% reproduces the original
-  //     span exactly.
-  //   - stretchY (0-200%) is a plain multiply on curveOffset — safe at any value since it
-  //     never touches the taper's horizontal domain at all.
-  //   - skew (-100 to 100) additionally biases each side's own plateau to be wider or
-  //     narrower than its independently-set base width, shifting the bump's visual peak
-  //     left/right on top of whatever left/right roundness already authored.
-  // Canvas has no built-in primitive for this curve, so the path is built by sampling it at
-  // one point per device pixel column and connecting with lineTo — with that many samples the
-  // polyline is visually indistinguishable from a true smooth curve, and it guarantees this
-  // preview evaluates the identical formula eyesFillEyelid() in the C++ export evaluates
-  // per-column, so exported firmware renders the same lid shape.
+  // The curved edge's SHAPE (0..1 height fraction per horizontal position) comes from the
+  // shared eyelidTaper() in eyelidCurve.ts — see that file's own doc comment for the full
+  // derivation of why it's C1-continuous everywhere. Here that shape is just scaled by
+  // curveOffset (curvature% * eye height * 0.5 * stretchY%) and added to yBase:
+  //   y(x) = yBase + sign*centerYOffset + curveOffset * eyelidTaper(x/halfW, shape)
+  // Unlike the old single-plateau design, taper(u=±1) is no longer pinned to 0 — Left/Right
+  // End Roundness now directly sets each edge's OWN height (0 = flush with the flat side, 100
+  // = the curve reaches full amplitude right at that corner, i.e. "tall and fully rounded").
+  // That means the two "wall" segments below (which extend the lid's flat sides off past the
+  // eye's own clip, purely so the fill never leaves a gap at the true corner) have to reach
+  // whatever height the curve's own edge sits at — hard-coding them to yBase, like the old
+  // formula could get away with, would draw a visible seam whenever an edge's roundness is
+  // nonzero, since the curve would start partway up/down from where the wall left off.
   ctx.fillStyle = '#000000'
   const lidMargin = (width + height) * 2 // generous: keeps the lid's flat sides covering fully even after a 45° shear
   const halfW = width / 2
@@ -449,59 +427,48 @@ export function drawEye(
     yBase: number,
     curveOffset: number,
     sign: 1 | -1,
-    leftRoundness: number,
-    rightRoundness: number,
-    stretchX: number,
-    stretchY: number,
-    skew: number
-  ): [number, number][] {
+    shape: EyelidCurveShape,
+    centerYPct: number
+  ): { pts: [number, number][]; edgeYLeft: number; edgeYRight: number } {
+    const centerYOffset = (Math.max(-100, Math.min(100, centerYPct)) / 100) * height * 0.25
+    const y0 = yBase + sign * centerYOffset
+    if (halfW < 0.01) return { pts: [[0, y0]], edgeYLeft: y0, edgeYRight: y0 }
     const pts: [number, number][] = []
-    if (halfW < 0.01) {
-      pts.push([0, yBase])
-      return pts
-    }
-    const leftRoundFrac = Math.max(0, Math.min(100, leftRoundness)) / 100
-    const rightRoundFrac = Math.max(0, Math.min(100, rightRoundness)) / 100
-    const compress = Math.max(0.0001, Math.max(0, Math.min(100, stretchX)) / 100)
-    const skewFrac = Math.max(-100, Math.min(100, skew)) / 100
-    const offset = curveOffset * (Math.max(0, Math.min(200, stretchY)) / 100)
     for (let i = 0; i <= curveSamples; i++) {
       const x = halfW - (2 * halfW * i) / curveSamples
       const u = x / halfW
-      const side = u >= 0 ? 1 : -1
-      const roundFrac = side >= 0 ? rightRoundFrac : leftRoundFrac
-      // Wider plateau on the side skew leans toward — always < 1 so a taper span always
-      // remains, which is what keeps taper(u=±1) pinned at exactly 0 regardless of skew.
-      const plateau = Math.max(0, Math.min(0.85, roundFrac * 0.7 * (1 + side * skewFrac * 0.6)))
-      const au = Math.abs(u)
-      let taper: number
-      if (au <= plateau) {
-        taper = 1
-      } else {
-        const span = Math.max((1 - plateau) * compress, 0.0001)
-        const uu = Math.min((au - plateau) / span, 1)
-        const t = 1 - uu * uu
-        taper = t * t
-      }
-      pts.push([x, yBase + sign * offset * taper])
+      pts.push([x, y0 + sign * curveOffset * eyelidTaper(u, shape)])
     }
-    return pts
+    return {
+      pts,
+      edgeYRight: y0 + sign * curveOffset * eyelidTaper(1, shape),
+      edgeYLeft: y0 + sign * curveOffset * eyelidTaper(-1, shape)
+    }
   }
 
   if (upperEyelidVisible && upperEyelid > 0) {
     const coverage = (upperEyelid / 100) * height
     const yBase = -height / 2 + coverage
-    const curveOffset = (upperEyelidCurvature / 100) * height * 0.5
+    const curveOffset = (upperEyelidCurvature / 100) * height * 0.5 * (Math.max(0, Math.min(200, upperEyelidStretchY)) / 100)
     const slope = Math.tan((upperEyelidTilt * Math.PI) / 180)
+    const shape: EyelidCurveShape = {
+      leftRoundness: upperEyelidLeftRoundness,
+      rightRoundness: upperEyelidRightRoundness,
+      width: upperEyelidStretchX,
+      centerDepth: upperEyelidCenterDepth,
+      centerX: upperEyelidSkew,
+      smoothness: upperEyelidSmoothness,
+      tension: upperEyelidTension
+    }
+    const { pts, edgeYLeft, edgeYRight } = eyelidCurvePoints(yBase, curveOffset, 1, shape, upperEyelidCenterY)
     ctx.save()
     ctx.transform(1, slope, 0, 1, 0, 0)
     ctx.beginPath()
     ctx.moveTo(-lidMargin, -lidMargin)
     ctx.lineTo(lidMargin, -lidMargin)
-    ctx.lineTo(lidMargin, yBase)
-    for (const [x, y] of eyelidCurvePoints(yBase, curveOffset, 1, upperEyelidLeftRoundness, upperEyelidRightRoundness, upperEyelidStretchX, upperEyelidStretchY, upperEyelidSkew))
-      ctx.lineTo(x, y)
-    ctx.lineTo(-lidMargin, yBase)
+    ctx.lineTo(lidMargin, edgeYRight)
+    for (const [x, y] of pts) ctx.lineTo(x, y)
+    ctx.lineTo(-lidMargin, edgeYLeft)
     ctx.closePath()
     ctx.fill()
     ctx.restore()
@@ -509,17 +476,26 @@ export function drawEye(
   if (lowerEyelidVisible && lowerEyelid > 0) {
     const coverage = (lowerEyelid / 100) * height
     const yBase = height / 2 - coverage
-    const curveOffset = (lowerEyelidCurvature / 100) * height * 0.5
+    const curveOffset = (lowerEyelidCurvature / 100) * height * 0.5 * (Math.max(0, Math.min(200, lowerEyelidStretchY)) / 100)
     const slope = Math.tan((lowerEyelidTilt * Math.PI) / 180)
+    const shape: EyelidCurveShape = {
+      leftRoundness: lowerEyelidLeftRoundness,
+      rightRoundness: lowerEyelidRightRoundness,
+      width: lowerEyelidStretchX,
+      centerDepth: lowerEyelidCenterDepth,
+      centerX: lowerEyelidSkew,
+      smoothness: lowerEyelidSmoothness,
+      tension: lowerEyelidTension
+    }
+    const { pts, edgeYLeft, edgeYRight } = eyelidCurvePoints(yBase, curveOffset, -1, shape, lowerEyelidCenterY)
     ctx.save()
     ctx.transform(1, slope, 0, 1, 0, 0)
     ctx.beginPath()
     ctx.moveTo(-lidMargin, lidMargin)
     ctx.lineTo(lidMargin, lidMargin)
-    ctx.lineTo(lidMargin, yBase)
-    for (const [x, y] of eyelidCurvePoints(yBase, curveOffset, -1, lowerEyelidLeftRoundness, lowerEyelidRightRoundness, lowerEyelidStretchX, lowerEyelidStretchY, lowerEyelidSkew))
-      ctx.lineTo(x, y)
-    ctx.lineTo(-lidMargin, yBase)
+    ctx.lineTo(lidMargin, edgeYRight)
+    for (const [x, y] of pts) ctx.lineTo(x, y)
+    ctx.lineTo(-lidMargin, edgeYLeft)
     ctx.closePath()
     ctx.fill()
     ctx.restore()
