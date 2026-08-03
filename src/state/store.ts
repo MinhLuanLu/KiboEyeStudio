@@ -27,6 +27,7 @@ import type {
   TrackKind,
   UiCssRule,
   UiDisplaySettings,
+  UiVariable,
   UiWidget,
   UiWidgetStateName,
   UiWidgetStyle,
@@ -47,7 +48,13 @@ import {
   computeStyleOverrides,
   createDefaultTracks,
   createTrack,
-  defaultVisualReference
+  defaultVisualReference,
+  effectiveEyeColors,
+  effectiveEyeParams,
+  leftEyeColors,
+  leftEyeParams,
+  rightEyeColors,
+  rightEyeParams
 } from '@/types'
 import { builtinAnimations } from '@/data/builtinAnimations'
 import { builtinExpressions } from '@/data/builtinExpressions'
@@ -120,7 +127,7 @@ export interface DevStats {
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
 export type LeftTab = 'animations' | 'combinations' | 'expressions'
-export type RightTab = 'controls' | 'colors' | 'display' | 'personality' | 'visual-reference' | 'stickers'
+export type RightTab = 'controls' | 'colors' | 'display' | 'personality' | 'visual-reference' | 'stickers' | 'layers'
 /** Which top-level screen is showing. 'home' is the landing screen shown at launch; 'eyeStudio'
  * is everything that existed before UI Design Mode (the panel tree in EyeStudioWorkspace.tsx);
  * 'uiDesign' is the structurally separate LVGL screen designer. These three are never tabs or a
@@ -157,6 +164,113 @@ export type TimelineClipboardEntry =
   | { kind: 'sticker'; data: StickerInstance }
   | { kind: 'marker'; data: Marker }
   | { kind: 'comboClip'; data: AnimationComboClip }
+
+// ---------------------------------------------------------------------------------------------
+// Layers panel — six fixed rows (Eye Shape / Upper Eyelid / Lower Eyelid / Pupil / Stickers /
+// Effects) generic over `LayerKind`, mirroring `eyeTarget`/`setEyeParam`'s existing "one
+// mechanism, keyed by field" precedent instead of writing five near-identical action sets by
+// hand. Five of the six kinds are just named slices of `EyeParams`/`EyeColors` (each already has
+// its own `*Visible`/`*Locked` pair, see types/index.ts); `'stickers'` is handled separately
+// wherever it appears below since it's a per-instance list, not a handful of scalar fields.
+// ---------------------------------------------------------------------------------------------
+
+export type EyeLayerKind = 'eyeShape' | 'upperEyelid' | 'lowerEyelid' | 'pupil' | 'effects'
+export type LayerKind = EyeLayerKind | 'stickers'
+
+const LAYER_PARAM_FIELDS: Record<EyeLayerKind, (keyof EyeParams)[]> = {
+  eyeShape: ['eyeShape', 'eyeCustomShapeId', 'eyeShapeScale', 'eyeShapeOffsetX', 'eyeShapeOffsetY', 'eyeShapeFlipH', 'eyeShapeFlipV'],
+  upperEyelid: ['upperEyelid', 'upperEyelidTilt', 'upperEyelidCurvature', 'upperEyelidLeftRoundness', 'upperEyelidRightRoundness', 'upperEyelidStretchX', 'upperEyelidStretchY', 'upperEyelidSkew'],
+  lowerEyelid: ['lowerEyelid', 'lowerEyelidTilt', 'lowerEyelidCurvature', 'lowerEyelidLeftRoundness', 'lowerEyelidRightRoundness', 'lowerEyelidStretchX', 'lowerEyelidStretchY', 'lowerEyelidSkew'],
+  pupil: ['pupilWidth', 'pupilHeight', 'pupilX', 'pupilY', 'pupilRotation', 'pupilShape', 'pupilCustomShapeId'],
+  effects: []
+}
+const LAYER_COLOR_FIELDS: Record<EyeLayerKind, (keyof EyeColors)[]> = {
+  eyeShape: ['eyeShapeOpacity'],
+  upperEyelid: [],
+  lowerEyelid: [],
+  pupil: ['pupilOpacity'],
+  effects: ['glowIntensity', 'shadowIntensity']
+}
+type FieldRef = { obj: 'params'; key: keyof EyeParams } | { obj: 'colors'; key: keyof EyeColors }
+const LAYER_VISIBLE_FIELD: Record<EyeLayerKind, FieldRef> = {
+  eyeShape: { obj: 'params', key: 'eyeShapeVisible' },
+  upperEyelid: { obj: 'params', key: 'upperEyelidVisible' },
+  lowerEyelid: { obj: 'params', key: 'lowerEyelidVisible' },
+  pupil: { obj: 'params', key: 'pupilVisible' },
+  effects: { obj: 'colors', key: 'effectsVisible' }
+}
+const LAYER_LOCKED_FIELD: Record<EyeLayerKind, FieldRef> = {
+  eyeShape: { obj: 'params', key: 'eyeShapeLocked' },
+  upperEyelid: { obj: 'params', key: 'upperEyelidLocked' },
+  lowerEyelid: { obj: 'params', key: 'lowerEyelidLocked' },
+  pupil: { obj: 'params', key: 'pupilLocked' },
+  effects: { obj: 'colors', key: 'effectsLocked' }
+}
+
+export interface LayerClipboardPayload {
+  kind: EyeLayerKind
+  params: Partial<EyeParams>
+  colors: Partial<EyeColors>
+}
+
+/** Pulls just the fields one layer kind owns (its data fields plus its own visible/locked pair)
+ * out of a full params/colors pair — the shared read side every copy/duplicate/apply-all/reset
+ * action below funnels through, so there's exactly one place that knows which fields belong to
+ * which layer. */
+function collectLayerPayload(kind: EyeLayerKind, params: EyeParams, colors: EyeColors): LayerClipboardPayload {
+  const paramPatch: Partial<EyeParams> = {}
+  for (const f of LAYER_PARAM_FIELDS[kind]) (paramPatch as Record<string, unknown>)[f] = params[f]
+  const colorPatch: Partial<EyeColors> = {}
+  for (const f of LAYER_COLOR_FIELDS[kind]) (colorPatch as Record<string, unknown>)[f] = colors[f]
+  const vf = LAYER_VISIBLE_FIELD[kind]
+  if (vf.obj === 'params') (paramPatch as Record<string, unknown>)[vf.key] = params[vf.key]
+  else (colorPatch as Record<string, unknown>)[vf.key] = colors[vf.key]
+  const lf = LAYER_LOCKED_FIELD[kind]
+  if (lf.obj === 'params') (paramPatch as Record<string, unknown>)[lf.key] = params[lf.key]
+  else (colorPatch as Record<string, unknown>)[lf.key] = colors[lf.key]
+  return { kind, params: paramPatch, colors: colorPatch }
+}
+
+/** Writes a params/colors patch onto one specific eye side's override (creating it, lazily
+ * cloned from the base pose, if this is the side's first divergence) — the write-side twin of
+ * `leftEyeParams`/`rightEyeParams`, used wherever a layer action needs to target a specific side
+ * rather than the currently-selected Eye Target (e.g. "duplicate to the other eye"). */
+function writeEyeSide(s: { project: Project }, side: 'left' | 'right', obj: 'params', patch: Partial<EyeParams>): void
+function writeEyeSide(s: { project: Project }, side: 'left' | 'right', obj: 'colors', patch: Partial<EyeColors>): void
+function writeEyeSide(s: { project: Project }, side: 'left' | 'right', obj: 'params' | 'colors', patch: Partial<EyeParams> | Partial<EyeColors>): void {
+  if (obj === 'params') {
+    const overrideKey = side === 'left' ? 'eyeLeftOverride' : 'eyeRightOverride'
+    if (!s.project[overrideKey]) s.project[overrideKey] = { ...s.project.eyeBase }
+    Object.assign(s.project[overrideKey] as EyeParams, patch)
+  } else {
+    const overrideKey = side === 'left' ? 'colorsLeftOverride' : 'colorsRightOverride'
+    if (!s.project[overrideKey]) s.project[overrideKey] = { ...s.project.colors }
+    Object.assign(s.project[overrideKey] as EyeColors, patch)
+  }
+}
+
+/** Writes a params/colors patch respecting the current Eye Target radio ('both' collapses back
+ * onto the shared base and clears both overrides, exactly like `setEyeParams`/`setColor` already
+ * do) — the generic write side every scalar-field layer action (visible/locked/reset) uses. */
+function writeEyeTarget(s: { project: Project }, eyeTarget: EyeSide, obj: 'params', patch: Partial<EyeParams>): void
+function writeEyeTarget(s: { project: Project }, eyeTarget: EyeSide, obj: 'colors', patch: Partial<EyeColors>): void
+function writeEyeTarget(s: { project: Project }, eyeTarget: EyeSide, obj: 'params' | 'colors', patch: Partial<EyeParams> | Partial<EyeColors>): void {
+  if (eyeTarget === 'both') {
+    if (obj === 'params') {
+      Object.assign(s.project.eyeBase, patch)
+      s.project.eyeLeftOverride = null
+      s.project.eyeRightOverride = null
+    } else {
+      Object.assign(s.project.colors, patch)
+      s.project.colorsLeftOverride = null
+      s.project.colorsRightOverride = null
+    }
+  } else if (obj === 'params') {
+    writeEyeSide(s, eyeTarget, 'params', patch as Partial<EyeParams>)
+  } else {
+    writeEyeSide(s, eyeTarget, 'colors', patch as Partial<EyeColors>)
+  }
+}
 
 interface StoreState {
   project: Project
@@ -268,6 +382,38 @@ interface StoreState {
   // colors
   setColor: <K extends keyof EyeColors>(key: K, value: EyeColors[K]) => void
   applyGeneratedEye: (params: Partial<EyeParams>, colors: EyeColors, expressionName: string) => void
+
+  // layers panel — see the LAYER_*_FIELD tables + collectLayerPayload/writeEyeTarget/writeEyeSide
+  // above. All six actions are generic over LayerKind; 'stickers' is handled as a special case
+  // inside each (a per-instance list in the current sticker scope, not a handful of scalar
+  // fields) rather than needing its own separate action set.
+  layerClipboard: { kind: LayerKind; payload: LayerClipboardPayload | StickerInstance[] } | null
+  /** visible=false renders as if this layer's coverage/shape/intensity were off, without
+   * discarding the actual authored values (a real, exported behavior — see the *Visible fields'
+   * own doc comments in types/index.ts). Applies to whichever eye(s) `eyeTarget` currently
+   * selects, same as every other Controls/Colors field. */
+  setLayerVisible: (kind: LayerKind, visible: boolean) => void
+  /** locked=true is authoring-time only — disables this layer's Controls/Colors sliders; never
+   * exported (see the *Locked fields' own doc comments). */
+  setLayerLocked: (kind: LayerKind, locked: boolean) => void
+  /** Copies this layer's current values from whichever side `eyeTarget` is set to ('left' or
+   * 'right' — a no-op when `eyeTarget` is 'both', since there's no single source side to copy
+   * from) onto the OTHER side's override. For 'stickers', duplicates every sticker in the
+   * current sticker scope instead. */
+  duplicateLayerToOtherEye: (kind: LayerKind) => void
+  copyLayerToClipboard: (kind: LayerKind) => void
+  /** `target: 'base'` pastes onto whichever side `eyeTarget` currently selects (respecting the
+   * same both/left/right semantics as setLayerVisible/setLayerLocked above); an expression id
+   * pastes directly onto that expression's own base `params`/`colors` (not its left/right
+   * divergence, which the expression's own Save flow owns). */
+  pasteLayerFromClipboard: (kind: LayerKind, target: 'base' | string) => void
+  /** Reads this layer's current values (from whichever side `eyeTarget` selects) and writes them
+   * onto every expression's own base `params`/`colors`. */
+  applyLayerToAllExpressions: (kind: LayerKind) => void
+  /** Resets this layer back to `DEFAULT_EYE_PARAMS`/`DEFAULT_EYE_COLORS`, respecting `eyeTarget`
+   * the same way every other reset-this-field control in this app does. For 'stickers', clears
+   * the current sticker scope's list. */
+  resetLayerToDefault: (kind: LayerKind) => void
 
   // pupil shapes
   /** Appends a new custom pupil shape (already-normalized [-1,1] points — see
@@ -575,6 +721,24 @@ interface StoreState {
   replaceUiAsset: (id: string, dataUrl: string, naturalWidth: number, naturalHeight: number, sourceFormat: string) => void
   setUiWidgetSrc: (id: string, assetId: string | null) => void
 
+  // UI Design Mode — Variable Manager (see UiVariable in types/uiDesign.ts). A variable's live
+  // VALUE while the script sandbox is running lives in runtimeVariableValues below, not here —
+  // this is the persisted declaration (name/type/scope/default/...) only.
+  addUiVariable: (name: string, type: UiVariable['type'], scope: UiVariable['scope']) => string
+  updateUiVariable: (id: string, partial: Partial<Omit<UiVariable, 'id'>>) => void
+  deleteUiVariable: (id: string) => void
+  duplicateUiVariable: (id: string) => string | null
+  /** Live values for every UiVariable while the script sandbox is running — keyed by variable
+   * NAME (what `data.<name>` in script/preview reads), not id, since that's what both the
+   * sandbox's `data` object and Data Binding expressions address them by. Seeded from each
+   * variable's `defaultValue` on Start, reset on Stop — same "runtime-only, never leaks into the
+   * saved design" contract as restoreUiRuntimeSnapshot below. The Variable Manager panel's
+   * "current value" column reads this same state, so editing from script and watching from the
+   * panel always agree. */
+  runtimeVariableValues: Record<string, string | number | boolean>
+  setRuntimeVariableValue: (name: string, value: string | number | boolean) => void
+  resetRuntimeVariableValues: () => void
+
   // UI Design Mode — script runtime support (see lib/uiDesign/scriptLang/). updateUiWidgetProps
   // and setUiActiveScreen are also general-purpose, not just for the script sandbox.
   updateUiWidgetProps: (id: string, partial: Record<string, string | number | boolean>) => void
@@ -823,6 +987,7 @@ export const useStore = create<StoreState>()(
     stickerScope: 'project',
     selectedStickerId: null,
     stickerClipboard: null,
+    layerClipboard: null,
     selectedWidgetId: null,
     uiPreviewDisplayOverride: null,
 
@@ -1003,6 +1168,128 @@ export const useStore = create<StoreState>()(
         })
         s.selectedExpressionId = newId
         s.mode = 'design'
+        s.dirty = true
+      }),
+
+    setLayerVisible: (kind, visible) =>
+      set((s) => {
+        if (kind === 'stickers') {
+          const list = resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
+          if (list) for (const st of list) st.visible = visible
+        } else {
+          const field = LAYER_VISIBLE_FIELD[kind]
+          if (field.obj === 'params') writeEyeTarget(s, s.eyeTarget, 'params', { [field.key]: visible } as Partial<EyeParams>)
+          else writeEyeTarget(s, s.eyeTarget, 'colors', { [field.key]: visible } as Partial<EyeColors>)
+        }
+        s.dirty = true
+      }),
+
+    setLayerLocked: (kind, locked) =>
+      set((s) => {
+        if (kind === 'stickers') {
+          const list = resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
+          if (list) for (const st of list) st.locked = locked
+        } else {
+          const field = LAYER_LOCKED_FIELD[kind]
+          if (field.obj === 'params') writeEyeTarget(s, s.eyeTarget, 'params', { [field.key]: locked } as Partial<EyeParams>)
+          else writeEyeTarget(s, s.eyeTarget, 'colors', { [field.key]: locked } as Partial<EyeColors>)
+        }
+        s.dirty = true
+      }),
+
+    duplicateLayerToOtherEye: (kind) =>
+      set((s) => {
+        if (kind === 'stickers') {
+          const list = resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
+          if (!list) return
+          for (const st of [...list]) list.push({ ...JSON.parse(JSON.stringify(st)), id: nanoid(8) })
+          s.dirty = true
+          return
+        }
+        if (s.eyeTarget === 'both') return // no single source side to copy from
+        const fromSide = s.eyeTarget
+        const toSide = fromSide === 'left' ? 'right' : 'left'
+        const srcParams = fromSide === 'left' ? leftEyeParams(s.project) : rightEyeParams(s.project)
+        const srcColors = fromSide === 'left' ? leftEyeColors(s.project) : rightEyeColors(s.project)
+        const payload = collectLayerPayload(kind, srcParams, srcColors)
+        if (Object.keys(payload.params).length > 0) writeEyeSide(s, toSide, 'params', payload.params)
+        if (Object.keys(payload.colors).length > 0) writeEyeSide(s, toSide, 'colors', payload.colors)
+        s.dirty = true
+      }),
+
+    copyLayerToClipboard: (kind) =>
+      set((s) => {
+        if (kind === 'stickers') {
+          const list = resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
+          s.layerClipboard = list ? { kind, payload: JSON.parse(JSON.stringify(list)) } : null
+          return
+        }
+        const params = effectiveEyeParams(s.project, s.eyeTarget)
+        const colors = effectiveEyeColors(s.project, s.eyeTarget)
+        s.layerClipboard = { kind, payload: collectLayerPayload(kind, params, colors) }
+      }),
+
+    pasteLayerFromClipboard: (kind, target) =>
+      set((s) => {
+        const clip = s.layerClipboard
+        if (!clip || clip.kind !== kind) return
+        if (kind === 'stickers') {
+          const stickers = clip.payload as StickerInstance[]
+          const destList =
+            target === 'base'
+              ? resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
+              : s.project.expressions.find((e) => e.id === target)?.stickers
+          if (!destList) return
+          for (const st of stickers) destList.push({ ...JSON.parse(JSON.stringify(st)), id: nanoid(8) })
+          s.dirty = true
+          return
+        }
+        const payload = clip.payload as LayerClipboardPayload
+        if (target === 'base') {
+          if (Object.keys(payload.params).length > 0) writeEyeTarget(s, s.eyeTarget, 'params', payload.params)
+          if (Object.keys(payload.colors).length > 0) writeEyeTarget(s, s.eyeTarget, 'colors', payload.colors)
+        } else {
+          const expr = s.project.expressions.find((e) => e.id === target)
+          if (!expr) return
+          Object.assign(expr.params, payload.params)
+          Object.assign(expr.colors, payload.colors)
+        }
+        s.dirty = true
+      }),
+
+    applyLayerToAllExpressions: (kind) =>
+      set((s) => {
+        if (kind === 'stickers') {
+          const list = resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
+          if (!list) return
+          const copy = JSON.parse(JSON.stringify(list)) as StickerInstance[]
+          for (const expr of s.project.expressions) {
+            expr.stickers = copy.map((st) => ({ ...JSON.parse(JSON.stringify(st)), id: nanoid(8) }))
+          }
+          s.dirty = true
+          return
+        }
+        const params = effectiveEyeParams(s.project, s.eyeTarget)
+        const colors = effectiveEyeColors(s.project, s.eyeTarget)
+        const payload = collectLayerPayload(kind, params, colors)
+        for (const expr of s.project.expressions) {
+          Object.assign(expr.params, payload.params)
+          Object.assign(expr.colors, payload.colors)
+        }
+        s.dirty = true
+      }),
+
+    resetLayerToDefault: (kind) =>
+      set((s) => {
+        if (kind === 'stickers') {
+          const list = resolveStickerList(s.project, s.stickerScope, s.selectedExpressionId, s.activeAnimationId)
+          if (list) list.length = 0
+          s.dirty = true
+          return
+        }
+        const payload = collectLayerPayload(kind, DEFAULT_EYE_PARAMS, DEFAULT_EYE_COLORS)
+        if (Object.keys(payload.params).length > 0) writeEyeTarget(s, s.eyeTarget, 'params', payload.params)
+        if (Object.keys(payload.colors).length > 0) writeEyeTarget(s, s.eyeTarget, 'colors', payload.colors)
         s.dirty = true
       }),
 
@@ -2875,6 +3162,50 @@ export const useStore = create<StoreState>()(
         const w = s.project.uiDesign.widgets[id]
         if (w) w.src = assetId ?? undefined
         s.dirty = true
+      }),
+
+    addUiVariable: (name, type, scope) => {
+      const id = nanoid(10)
+      const defaultValue: string | number | boolean = type === 'number' ? 0 : type === 'boolean' ? false : type === 'color' ? '#ffffff' : ''
+      set((s) => {
+        s.project.uiDesign.variables.push({ id, name, type, scope, defaultValue })
+        s.dirty = true
+      })
+      return id
+    },
+
+    updateUiVariable: (id, partial) =>
+      set((s) => {
+        const v = s.project.uiDesign.variables.find((v) => v.id === id)
+        if (v) Object.assign(v, partial)
+        s.dirty = true
+      }),
+
+    deleteUiVariable: (id) =>
+      set((s) => {
+        s.project.uiDesign.variables = s.project.uiDesign.variables.filter((v) => v.id !== id)
+        s.dirty = true
+      }),
+
+    duplicateUiVariable: (id) => {
+      const source = useStore.getState().project.uiDesign.variables.find((v) => v.id === id)
+      if (!source) return null
+      const newId = nanoid(10)
+      set((s) => {
+        s.project.uiDesign.variables.push({ ...source, id: newId, name: `${source.name} copy` })
+        s.dirty = true
+      })
+      return newId
+    },
+
+    runtimeVariableValues: {},
+    setRuntimeVariableValue: (name, value) =>
+      set((s) => {
+        s.runtimeVariableValues[name] = value
+      }),
+    resetRuntimeVariableValues: () =>
+      set((s) => {
+        s.runtimeVariableValues = {}
       }),
 
     updateUiWidgetProps: (id, partial) =>

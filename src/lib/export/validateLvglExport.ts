@@ -9,7 +9,9 @@ import {
   widgetCreateFnName
 } from '@/lib/export/lvglExport'
 import type { ExportTarget } from '@/lib/export/exportTarget'
+import { sanitizeFilename, sanitizeIdentifier } from '@/lib/export/naming'
 import { validateScript } from '@/lib/uiDesign/scriptLang/validateScript'
+import { parseVisualBindingRows } from '@/lib/uiDesign/scriptLang/visualBindings'
 
 export type LvglValidationStatus = 'passed' | 'warning' | 'failed'
 
@@ -19,11 +21,18 @@ export interface LvglValidationResult {
   messages: string[]
 }
 
-/** Which export mode to validate for — the two real modes `LvglExportDialog.tsx` offers.
- * `undefined` (used by scriptLang/validateScript.ts's own dry-run context, see
- * buildValidationCodegenContext) validates the whole project the way "Complete Project" mode
- * would, without target-specific checks (no board/display chosen yet). */
-export type LvglExportScope = { mode: 'screen'; screenId: string } | { mode: 'complete'; target: ExportTarget }
+/** Which export mode to validate for — the four modes `LvglExportDialog.tsx` offers.
+ * `'module'`/`'header'` are whole-project, target-independent views of the same generator output
+ * `'complete'` uses (see lvglExport.ts's generateLvglExport/generateModuleExport/
+ * generateHeaderExport) — no board/pins/entry-sketch, so they skip the target-specific checks
+ * ("Required libraries", "Entry point") below. `undefined` (used by scriptLang/validateScript.ts's
+ * own dry-run context, see buildValidationCodegenContext) validates the whole project the way
+ * "Complete Project" mode would, without target-specific checks (no board/display chosen yet). */
+export type LvglExportScope =
+  | { mode: 'screen'; screenId: string }
+  | { mode: 'complete'; target: ExportTarget }
+  | { mode: 'module' }
+  | { mode: 'header' }
 
 // Fields an author could type free text into — scanned by the "Eye Studio code excluded"
 // check below as a cheap, always-on sanity net on top of the real guarantee (lvglExport.ts
@@ -61,7 +70,7 @@ const RESERVED_IDENTIFIERS = new Set([
   'setup', 'loop', 'null', 'true', 'false', 'main'
 ])
 
-/** Validates a UI Design project against the checklist Kibo Eye Studio's LVGL export dialogs
+/** Validates a UI Design project against the checklist the LVGL export dialogs
  * show before download — one result per category (matching the requested summary format), not
  * per-widget, since these are project-wide structural checks rather than per-item ones (contrast
  * with validateStickers.ts/validatePupilShapes.ts, which report one row per sticker/shape because
@@ -222,9 +231,24 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
     }
     if (badIdentifiers.size > 0) {
       status = 'failed'
-      messages.push(`${badIdentifiers.size} name(s) sanitize to a reserved C++/Arduino word and would produce invalid generated code: ${[...badIdentifiers].join(', ')} — rename in Kibo Eye Studio.`)
-    } else {
-      messages.push('Every screen/widget name generates a valid C++ identifier.')
+      messages.push(`${badIdentifiers.size} name(s) sanitize to a reserved C++/Arduino word and would produce invalid generated code: ${[...badIdentifiers].join(', ')} — rename these widgets' ids.`)
+    }
+    // Duplicate widget ids (tagId) — the widget registry (s_widgetIds/s_widgetObjs, see
+    // lvglExport.ts's Register()) is a flat id -> lv_obj_t* lookup, so two widgets sharing an id
+    // means UI.setText()/UI.setValue()/UI.findWidget() can only ever reach whichever one
+    // registered first — a real, silent runtime bug, not just a naming nicety.
+    const idCounts = new Map<string, number>()
+    for (const w of widgets) {
+      if (!w.tagId) continue
+      idCounts.set(w.tagId, (idCounts.get(w.tagId) ?? 0) + 1)
+    }
+    const duplicateIds = [...idCounts.entries()].filter(([, count]) => count > 1).map(([id]) => id)
+    if (duplicateIds.length > 0) {
+      status = 'failed'
+      messages.push(`${duplicateIds.length} widget id(s) are used by more than one widget: ${duplicateIds.join(', ')} — UI.setText()/setValue()/findWidget() can only ever reach one of them. Rename these widgets' ids.`)
+    }
+    if (badIdentifiers.size === 0 && duplicateIds.length === 0) {
+      messages.push('Every screen/widget name generates a valid, unique C++ identifier.')
     }
     results.push({ category: 'C++ identifiers', status, messages })
   }
@@ -250,16 +274,17 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
     const collisions = [...fnNames.entries()].filter(([, labels]) => labels.length > 1)
     if (collisions.length > 0) {
       status = 'failed'
-      messages.push(`${collisions.length} generated function name(s) collide: ${collisions.map(([fn, labels]) => `${fn} (${labels.join(', ')})`).join('; ')} — rename one of each pair in Kibo Eye Studio.`)
+      messages.push(`${collisions.length} generated function name(s) collide: ${collisions.map(([fn, labels]) => `${fn} (${labels.join(', ')})`).join('; ')} — rename one of each pair.`)
     } else {
       messages.push('No generated function names collide.')
     }
     results.push({ category: 'Function name collisions', status, messages })
   }
 
-  if (scope?.mode === 'screen') {
+  if (scope?.mode === 'screen' || scope?.mode === 'module' || scope?.mode === 'header') {
     // ---- Initialization isolation ----
-    // "UI Screen Only" mode's generator (generateUiScreenExport) never calls lv_init/
+    // Neither "UI Screen Only" (generateUiScreenExport) nor "Module"/"Header" mode's file
+    // selection (ui.h/ui.cpp/assets only — no entry sketch, no config.h) ever calls lv_init/
     // lv_display_create/SPI.begin/Wire.begin anywhere in its code path — asserted here by
     // construction (verified by this file's own design, not by re-generating and scanning the
     // output text, which would need the same async RGB565 asset decode the real export does) —
@@ -267,7 +292,7 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
     results.push({
       category: 'Initialization isolation',
       status: 'passed',
-      messages: ['This export mode never emits LVGL/display/SPI/board initialization code — verified by the exporter\'s design (generateUiScreenExport never calls those APIs), not by scanning generated output.']
+      messages: ['This export mode never emits LVGL/display/SPI/board initialization code — safe to drop into a project that already calls lv_init() and has a display registered.']
     })
   }
 
@@ -313,18 +338,89 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
     })
   }
 
-  // ---- Entry point ----
-  if (scope?.mode !== 'screen') {
+  // ---- Project name ----
+  // Empty/whitespace-only falls back to naming.ts's DEFAULT_IDENTIFIER/DEFAULT_FILENAME
+  // ('MyUiProject'/'My-Ui-Project') everywhere a name would otherwise appear (namespace, zip/
+  // folder/entry-sketch filenames) — not a compile-breaking problem, but confusing enough
+  // ("why is my export called My-Ui-Project?") to flag explicitly rather than silently fall
+  // back, per the "show the final generated names before export" requirement.
+  {
+    const trimmed = project.name.trim()
+    const ns = sanitizeIdentifier(project.name)
+    const filename = sanitizeFilename(project.name)
+    results.push({
+      category: 'Project name',
+      status: trimmed ? 'passed' : 'warning',
+      messages: trimmed
+        ? [`"${project.name}" → namespace \`${ns}\`, filenames use \`${filename}\`.`]
+        : [`No project name set — this export will fall back to \`${ns}\`/\`${filename}\`. Set a name in the Export dialog or Project Name field for a recognizable namespace/filename.`]
+    })
+  }
+
+  // ---- Entry point ---- (module/header modes have no entry sketch — see "Initialization
+  // isolation" above — so this check is meaningless for them and is skipped, same as screen mode)
+  if (scope?.mode !== 'screen' && scope?.mode !== 'module' && scope?.mode !== 'header') {
     const messages: string[] = []
     let status: LvglValidationStatus = 'passed'
     if (uiDesign.screens.length === 0) {
       status = 'failed'
       messages.push('No screens exist — the generated entry point would have nothing to show.')
     } else {
-      const entryFile = scope?.mode === 'complete' ? (scope.target.format === 'arduino' ? 'KiboExport.ino' : 'main.cpp') : 'Example.ino'
-      messages.push(`${entryFile} will call KiboUI::${screenShowFnName(uiDesign.screens[0].name)}() to show "${uiDesign.screens[0].name}".`)
+      const entryFile = scope?.mode === 'complete' ? (scope.target.format === 'arduino' ? `${sanitizeFilename(project.name)}.ino` : 'main.cpp') : 'the standalone screen file'
+      const showFnName = screenShowFnName(uiDesign.screens[0].name)
+      const showMethod = showFnName.charAt(0).toLowerCase() + showFnName.slice(1)
+      messages.push(`${entryFile} will call UI.${showMethod}() to show "${uiDesign.screens[0].name}".`)
     }
     results.push({ category: 'Entry point', status, messages })
+  }
+
+  // ---- Variable Manager ---- (skipped for "UI Screen Only" — variables aren't included in that
+  // export at all, see the "Event callbacks"/"Logic tab script" notes)
+  if (scope?.mode !== 'screen') {
+    const messages: string[] = []
+    let status: LvglValidationStatus = 'passed'
+    const nameCounts = new Map<string, number>()
+    for (const v of uiDesign.variables) {
+      const name = v.name.trim()
+      if (name) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1)
+    }
+    const duplicateNames = [...nameCounts.entries()].filter(([, count]) => count > 1).map(([name]) => name)
+    const unnamed = uiDesign.variables.filter((v) => !v.name.trim())
+    if (duplicateNames.length > 0) {
+      status = 'failed'
+      // Two variables named "Temperature" both generate the identical g_var_Temperature static
+      // and Get/SetTemperature() functions — a real "redefinition" compile error, not just a
+      // display-name nicety.
+      messages.push(`${duplicateNames.length} variable name(s) are used more than once: ${duplicateNames.join(', ')} — each would generate the same C++ static/getter/setter. Rename one of each pair.`)
+    }
+    if (unnamed.length > 0) {
+      status = 'failed'
+      messages.push(`${unnamed.length} variable(s) have no name — every Variable Manager entry needs one to generate a valid getter/setter.`)
+    }
+    if (duplicateNames.length === 0 && unnamed.length === 0) {
+      messages.push(uiDesign.variables.length > 0 ? `${uiDesign.variables.length} variable(s), all uniquely named.` : 'No variables defined yet.')
+    }
+    results.push({ category: 'Variable Manager', status, messages })
+  }
+
+  // ---- Data bindings ---- (skipped for "UI Screen Only" for the same reason as above)
+  if (scope?.mode !== 'screen') {
+    const messages: string[] = []
+    let status: LvglValidationStatus = 'passed'
+    const variableNames = new Set(uiDesign.variables.map((v) => v.name))
+    const bindingRows = parseVisualBindingRows(uiDesign.script, uiDesign.widgets)
+    const dangling = bindingRows.filter((r) => !variableNames.has(r.variableName))
+    if (dangling.length > 0) {
+      status = 'failed'
+      const labels = dangling.map((r) => `"${r.targetRefName}.${r.property === 'text' ? 'bindText' : r.property === 'value' ? 'bindValue' : 'bindVisible'}(data.${r.variableName})"`)
+      messages.push(`${dangling.length} binding(s) reference a variable that no longer exists in the Variable Manager: ${labels.join(', ')}.`)
+    }
+    if (bindingRows.length > 0) {
+      messages.push(`${bindingRows.length - dangling.length}/${bindingRows.length} binding(s) resolve to a real Variable Manager entry.`)
+    } else {
+      messages.push('No data bindings authored yet.')
+    }
+    results.push({ category: 'Data bindings', status, messages })
   }
 
   // ---- Logic tab script ----

@@ -15,20 +15,36 @@ import { walkAllNodes } from './astWalk'
 export interface CodegenContext {
   widgets: Record<string, UiWidget>
   varNameForWidget: (widget: UiWidget) => string
-  /** kibo_img_* ident lookup by asset NAME (scripts reference assets by name, same as HTML
+  /** img_* ident lookup by asset NAME (scripts reference assets by name, same as HTML
    * `src="..."` — see htmlSync.ts) — undefined if no asset with that name is included. */
   identForAssetName: (assetName: string) => string | undefined
+  /** The project-derived C++ namespace (see naming.ts's sanitizeIdentifier) the generated
+   * `ui.h`/`ui.cpp` wrap the public API in — used to qualify `ui.showScreen(...)`/`ui.goBack()`
+   * calls (`${namespaceName}::ShowXScreen()`/`${namespaceName}::GoBack()`), the only two script
+   * APIs whose codegen needs to call back into that namespace from inside a nested expression. */
+  namespaceName: string
   /** style_sel_<ident> lookup for a `.class` selector's CSS rule — used by addClass/removeClass
    * codegen; undefined if no CSS rule for that class is actually exported (see lvglExport.ts's
    * usedCssRules — a class with no rule is a no-op at runtime, same as in the browser preview). */
   identForClassSelector: (className: string) => string | undefined
   screenFnNameByName: (screenName: string) => string | undefined
+  /** Resolves a Variable Manager entry (`data.<name>` in script) to its generated C++ getter/
+   * setter function names and value type — undefined if no UiVariable has that name (see
+   * types/uiDesign.ts's UiVariable and lvglExport.ts's per-variable static-var/getter/setter
+   * codegen, the same "generated from the structured list" pattern top-level let/const already
+   * uses one level up). */
+  identForVariableName: (name: string) => { getter: string; setter: string; type: ExprType } | undefined
 }
 
 export interface CodegenEventHandler {
   widgetId: string
   trigger: string
   bodyLines: string[]
+  /** User-chosen C++ handler function name, from an optional 3rd string-literal argument to
+   * `.on(trigger, callback, "name")` — see visualEvents.ts's VisualEventRow.handlerName, the
+   * Properties panel's Events section field this comes from. undefined falls back to
+   * lvglExport.ts's usual auto-derived `<widget>_on_<trigger>` name. */
+  customName?: string
 }
 
 export interface CodegenTimer {
@@ -50,7 +66,7 @@ export interface CodegenResult {
   errors: ScriptError[]
 }
 
-type ExprType = 'number' | 'boolean' | 'cstr' | 'String' | 'unknown'
+export type ExprType = 'number' | 'boolean' | 'cstr' | 'String' | 'unknown'
 interface RenderedExpr {
   text: string
   type: ExprType
@@ -64,6 +80,29 @@ function cIdent(name: string): string {
 
 function escapeCString(s: string): string {
   return JSON.stringify(s)
+}
+
+/** `callFunction`'s name argument is a plain literal string (not a rendered C++ expression) —
+ * this turns it into a safe C identifier, falling back to a generic name for anything that
+ * doesn't sanitize to a valid one (matches this codebase's other naming-fallback helpers). */
+function sanitizeFunctionName(name: string): string {
+  const cleaned = name.replace(/[^a-zA-Z0-9_]/g, '')
+  return /^[a-zA-Z_]/.test(cleaned) && cleaned.length > 0 ? cleaned : 'customFunction'
+}
+
+/** Best-effort C++ parameter type for one of `callFunction`'s extra (post-name) arguments —
+ * these are almost always literals authored through the visual Action editor, so a direct
+ * literal-type check covers the common case; anything else (a variable/expression a power user
+ * wrote by hand) falls back to `float`, a safe default for a stub the user fills in themselves
+ * anyway. */
+function inferCppParamType(node: Node | undefined): string {
+  if (node?.type === 'Literal') {
+    const v = (node as unknown as { value: unknown }).value
+    if (typeof v === 'boolean') return 'bool'
+    if (typeof v === 'string') return 'const char*'
+    if (typeof v === 'number') return 'float'
+  }
+  return 'float'
 }
 
 function colorLiteral(css: string): string | null {
@@ -81,6 +120,17 @@ interface BindingEntry {
   varName: string
   method: 'bindText' | 'bindValue' | 'bindVisible'
   argNode: Node
+  /** The optional 2nd `{min, max, format, unit, fallback}` argument literal object — see
+   * A5's PropertiesPanel BindingsSection / visualBindings.ts. `fallback` is intentionally not
+   * read at codegen time (see parseBindingOptions' own comment) — min/max/format/unit only. */
+  optionsNode?: Node
+}
+
+interface BindingOptions {
+  min?: number
+  max?: number
+  format?: string
+  unit?: string
 }
 
 class Emitter {
@@ -92,6 +142,13 @@ class Emitter {
   timers: CodegenTimer[] = []
   initStatements: string[] = []
   hardwareStubs: string[] = []
+  /** Every top-level `function name(...) {...}` already declared in the script — a `callFunction`
+   * action naming one of these calls it directly instead of generating a redundant stub (see
+   * generateScriptCpp's pre-scan, which populates this before any statement is rendered) — and
+   * every OTHER name a `callFunction` action calls gets exactly one generated stub (this set also
+   * tracks those, so calling the same custom-function name from several actions/events only ever
+   * emits its stub once). */
+  declaredFunctionNames = new Set<string>()
   private bindings: BindingEntry[] = []
   private symbolTable = new Map<string, UiWidget>()
   private varTypes = new Map<string, ExprType>()
@@ -165,6 +222,52 @@ class Emitter {
     return r.type === 'String' ? r.text : `String(${r.text})`
   }
 
+  /** Reads a binding's optional `{min, max, format, unit, fallback}` object literal — only
+   * literal `min`/`max` numbers and `format`/`unit` strings are recognized (matches every other
+   * "must be a literal for export" rule in this file, and is always true of options authored via
+   * the BindingsSection UI). `fallback` is deliberately not read here: in C++ a Variable Manager
+   * value is always initialized to its declared default (see lvglExport.ts's per-variable static
+   * var), so there's no "undefined" state to fall back from at export time the way preview's
+   * JS `data` proxy can hit before a first write — fallback is a preview-only convenience,
+   * documented as such in the BindingsSection UI. */
+  private parseBindingOptions(node: Node | undefined): BindingOptions {
+    if (!node || node.type !== 'ObjectExpression') return {}
+    const props = node as unknown as { properties: { key: { name?: string; value?: unknown }; value: Node }[] }
+    const out: BindingOptions = {}
+    for (const p of props.properties) {
+      const key = p.key.name ?? String(p.key.value)
+      const litVal = p.value.type === 'Literal' ? (p.value as unknown as { value: unknown }).value : undefined
+      if (key === 'min' && typeof litVal === 'number') out.min = litVal
+      else if (key === 'max' && typeof litVal === 'number') out.max = litVal
+      else if (key === 'format' && typeof litVal === 'string') out.format = litVal
+      else if (key === 'unit' && typeof litVal === 'string') out.unit = litVal
+    }
+    return out
+  }
+
+  /** `bindValue`'s numeric value, min/max-clamped when the options object specifies either. */
+  private renderBindValueExpr(value: RenderedExpr, opts: BindingOptions): string {
+    let expr = value.text
+    if (typeof opts.min === 'number') expr = `((${expr}) < ${opts.min}f ? ${opts.min}f : (${expr}))`
+    if (typeof opts.max === 'number') expr = `((${expr}) > ${opts.max}f ? ${opts.max}f : (${expr}))`
+    return expr
+  }
+
+  /** `bindText`'s displayed string — `format` (containing a literal `{value}` placeholder, known
+   * entirely at export/codegen time since it's a literal) splits into a static prefix/suffix
+   * concatenated around the live value; otherwise a plain `unit` suffix is appended when given. */
+  private renderBindTextExpr(value: RenderedExpr, opts: BindingOptions): string {
+    const valueText = this.asStringable(value)
+    if (opts.format && opts.format.includes('{value}')) {
+      const idx = opts.format.indexOf('{value}')
+      const prefix = opts.format.slice(0, idx)
+      const suffix = opts.format.slice(idx + '{value}'.length)
+      return `(String(${escapeCString(prefix)}) + (${valueText}) + String(${escapeCString(suffix)}))`
+    }
+    if (opts.unit) return `((${valueText}) + String(${escapeCString(opts.unit)}))`
+    return valueText
+  }
+
   private renderExpr(node: Node): RenderedExpr {
     switch (node.type) {
       case 'Literal': {
@@ -221,6 +324,23 @@ class Emitter {
       }
       case 'CallExpression':
         return this.renderCallExpr(node)
+      case 'MemberExpression': {
+        // Only `data.<name>` (a Variable Manager entry read) is a supported bare member
+        // expression — everything else (widget refs) only ever appears as the object of a
+        // CallExpression, handled by renderCallExpr, not here.
+        const m = node as unknown as { object: Node; property: Node; computed: boolean }
+        if (!m.computed && m.object.type === 'Identifier' && (m.object as unknown as { name: string }).name === 'data' && m.property.type === 'Identifier') {
+          const varName = (m.property as unknown as { name: string }).name
+          const info = this.ctx.identForVariableName(varName)
+          if (!info) {
+            this.err(node, `data.${varName} isn't declared in the Variable Manager.`, 'Add it there first (Variables tab), or check the spelling.')
+            return { text: '0', type: 'unknown' }
+          }
+          return { text: `${info.getter}()`, type: info.type }
+        }
+        this.err(node, 'Only data.<variable> is supported as a plain expression — everything else must be a widget reference used as target.method(...).')
+        return { text: '0', type: 'unknown' }
+      }
       case 'ArrayExpression':
         this.err(node, 'Arrays are not supported in exported code.', 'Use ui.getAll() results only for counting, not export — export one widget reference at a time.')
         return { text: '0', type: 'unknown' }
@@ -282,10 +402,10 @@ class Emitter {
           this.err(node, `ui.showScreen("${name}"): no screen named "${name}" exists.`)
           return { text: '', type: 'unknown' }
         }
-        return { text: `KiboUI::${fn}()`, type: 'unknown' }
+        return { text: `${this.ctx.namespaceName}::${fn}()`, type: 'unknown' }
       }
       case 'goBack':
-        return { text: 'KiboUI::GoBack()', type: 'unknown' }
+        return { text: `${this.ctx.namespaceName}::GoBack()`, type: 'unknown' }
       case 'setInterval':
       case 'setTimeout':
       case 'clearInterval':
@@ -337,8 +457,53 @@ class Emitter {
       const call = method === 'addClass' ? `lv_obj_add_style(${varName}, &${ident}, LV_PART_MAIN | LV_STATE_DEFAULT);` : `lv_obj_remove_style(${varName}, &${ident}, LV_PART_MAIN | LV_STATE_DEFAULT);`
       return { text: call, type: 'unknown' }
     }
+    if (method === 'updateVariable') {
+      const nameNode = argNodes[0]
+      if (!nameNode || nameNode.type !== 'Literal' || typeof (nameNode as unknown as { value: unknown }).value !== 'string') {
+        this.err(node, 'updateVariable(name, value) requires a literal variable name for export.')
+        return { text: '', type: 'unknown' }
+      }
+      const varName = (nameNode as unknown as { value: string }).value
+      const info = this.ctx.identForVariableName(varName)
+      if (!info) {
+        this.err(node, `updateVariable("${varName}", ...): no variable named "${varName}" in the Variable Manager.`, 'Add it there first (Variables tab), or check the spelling.')
+        return { text: '', type: 'unknown' }
+      }
+      const valueNode = argNodes[1]
+      const value = valueNode ? this.renderExpr(valueNode).text : '0'
+      return { text: `${info.setter}(${value});`, type: 'unknown' }
+    }
+    if (method === 'callFunction') {
+      const nameNode = argNodes[0]
+      if (!nameNode || nameNode.type !== 'Literal' || typeof (nameNode as unknown as { value: unknown }).value !== 'string') {
+        this.err(node, 'callFunction(name, ...) requires a literal function name for export.')
+        return { text: '', type: 'unknown' }
+      }
+      const rawName = (nameNode as unknown as { value: string }).value
+      const fnName = sanitizeFunctionName(rawName)
+      const restNodes = argNodes.slice(1)
+      const restArgs = restNodes.map((a) => this.renderExpr(a).text)
+      if (!this.declaredFunctionNames.has(fnName)) {
+        this.declaredFunctionNames.add(fnName)
+        const params = restNodes.map((a, i) => `${inferCppParamType(a)} arg${i}`).join(', ')
+        this.hardwareStubs.push(
+          [
+            `// Called via a "Call custom function" / hardware action wired up in the Logic tab or`,
+            `// Properties panel's Events section — fill in what this should actually do (e.g.`,
+            `// digitalWrite, a servo/motor call, Serial.print, an HTTP/MQTT/BLE send).`,
+            `void ${fnName}(${params}) {`,
+            `  // USER CODE BEGIN ${fnName}`,
+            `  // TODO: implement ${fnName}`,
+            `  // USER CODE END ${fnName}`,
+            `}`
+          ].join('\n')
+        )
+      }
+      return { text: `${fnName}(${restArgs.join(', ')});`, type: 'unknown' }
+    }
     if (method === 'bindText' || method === 'bindValue' || method === 'bindVisible') {
-      this.bindings.push({ receiverText: varName, varName, method, argNode: argNodes[0] })
+      const optionsNode = argNodes[1] && argNodes[1].type === 'ObjectExpression' ? argNodes[1] : undefined
+      this.bindings.push({ receiverText: varName, varName, method, argNode: argNodes[0], optionsNode })
       return { text: '', type: 'unknown' }
     }
     if (method === 'animate') {
@@ -518,6 +683,27 @@ class Emitter {
       if (a.operator === '=' && a.left.type === 'Identifier' && a.right.type === 'CallExpression' && this.tryRenderTimerCall(a.right, (a.left as unknown as { name: string }).name, out)) {
         return
       }
+      // `data.<name> = value` writes through the Variable Manager entry's generated setter —
+      // renderExpr's own MemberExpression case only ever produces a getter CALL (an rvalue), so
+      // assignment needs this dedicated branch rather than falling through to the generic
+      // `left op right;` rendering below (which would emit the invalid `Getter() = value;`).
+      if (a.left.type === 'MemberExpression') {
+        const m = a.left as unknown as { object: Node; property: Node; computed: boolean }
+        if (!m.computed && m.object.type === 'Identifier' && (m.object as unknown as { name: string }).name === 'data' && m.property.type === 'Identifier') {
+          const varName = (m.property as unknown as { name: string }).name
+          const info = this.ctx.identForVariableName(varName)
+          if (!info) {
+            this.err(expr, `data.${varName} isn't declared in the Variable Manager.`, 'Add it there first (Variables tab), or check the spelling.')
+            return
+          }
+          if (a.operator !== '=') {
+            this.err(expr, `data.${varName} ${a.operator} ... — only plain assignment (=) is supported for variables, not compound operators.`)
+            return
+          }
+          out.push(`${info.setter}(${this.renderExpr(a.right).text});`)
+          return
+        }
+      }
       out.push(`${this.renderExpr(a.left).text} ${a.operator} ${this.renderExpr(a.right).text};`)
       return
     }
@@ -655,8 +841,9 @@ class Emitter {
       const lines: string[] = []
       for (const b of this.bindings) {
         const value = this.renderExpr(b.argNode)
-        if (b.method === 'bindText') lines.push(`lv_label_set_text(${b.varName}, (${this.asStringable(value)}).c_str());`)
-        else if (b.method === 'bindValue') lines.push(`lv_bar_set_value(${b.varName}, (int32_t)(${value.text}), LV_ANIM_OFF);`)
+        const opts = this.parseBindingOptions(b.optionsNode)
+        if (b.method === 'bindText') lines.push(`lv_label_set_text(${b.varName}, (${this.renderBindTextExpr(value, opts)}).c_str());`)
+        else if (b.method === 'bindValue') lines.push(`lv_bar_set_value(${b.varName}, (int32_t)(${this.renderBindValueExpr(value, opts)}), LV_ANIM_OFF);`)
         else lines.push(`if (${this.asBoolCondition(b.argNode)}) { lv_obj_remove_flag(${b.varName}, LV_OBJ_FLAG_HIDDEN); } else { lv_obj_add_flag(${b.varName}, LV_OBJ_FLAG_HIDDEN); }`)
       }
       this.updateBindingsFnLines = lines
@@ -742,6 +929,7 @@ class Emitter {
     if (!widget) return false
     const eventNode = call.arguments[0]
     const cbNode = call.arguments[1]
+    const nameNode = call.arguments[2]
     if (!eventNode || eventNode.type !== 'Literal' || typeof (eventNode as unknown as { value: unknown }).value !== 'string') {
       this.err(expr, 'widget.on(event, callback) requires a literal event name for export.')
       return true
@@ -751,16 +939,17 @@ class Emitter {
       return true
     }
     const trigger = (eventNode as unknown as { value: string }).value
+    const customName = nameNode && nameNode.type === 'Literal' && typeof (nameNode as unknown as { value: unknown }).value === 'string' ? (nameNode as unknown as { value: string }).value : undefined
     const body: string[] = []
     const fn = cbNode as unknown as { body: Node }
     if (fn.body.type === 'BlockStatement') this.renderStatement(fn.body, body)
     else this.renderExpressionStatement(fn.body, body)
-    this.eventHandlers.push({ widgetId: widget.id, trigger, bodyLines: body })
+    this.eventHandlers.push({ widgetId: widget.id, trigger, bodyLines: body, customName })
     return true
   }
 }
 
-function cppTypeFor(type: ExprType): string {
+export function cppTypeFor(type: ExprType): string {
   if (type === 'number') return 'float'
   if (type === 'boolean') return 'bool'
   if (type === 'cstr' || type === 'String') return 'String'
@@ -769,6 +958,16 @@ function cppTypeFor(type: ExprType): string {
 
 export function generateScriptCpp(program: Program, source: string, ctx: CodegenContext): CodegenResult {
   const emitter = new Emitter(ctx, source)
+
+  // Every top-level `function name(...) {...}` the script already declares — scanned up front so
+  // a callFunction("name", ...) action calling one of these gets a direct call instead of a
+  // redundant generated stub (see Emitter.declaredFunctionNames' own comment).
+  for (const stmt of program.body) {
+    if (stmt.type !== 'FunctionDeclaration') continue
+    const f = stmt as unknown as { id: { name?: string } | null }
+    if (f.id?.name) emitter.declaredFunctionNames.add(f.id.name)
+  }
+
   // hardware.onX(...) registrations — scanned up front (order-independent, unlike widget events)
   // so a hardware call nested anywhere still produces a stub; only literal-first-argument names
   // get a named stub, everything else falls back to a generic indexed name.
@@ -788,10 +987,12 @@ export function generateScriptCpp(program: Program, source: string, ctx: Codegen
     const stubName = `on_${method.replace(/^on/, '').toLowerCase()}${firstArgLiteral ? `_${firstArgLiteral.replace(/[^a-zA-Z0-9]+/g, '_')}` : `_${hwCounter}`}`
     emitter.hardwareStubs.push(
       [
-        `// hardware.${method}(${firstArgLiteral ? `"${firstArgLiteral}", ` : ''}...) — Kibo Eye Studio doesn't know your board's GPIO/sensor/radio setup.`,
+        `// hardware.${method}(${firstArgLiteral ? `"${firstArgLiteral}", ` : ''}...) — this exporter doesn't know your board's GPIO/sensor/radio setup.`,
         `// Call this function from your own hardware-polling code (e.g. in loop(), or from an interrupt/event callback).`,
         `static void ${stubName}(${method === 'onEncoderRotate' ? 'int direction' : method === 'onSensorChange' ? 'float value' : 'void'}) {`,
+        `  // USER CODE BEGIN ${stubName}`,
         `  // TODO: handle the "${method}"${firstArgLiteral ? ` ("${firstArgLiteral}")` : ''} hardware event here.`,
+        `  // USER CODE END ${stubName}`,
         `}`
       ].join('\n')
     )

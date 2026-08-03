@@ -41,6 +41,38 @@ interface SandboxCallbacks {
 
 const BINDING_METHODS = new Set(['bindText', 'bindValue', 'bindVisible'])
 
+/** `bindText`/`bindValue`'s optional 2nd argument — see PropertiesPanel.tsx's BindingsSection /
+ * visualBindings.ts and codegen.ts's own BindingOptions (kept as two independent small types,
+ * one per side, rather than a shared import, matching this pair's existing "preview reruns real
+ * JS, export walks a separate AST" independence elsewhere in this feature). */
+export interface BindingOptions {
+  min?: number
+  max?: number
+  format?: string
+  unit?: string
+  fallback?: string | number | boolean
+}
+
+/** `bindText`'s displayed string: `format`'s `{value}` placeholder substituted in, else a plain
+ * `unit` suffix, else the raw value — the fallback (used when `value` is nullish/NaN) is a
+ * preview-only convenience (see codegen.ts's parseBindingOptions doc comment for why export
+ * doesn't need one). */
+function applyBindingFormat(value: unknown, options?: BindingOptions): string {
+  let v = value
+  const isEmpty = v === undefined || v === null || (typeof v === 'number' && Number.isNaN(v))
+  if (isEmpty && options?.fallback !== undefined) v = options.fallback
+  if (typeof v === 'number') {
+    let n = v
+    if (typeof options?.min === 'number') n = Math.max(options.min, n)
+    if (typeof options?.max === 'number') n = Math.min(options.max, n)
+    v = n
+  }
+  const text = String(v ?? '')
+  if (options?.format?.includes('{value}')) return options.format.replace('{value}', text)
+  if (options?.unit) return `${text}${options.unit}`
+  return text
+}
+
 const EASINGS: Record<string, (t: number) => number> = {
   linear: (t) => t,
   easeOut: (t) => 1 - (1 - t) * (1 - t),
@@ -90,6 +122,14 @@ class ScriptSandbox {
     const edits: TextEdit[] = []
     const topLevelNames: string[] = []
     for (const stmt of parsed.program.body) {
+      if (stmt.type === 'FunctionDeclaration') {
+        // Also exposed via __vars (same getter epilogue below) — not to show a function in the
+        // Variable Inspector meaningfully, but so ctx.callFunction("name", ...) can look up and
+        // call an already-declared top-level function by name (see PreviewActionCtx.callFunction).
+        const f = stmt as unknown as { id: { name?: string } | null }
+        if (f.id?.name) topLevelNames.push(f.id.name)
+        continue
+      }
       if (stmt.type !== 'VariableDeclaration') continue
       const decl = stmt as unknown as { kind: string; start: number; declarations: { id: { type: string; name?: string } }[] }
       if (decl.kind === 'var') continue
@@ -104,7 +144,7 @@ class ScriptSandbox {
     // script so its argument expression can be re-evaluated (not just its once-off value) every
     // time __bindingsHolder.update() runs — see the epilogue below and dispatchWidgetEvent/timer
     // callbacks, which both call it after every tick.
-    const bindingCalls: { receiverText: string; method: string; argText: string }[] = []
+    const bindingCalls: { receiverText: string; method: string; argText: string; optionsText: string | null }[] = []
     walkAllNodes(parsed.program, (node) => {
       if (node.type !== 'CallExpression') return
       const call = node as unknown as { callee: { type: string }; arguments: { start: number; end: number }[] }
@@ -116,7 +156,8 @@ class ScriptSandbox {
       bindingCalls.push({
         receiverText: source.slice(member.object.start, member.object.end),
         method: member.property.name,
-        argText: source.slice(call.arguments[0].start, call.arguments[0].end)
+        argText: source.slice(call.arguments[0].start, call.arguments[0].end),
+        optionsText: call.arguments[1] ? source.slice(call.arguments[1].start, call.arguments[1].end) : null
       })
     })
 
@@ -128,8 +169,9 @@ class ScriptSandbox {
     }
     epilogue.push('__bindingsHolder.update = function() {')
     for (const b of bindingCalls) {
+      const optionsArg = b.optionsText ? `, (${b.optionsText})` : ''
       epilogue.push(
-        `  try { if (typeof ${b.receiverText} !== 'undefined' && ${b.receiverText} && ${b.receiverText}.__applyBinding) { ${b.receiverText}.__applyBinding(${JSON.stringify(b.method)}, (${b.argText})); } } catch (e) {}`
+        `  try { if (typeof ${b.receiverText} !== 'undefined' && ${b.receiverText} && ${b.receiverText}.__applyBinding) { ${b.receiverText}.__applyBinding(${JSON.stringify(b.method)}, (${b.argText})${optionsArg}); } } catch (e) {}`
       )
     }
     epilogue.push('};')
@@ -145,7 +187,27 @@ class ScriptSandbox {
       setSrc: (id, assetId) => useStore.getState().setUiWidgetSrc(id, assetId),
       deleteWidget: (id) => useStore.getState().deleteUiWidget(id),
       updateMeta: (id, partial) => useStore.getState().updateUiWidgetMeta(id, partial),
-      tween: (from, to, duration, onFrame, onDone) => this.runTween(from, to, duration, onFrame, onDone)
+      tween: (from, to, duration, onFrame, onDone) => this.runTween(from, to, duration, onFrame, onDone),
+      animate: (id, config) => {
+        const w = useStore.getState().project.uiDesign.widgets[id]
+        if (w) this.animateWidget(ctx, w, config)
+      },
+      callFunction: (name, args) => {
+        const fn = this.varsProxy[name]
+        if (typeof fn === 'function') {
+          try {
+            ;(fn as (...a: unknown[]) => void)(...args)
+          } catch (err) {
+            this.logError(err)
+          }
+        } else {
+          this.log('warn', `callFunction("${name}"): no function named "${name}" is declared in the script — export will still generate a stub for it.`)
+        }
+      },
+      updateVariable: (name, value) => {
+        useStore.getState().setRuntimeVariableValue(name, value as string | number | boolean)
+        this.afterTick()
+      }
     }
 
     this.varsProxy = {}
@@ -153,14 +215,15 @@ class ScriptSandbox {
     const uiSandbox = this.buildUiSandbox(ctx)
     const hardwareSandbox = this.buildHardwareSandbox()
     const consoleSandbox = this.buildConsoleSandbox()
+    const dataSandbox = this.buildDataSandbox()
 
     this.running = true
     this.cb.onRunningChange(true)
 
     try {
       // eslint-disable-next-line no-new-func
-      const fn = new Function('ui', 'hardware', 'console', '__vars', '__bindingsHolder', fullSource)
-      fn(uiSandbox, hardwareSandbox, consoleSandbox, this.varsProxy, this.bindingsHolder)
+      const fn = new Function('ui', 'hardware', 'console', 'data', '__vars', '__bindingsHolder', fullSource)
+      fn(uiSandbox, hardwareSandbox, consoleSandbox, dataSandbox, this.varsProxy, this.bindingsHolder)
     } catch (err) {
       this.logError(err)
       this.running = false
@@ -192,6 +255,7 @@ class ScriptSandbox {
       useStore.getState().restoreUiRuntimeSnapshot(this.snapshot.widgets, this.snapshot.activeScreenId)
       this.snapshot = null
     }
+    useStore.getState().resetRuntimeVariableValues()
     this.cb.onRunningChange(false)
     this.cb.onVariablesChange({})
     this.cb.onSimulateTargetsChange({ buttons: [], hasEncoder: false, sensors: [] })
@@ -208,6 +272,7 @@ class ScriptSandbox {
     if (!handlers || handlers.length === 0) return
     const w = useStore.getState().project.uiDesign.widgets[widgetId]
     this.log('event', `${event} on ${w?.tagId ?? widgetId}`)
+    notifyAffectedWidget(widgetId)
     for (const h of handlers) {
       try {
         h(...args)
@@ -311,7 +376,15 @@ class ScriptSandbox {
     const proxy: Record<string, unknown> = {}
     for (const [name, spec] of Object.entries(ACTION_TABLE)) {
       if (spec.appliesTo !== 'any' && !spec.appliesTo.includes(widget.type)) continue
-      proxy[name] = (...args: unknown[]) => spec.preview(ctx, widget.id, args)
+      // Only 'mutate' actions flag this widget as "affected" for the canvas highlight (A6) —
+      // 'read' actions (e.g. getValue) don't change anything, so highlighting on read would be
+      // misleading. bindText/bindValue/bindVisible are deliberately excluded too (see below):
+      // they re-run every tick via __bindingsHolder.update(), which would make the highlight a
+      // near-constant flicker instead of a meaningful "this just happened" signal.
+      proxy[name] = (...args: unknown[]) => {
+        if (spec.kind === 'mutate') notifyAffectedWidget(widget.id)
+        return spec.preview(ctx, widget.id, args)
+      }
     }
     if (widget.type === 'image' || widget.type === 'icon') {
       proxy.setSource = (name: string) => {
@@ -320,29 +393,45 @@ class ScriptSandbox {
           this.log('error', `setSource("${name}"): no imported asset has that name.`)
           return
         }
+        notifyAffectedWidget(widget.id)
         ctx.setSrc(widget.id, asset.id)
       }
     }
     proxy.addClass = (cls: string) => {
       const w = ctx.getWidget(widget.id)
-      if (w && typeof cls === 'string' && !w.classNames.includes(cls)) ctx.updateMeta(widget.id, { classNames: [...w.classNames, cls] })
+      if (w && typeof cls === 'string' && !w.classNames.includes(cls)) {
+        notifyAffectedWidget(widget.id)
+        ctx.updateMeta(widget.id, { classNames: [...w.classNames, cls] })
+      }
     }
     proxy.removeClass = (cls: string) => {
       const w = ctx.getWidget(widget.id)
-      if (w) ctx.updateMeta(widget.id, { classNames: w.classNames.filter((c) => c !== cls) })
+      if (w) {
+        notifyAffectedWidget(widget.id)
+        ctx.updateMeta(widget.id, { classNames: w.classNames.filter((c) => c !== cls) })
+      }
     }
     proxy.on = (event: string, handler: (...a: unknown[]) => void) => {
       const forWidget = this.eventHandlers.get(widget.id) ?? {}
       forWidget[event] = [...(forWidget[event] ?? []), handler]
       this.eventHandlers.set(widget.id, forWidget)
     }
-    proxy.animate = (config: Record<string, unknown>) => this.animateWidget(ctx, widget, config)
-    proxy.bindText = (value: unknown) => ctx.updateText(widget.id, String(value))
-    proxy.bindValue = (value: unknown) => ctx.updateProps(widget.id, { value: Number(value) })
+    proxy.animate = (config: Record<string, unknown>) => {
+      notifyAffectedWidget(widget.id)
+      this.animateWidget(ctx, widget, config)
+    }
+    proxy.bindText = (value: unknown, options?: BindingOptions) => ctx.updateText(widget.id, applyBindingFormat(value, options))
+    proxy.bindValue = (value: unknown, options?: BindingOptions) => {
+      let n = Number(value)
+      if (Number.isNaN(n) && options?.fallback !== undefined) n = Number(options.fallback)
+      if (typeof options?.min === 'number') n = Math.max(options.min, n)
+      if (typeof options?.max === 'number') n = Math.min(options.max, n)
+      ctx.updateProps(widget.id, { value: n })
+    }
     proxy.bindVisible = (value: unknown) => ctx.updateStyle(widget.id, { visible: Boolean(value) })
-    proxy.__applyBinding = (method: string, value: unknown) => {
+    proxy.__applyBinding = (method: string, value: unknown, options?: BindingOptions) => {
       const fn = proxy[method]
-      if (typeof fn === 'function') (fn as (v: unknown) => void)(value)
+      if (typeof fn === 'function') (fn as (v: unknown, o?: BindingOptions) => void)(value, options)
     }
     return proxy
   }
@@ -419,6 +508,33 @@ class ScriptSandbox {
     })
   }
 
+  /** `data.<name>` — the live bridge to the Variable Manager's own entries (see types/uiDesign.ts's
+   * UiVariable doc comment). Reads fall back to the declared variable's own `defaultValue` when
+   * nothing's been written yet this run (store.ts's runtimeVariableValues starts empty on every
+   * Start — see stop()); reads/writes for a name with NO declared UiVariable still work (an
+   * ad-hoc runtime-only value), so referencing `data.x` never throws even before it's been added
+   * to the Variable Manager table. Writes go through the same store action the Variable Manager
+   * panel's own "current value" column reads, so script and panel always agree. */
+  private buildDataSandbox(): Record<string, unknown> {
+    return new Proxy(
+      {},
+      {
+        get: (_t, prop) => {
+          if (typeof prop !== 'string') return undefined
+          const state = useStore.getState()
+          if (prop in state.runtimeVariableValues) return state.runtimeVariableValues[prop]
+          return state.project.uiDesign.variables.find((v) => v.name === prop)?.defaultValue
+        },
+        set: (_t, prop, value) => {
+          if (typeof prop !== 'string') return false
+          useStore.getState().setRuntimeVariableValue(prop, value as string | number | boolean)
+          this.afterTick()
+          return true
+        }
+      }
+    )
+  }
+
   private buildConsoleSandbox(): Record<string, unknown> {
     return {
       log: (...args: unknown[]) => this.log('log', args.map(stringifyLogArg).join(' ')),
@@ -473,6 +589,24 @@ export function dispatchWidgetEvent(widgetId: string, event: string, ...args: un
 
 export function isSandboxRunning(): boolean {
   return currentSandbox?.running ?? false
+}
+
+// A6's "highlight the affected component during testing" signal — a tiny module-level pub-sub,
+// same "WidgetRenderer can't easily reach into a sibling panel's React state" rationale as the
+// dispatchWidgetEvent singleton above. Fired whenever a widget proxy method actually mutates
+// something (see createWidgetProxy's per-entry notifyAffectedWidget calls) or a script event
+// handler runs (see dispatchWidgetEvent above) — WidgetRenderer.tsx subscribes and applies a
+// brief highlight to the matching widget, independent of which right-panel tab is open.
+type AffectedWidgetListener = (widgetId: string) => void
+const affectedWidgetListeners = new Set<AffectedWidgetListener>()
+
+function notifyAffectedWidget(widgetId: string): void {
+  for (const listener of affectedWidgetListeners) listener(widgetId)
+}
+
+export function subscribeAffectedWidget(listener: AffectedWidgetListener): () => void {
+  affectedWidgetListeners.add(listener)
+  return () => affectedWidgetListeners.delete(listener)
 }
 
 export interface ScriptSandboxApi {

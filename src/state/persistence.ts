@@ -37,7 +37,7 @@ import {
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
 import { createDefaultUiDesign } from '@/lib/uiDesign/widgetDefaults'
 import { DEFAULT_UI_DISPLAY } from '@/types'
-import type { UiAsset, UiCssRule, UiDesignProject, UiDisplayOrientation, UiDisplayRotation, UiDisplayShape, UiDisplaySettings, UiScreen, UiWidget } from '@/types'
+import type { UiAsset, UiCssRule, UiDesignProject, UiDisplayOrientation, UiDisplayRotation, UiDisplayShape, UiDisplaySettings, UiScreen, UiVariable, UiWidget } from '@/types'
 
 const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
 const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
@@ -429,12 +429,37 @@ function normalizeUiDesign(raw: unknown): UiDesignProject {
 
   const activeScreenId = typeof r.activeScreenId === 'string' && screens.some((s) => s.id === r.activeScreenId) ? r.activeScreenId : screens[0].id
 
+  const UI_VARIABLE_TYPES = new Set(['number', 'text', 'boolean', 'color', 'list', 'image', 'object'])
+  const UI_VARIABLE_SCOPES = new Set(['global', 'screen', 'component', 'sensor', 'api', 'hardware'])
+  const variables: UiVariable[] = Array.isArray(r.variables)
+    ? (r.variables as unknown[])
+        .filter(
+          (v): v is Record<string, unknown> =>
+            !!v && typeof v === 'object' && typeof (v as Record<string, unknown>).id === 'string' && typeof (v as Record<string, unknown>).name === 'string'
+        )
+        .map((v) => ({
+          id: v.id as string,
+          name: v.name as string,
+          type: (UI_VARIABLE_TYPES.has(v.type as string) ? v.type : 'text') as UiVariable['type'],
+          scope: (UI_VARIABLE_SCOPES.has(v.scope as string) ? v.scope : 'global') as UiVariable['scope'],
+          screenId: typeof v.screenId === 'string' ? v.screenId : undefined,
+          componentId: typeof v.componentId === 'string' ? v.componentId : undefined,
+          defaultValue: typeof v.defaultValue === 'string' || typeof v.defaultValue === 'number' || typeof v.defaultValue === 'boolean' ? v.defaultValue : '',
+          min: typeof v.min === 'number' ? v.min : undefined,
+          max: typeof v.max === 'number' ? v.max : undefined,
+          unit: typeof v.unit === 'string' ? v.unit : undefined,
+          format: typeof v.format === 'string' ? v.format : undefined,
+          fallback: typeof v.fallback === 'string' || typeof v.fallback === 'number' || typeof v.fallback === 'boolean' ? v.fallback : undefined
+        }))
+    : []
+
   return {
     widgets,
     screens,
     activeScreenId,
     css,
     assets,
+    variables,
     display: normalizeUiDisplay(r.display),
     htmlSource: typeof r.htmlSource === 'string' ? r.htmlSource : '',
     cssSource: typeof r.cssSource === 'string' ? r.cssSource : '',

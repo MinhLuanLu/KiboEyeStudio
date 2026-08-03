@@ -14,6 +14,7 @@ import { DisplayPanel } from '@/components/Display/DisplayPanel'
 import { DevModePanel } from '@/components/DevMode/DevModePanel'
 import { VisualReferencePanel } from '@/components/VisualReference/VisualReferencePanel'
 import { StickerManagerPanel } from '@/components/Stickers/StickerManagerPanel'
+import { LayersPanel } from '@/components/Layers/LayersPanel'
 import { PanelTabs } from '@/components/ui/PanelTabs'
 
 const LEFT_TABS: { value: LeftTab; label: string }[] = [
@@ -28,7 +29,8 @@ const RIGHT_TABS: { value: RightTab; label: string }[] = [
   { value: 'display', label: 'Display' },
   { value: 'personality', label: 'Personality' },
   { value: 'visual-reference', label: 'Visual Reference' },
-  { value: 'stickers', label: 'Stickers' }
+  { value: 'stickers', label: 'Stickers' },
+  { value: 'layers', label: 'Layers' }
 ]
 
 function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'horizontal' }) {
@@ -98,6 +100,7 @@ export function EyeStudioWorkspace({ toolbarActions }: { toolbarActions: Toolbar
                 {rightTab === 'personality' && <PersonalityPanel />}
                 {rightTab === 'visual-reference' && <VisualReferencePanel />}
                 {rightTab === 'stickers' && <StickerManagerPanel />}
+                {rightTab === 'layers' && <LayersPanel />}
               </div>
             </div>
           </Panel>

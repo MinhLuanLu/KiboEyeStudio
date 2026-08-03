@@ -59,7 +59,7 @@ export const BOARD_IDS: Record<Exclude<EsBoard, 'custom'>, { arduinoFqbn: string
 }
 
 export const DISPLAY_MODEL_LABELS: Record<DisplayModel, string> = {
-  gc9a01a: 'GC9A01A round (matches Kibo project)',
+  gc9a01a: 'GC9A01A round (240×240 SPI round panel)',
   ili9341: 'ILI9341',
   st7789: 'ST7789',
   generic: 'Generic / other'

@@ -61,6 +61,7 @@ export function createDefaultUiDesign(): UiDesignProject {
     activeScreenId: screen.id,
     css: [],
     assets: [],
+    variables: [],
     display: { ...DEFAULT_UI_DISPLAY },
     htmlSource: '<screen>\n</screen>\n',
     cssSource: '',

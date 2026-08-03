@@ -1,9 +1,11 @@
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore } from '@/state/store'
 import type { UiAsset, UiWidget, UiWidgetType } from '@/types'
 import { computeEffectiveStyle } from '@/lib/uiDesign/cssCascade'
 import { clampRectToDisplayShape, rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
-import { dispatchWidgetEvent, isSandboxRunning } from '@/lib/uiDesign/scriptLang/sandboxRuntime'
+import { dispatchWidgetEvent, isSandboxRunning, subscribeAffectedWidget } from '@/lib/uiDesign/scriptLang/sandboxRuntime'
+
+const AFFECTED_HIGHLIGHT_MS = 400
 
 const LONG_PRESS_MS = 600
 const CLICK_MOVE_THRESHOLD = 4
@@ -20,7 +22,7 @@ function lengthToCss(v: UiWidget['style']['width']): string | undefined {
  * browser form controls, so matching that here sidesteps almost all of Tailwind's preflight
  * leakage automatically and keeps the live preview's fidelity tied to *our* CSS mapping, not
  * the browser's native-control theming. */
-function styleToCss(style: UiWidget['style']): React.CSSProperties {
+export function styleToCss(style: UiWidget['style']): React.CSSProperties {
   const css: React.CSSProperties = {
     position: 'absolute',
     left: style.x ?? 0,
@@ -79,7 +81,7 @@ function styleToCss(style: UiWidget['style']): React.CSSProperties {
  * background-size/-repeat/-position — 'stretch' distorts to fill exactly, 'fit'/'fill' are the
  * standard contain/cover, 'center' shows the image at its natural size centered, and 'tile'
  * repeats it — the same handful of modes lvglExport.ts maps to LVGL's bg_img style props. */
-function backgroundImageCss(style: UiWidget['style'], assetsById: Map<string, UiAsset>): React.CSSProperties {
+export function backgroundImageCss(style: UiWidget['style'], assetsById: Map<string, UiAsset>): React.CSSProperties {
   if (!style.backgroundImage) return {}
   const asset = assetsById.get(style.backgroundImage)
   if (!asset) return {}
@@ -95,7 +97,7 @@ function backgroundImageCss(style: UiWidget['style'], assetsById: Map<string, Ui
 /** Merges `overrides` onto `base`, skipping any key whose override value is `undefined` —
  * a plain object spread would let styleToCss's always-present-but-undefined keys silently wipe
  * out these per-kind visual defaults, since a key set to `undefined` still "wins" in a spread. */
-function mergeDefined(base: React.CSSProperties, overrides: React.CSSProperties): React.CSSProperties {
+export function mergeDefined(base: React.CSSProperties, overrides: React.CSSProperties): React.CSSProperties {
   const out: React.CSSProperties = { ...base }
   for (const k in overrides) {
     const v = overrides[k as keyof React.CSSProperties]
@@ -108,7 +110,7 @@ function mergeDefined(base: React.CSSProperties, overrides: React.CSSProperties)
  * approximates LVGL's default (light) theme closely enough to judge layout/spacing at a
  * glance. Not pixel-accurate to any specific LVGL theme; the exported C++ is the source of
  * truth for actual firmware appearance (see lib/export/lvglExport.ts). */
-const DEFAULT_VISUAL_CSS: Partial<Record<UiWidgetType, React.CSSProperties>> = {
+export const DEFAULT_VISUAL_CSS: Partial<Record<UiWidgetType, React.CSSProperties>> = {
   container: { background: 'transparent', border: '1px dashed #cbd5e1' },
   flex: { background: 'transparent', border: '1px dashed #cbd5e1', display: 'flex' },
   button: { background: '#2196f3', color: '#ffffff', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center' },
@@ -130,7 +132,7 @@ const DEFAULT_VISUAL_CSS: Partial<Record<UiWidgetType, React.CSSProperties>> = {
 // 'button' is included so an Icon widget (or anything else) can be placed inside a button
 // alongside its text label — reuses the existing generic child-widget system for "icon
 // buttons" instead of adding a dedicated buttonIcon property.
-const CONTAINER_LIKE: ReadonlySet<UiWidgetType> = new Set(['screen', 'container', 'flex', 'list', 'tabs', 'button'])
+export const CONTAINER_LIKE: ReadonlySet<UiWidgetType> = new Set(['screen', 'container', 'flex', 'list', 'tabs', 'button'])
 
 function numProp(widget: UiWidget, key: string, fallback: number): number {
   const v = widget.props[key]
@@ -140,7 +142,7 @@ function numProp(widget: UiWidget, key: string, fallback: number): number {
 /** Kind-specific inner content — thumbs/fills/ticks/etc — rendered inside the outer positioned
  * div. Purely presentational; the outer div (styled from widget.style, see WidgetRenderer)
  * already handles position/size/background/border for every kind uniformly. */
-function WidgetInner({ widget }: { widget: UiWidget }) {
+export function WidgetInner({ widget }: { widget: UiWidget }) {
   const asset = useStore((s) => (widget.src ? s.project.uiDesign.assets.find((a) => a.id === widget.src) : undefined))
 
   switch (widget.type) {
@@ -336,6 +338,22 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   const resizeState = useRef<{ handle: ResizeHandle; startClientX: number; startClientY: number; startX: number; startY: number; startWidth: number; startHeight: number } | null>(
     null
   )
+
+  // A6: brief highlight when a running script's event handler fires on this widget or an action
+  // actually mutates it (see sandboxRuntime.ts's subscribeAffectedWidget/notifyAffectedWidget) —
+  // "highlight selected/affected component during testing" from the no-code spec. Subscribed
+  // unconditionally (not gated on isSandboxRunning()) since the sandbox itself only ever notifies
+  // while running; this hook just needs to exist for the widget's whole lifetime.
+  const [affected, setAffected] = useState(false)
+  const affectedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return subscribeAffectedWidget((affectedId) => {
+      if (affectedId !== widgetId) return
+      setAffected(true)
+      if (affectedTimer.current) clearTimeout(affectedTimer.current)
+      affectedTimer.current = setTimeout(() => setAffected(false), AFFECTED_HIGHLIGHT_MS)
+    })
+  }, [widgetId])
 
   // widget.visible is the Layers-panel show/hide toggle (an editor/workspace concern, distinct
   // from the CSS-authored `style.visible` a user can set — see UiWidgetStyle) — hidden widgets
@@ -567,8 +585,9 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     style: {
       ...css,
       position: 'absolute' as const,
-      outline: isSelected ? '1.5px solid #4fa8ff' : outOfBounds ? '1.5px dashed #ef4444' : undefined,
-      outlineOffset: isSelected || outOfBounds ? 1 : undefined,
+      outline: affected ? '2px solid #22c55e' : isSelected ? '1.5px solid #4fa8ff' : outOfBounds ? '1.5px dashed #ef4444' : undefined,
+      outlineOffset: affected || isSelected || outOfBounds ? 1 : undefined,
+      boxShadow: affected ? '0 0 8px 2px rgba(34,197,94,0.6)' : (css.boxShadow as string | undefined),
       cursor: widget.locked ? 'default' : 'grab',
       opacity: isDisabled ? ((css.opacity as number | undefined) ?? 1) * 0.5 : css.opacity,
       pointerEvents: isDisabled ? ('none' as const) : undefined

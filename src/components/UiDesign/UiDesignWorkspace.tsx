@@ -12,9 +12,11 @@ import { CssEditor } from './CssEditor'
 import { AssetManagerPanel } from './AssetManagerPanel'
 import { DisplaySettingsPanel } from './DisplaySettingsPanel'
 import { LogicPanel } from './LogicPanel'
+import { VariableManagerPanel } from './VariableManagerPanel'
+import { LvglCodePanel } from './LvglCodePanel'
 
 type LeftTab = 'toolbox' | 'layers'
-type RightTab = 'properties' | 'html' | 'css' | 'assets' | 'display' | 'logic'
+type RightTab = 'properties' | 'html' | 'css' | 'assets' | 'display' | 'logic' | 'variables'
 
 const LEFT_TABS: { value: LeftTab; label: string }[] = [
   { value: 'toolbox', label: 'Toolbox' },
@@ -26,12 +28,17 @@ const RIGHT_TABS: { value: RightTab; label: string }[] = [
   { value: 'html', label: 'HTML' },
   { value: 'css', label: 'CSS' },
   { value: 'logic', label: 'Logic' },
+  { value: 'variables', label: 'Variables' },
   { value: 'assets', label: 'Assets' },
   { value: 'display', label: 'Display' }
 ]
 
-function ResizeHandle() {
-  return <PanelResizeHandle className="bg-studio-border hover:bg-studio-accent transition-colors w-px" />
+function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'horizontal' }) {
+  return (
+    <PanelResizeHandle
+      className={`bg-studio-border hover:bg-studio-accent transition-colors ${direction === 'vertical' ? 'w-px' : 'h-px'}`}
+    />
+  )
 }
 
 // UI Design Mode's own fully self-contained workspace — its own top bar (UiDesignTopBar) plus
@@ -60,9 +67,22 @@ export function UiDesignWorkspace({ toolbarActions }: { toolbarActions: ToolbarA
           <ResizeHandle />
 
           <Panel defaultSize={56} minSize={35}>
-            <div className="h-full m-2 mx-1 studio-panel overflow-hidden">
-              <Canvas />
-            </div>
+            <PanelGroup direction="vertical">
+              <Panel defaultSize={58} minSize={25}>
+                <div className="h-full m-2 mx-1 mb-1 studio-panel overflow-hidden">
+                  <Canvas />
+                </div>
+              </Panel>
+
+              <ResizeHandle direction="horizontal" />
+
+              <Panel defaultSize={42} minSize={15}>
+                <div className="h-full m-2 mx-1 mt-1 studio-panel flex flex-col overflow-hidden">
+                  <div className="px-2 py-1.5 border-b border-studio-border text-xs font-medium shrink-0">LVGL Code</div>
+                  <LvglCodePanel />
+                </div>
+              </Panel>
+            </PanelGroup>
           </Panel>
 
           <ResizeHandle />
@@ -75,6 +95,7 @@ export function UiDesignWorkspace({ toolbarActions }: { toolbarActions: ToolbarA
                 {rightTab === 'html' && <HtmlEditor />}
                 {rightTab === 'css' && <CssEditor />}
                 {rightTab === 'logic' && <LogicPanel />}
+                {rightTab === 'variables' && <VariableManagerPanel />}
                 {rightTab === 'assets' && <AssetManagerPanel />}
                 {rightTab === 'display' && <DisplaySettingsPanel />}
               </div>

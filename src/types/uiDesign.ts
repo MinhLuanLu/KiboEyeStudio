@@ -305,12 +305,47 @@ export const DEFAULT_UI_DISPLAY: UiDisplaySettings = {
   rotation: 0
 }
 
+export type UiVariableType = 'number' | 'text' | 'boolean' | 'color' | 'list' | 'image' | 'object'
+export type UiVariableScope = 'global' | 'screen' | 'component' | 'sensor' | 'api' | 'hardware'
+
+/** A named piece of data ("Temperature", "Brightness", "Light Enabled", ...) that widget
+ * bindings/actions/conditions can read and write — the Variable Manager's own entries. Unlike
+ * `script` (the sole source of truth for BEHAVIOR — see its own doc comment below), variables
+ * really are a second, structured, persisted model: a Variable Manager table needs a declared
+ * name/type/scope/default *before* anything can reference it, which can't be inferred for free
+ * from arbitrary script text the way Events/Bindings' patterns can. To avoid this becoming a
+ * competing "source of truth" for a variable's actual VALUE, the live sandbox exposes each of
+ * these through one `data` object (`data.temperature`, ...) backed directly by the same store
+ * state the Variable Manager table shows — script and Variable Manager always read/write the
+ * exact same live value, never a copy (see lib/uiDesign/scriptLang/sandboxRuntime.ts). */
+export interface UiVariable {
+  id: string
+  name: string
+  type: UiVariableType
+  scope: UiVariableScope
+  /** Set when scope is 'screen' or 'component' — which screen/widget this variable belongs to.
+   * Purely organizational (which screen's/widget's section of the Variable Manager table it
+   * shows under) — every variable is reachable from anywhere in the script/every screen via
+   * `data.<name>` regardless of scope; scope doesn't gate visibility. */
+  screenId?: string
+  componentId?: string
+  defaultValue: string | number | boolean
+  min?: number
+  max?: number
+  unit?: string
+  /** e.g. `"{value}°C"` — `{value}` is replaced with the current (formatted) value. Used by
+   * Data Binding's text rendering (see visualBindings.ts). */
+  format?: string
+  fallback?: string | number | boolean
+}
+
 export interface UiDesignProject {
   widgets: Record<string, UiWidget>
   screens: UiScreen[]
   activeScreenId: string | null
   css: UiCssRule[]
   assets: UiAsset[]
+  variables: UiVariable[]
   display: UiDisplaySettings
   /** Regenerated text mirrors of the widget tree / css rules — see lib/uiDesign/htmlSync.ts
    * and cssSync.ts. Source of truth flows whichever direction was edited last (full
