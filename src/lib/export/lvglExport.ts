@@ -1097,11 +1097,13 @@ ${conf}`
 }
 
 // ---------------------------------------------------------------------------------------------
-// "UI Screen Only" export — a standalone, dependency-free .h/.cpp pair for ONE screen, safe to
-// drop into any existing LVGL project. Deliberately NOT built on generateKiboUI()'s shared
-// KiboUI:: namespace/registry/ShowScreen dispatcher (those are inherently project-wide concerns
-// a single screen doesn't have) — uses the snake_case create_<screen>_screen()/
-// show_<screen>_screen() free-function naming this mode's own spec asked for verbatim
+// "UI Screen Only" export — a single self-contained header for ONE screen (no separate .cpp),
+// meant to drop into an existing project that already has its own "ui.h" (see the file-top doc
+// comment and #include below — this generator does not attempt to fabricate one). Deliberately
+// NOT built on generateKiboUI()'s shared KiboUI:: namespace/registry/ShowScreen dispatcher
+// (those are inherently project-wide concerns a single screen doesn't have) — uses the
+// snake_case create_<screen>_screen()/show_<screen>_screen() free-function naming this mode's
+// own spec asked for verbatim
 // (deliberately different from the rest of this file's PascalCase `KiboUI::CreateXxxScreen()`
 // convention, which "Complete Project" mode keeps unchanged — see the file-top note on why).
 //
@@ -1152,6 +1154,13 @@ export async function generateUiScreenExport(project: Project, screenId: string,
   const createFnName = `create_${snake}_screen`
   const showFnName = `show_${snake}_screen`
   const headerFilename = `${snake}_screen.h`
+  // Registry sizing: exactly one Project_Register() call is emitted per widget below (every
+  // widget gets one, tagged or not — see emitWidget), so the max array size is just the reachable
+  // widget count, known up front. Kept as a real #define (not a runtime-sized container) to match
+  // Complete Project mode's own registry shape and avoid pulling in <vector>/heap allocation for
+  // what's otherwise a header with zero dynamic allocation.
+  const maxWidgetsMacro = `${snake.toUpperCase()}_SCREEN_MAX_WIDGETS`
+  const findWidgetFnName = `find_${snake}_screen_widget`
   const assetsFilenameBase = `${snake}_screen_assets`
   const assetsHeaderFilename = `${assetsFilenameBase}.h`
   const assetsSourceFilename = `${assetsFilenameBase}.cpp`
@@ -1171,19 +1180,22 @@ export async function generateUiScreenExport(project: Project, screenId: string,
     )
   }
 
-  // ---- single self-contained header (see this function's own doc comment for why there's no
+  // ---- single-header screen file (see this function's own doc comment for why there's no
   // separate .cpp: every top-level function here is `static`/`static inline`, so one #include is
-  // all a consuming project ever needs — nothing to add to a build's source-file list). ----
+  // all a consuming project ever needs to add to its build's source-file list). Includes "ui.h"
+  // (your project's own — this is not a fully standalone file) for shared types/macros/registry
+  // scaffolding, matching Complete Project mode's own header naming. ----
   const c: string[] = [
     `/*
  * ${headerFilename}
  *
  * ${GENERATED_BY_LINE} ("${screen.name}" screen only).
  *
- * Standalone, dependency-free, single self-contained header — #include this one file, no
- * separate .cpp to add to your build. No LVGL/display/SPI/board initialization anywhere in it —
- * call this from an existing LVGL project that already calls lv_init() and has a display
- * registered. Do NOT hand-edit — re-export instead. The exception is the \`// TODO\` callback
+ * A single self-contained header for just this one screen — #include this one file, no separate
+ * .cpp to add to your build. No LVGL/display/SPI/board initialization anywhere in it — call this
+ * from an existing LVGL project that already calls lv_init() and has a display registered.
+ * Requires your project to have its own "ui.h" (see the #include below) — drop this file in
+ * alongside it. Do NOT hand-edit — re-export instead. The exception is the \`// TODO\` callback
  * bodies below, which are safe to fill in (a re-export preserves the stub declarations, not any
  * body you've typed into one — move logic you want to keep into your own file instead).
  *
@@ -1193,22 +1205,31 @@ export async function generateUiScreenExport(project: Project, screenId: string,
  *   #include "${headerFilename}"
  *   ${showFnName}();   // creates + loads this screen
  *
- * Finding a widget by its ID: this standalone header has no real Project_Register()/FindWidget()
- * registry (that's Complete Project export's own scaffolding) — but each widget below gets a
- * commented-out \`Project_Register("id", var);\` call at its creation site as a ready-to-use
- * template: uncomment those lines (and implement your own
- * \`void Project_Register(const char* id, lv_obj_t* obj)\`, e.g. a simple name->pointer map)
- * if you want string-based lookup like Complete Project mode has. Otherwise, each widget's
- * \`lv_obj_t*\` is just a \`static\` variable named after its Properties-panel ID (e.g.
- * id="wifiButton" -> wifiButton_obj) — declare a matching \`extern lv_obj_t* wifiButton_obj;\` in
- * your own .cpp to reference it directly, or use ${snake}_focus_group()/lv_group_get_focused()
- * below if you just need "whichever widget is currently focused."
+${
+  widgets.length > 0
+    ? ` * Finding a widget by its ID: call \`${findWidgetFnName}("id")\` — every widget on this screen
+ * is registered under its Properties-panel ID (or its auto-generated fallback id for a widget
+ * with no ID set, e.g. \`w_7wF5T4_obj\` -> "7wF5T4") the moment it's created, via
+ * Project_Register(). Its \`lv_obj_t*\` is also just a \`static\` variable named the same way (e.g.
+ * id="wifiButton" -> wifiButton_obj) if you'd rather reference it directly — declare a matching
+ * \`extern lv_obj_t* wifiButton_obj;\` in your own .cpp for that. Use
+ * ${snake}_focus_group()/lv_group_get_focused() if you just need "whichever widget is currently
+ * focused," or clearFocus() to drop focus entirely (e.g. right before switching screens).
+ *
+ * NOTE if you export more than one screen this way and #include them in the same .cpp:
+ * Project_Register/s_widgetIds/s_widgetObjs/s_widgetCount/clearFocus are deliberately named to
+ * match Complete Project mode's own registry (not screen-scoped) — ${maxWidgetsMacro} and
+ * ${findWidgetFnName}()/${snake}_focus_group() already are screen-scoped and never collide, but
+ * two Screen-Only headers included together WILL collide on those five names. Rename them by hand
+ * in one of the files if you hit that, or export "Complete Project" instead for a real shared
+ * registry across every screen.
+ *`
+    : ` * This screen has no widgets yet, so there's nothing to register or focus.`
+}
  */
 #pragma once
 #include "lvgl.h"
-// #include "ui.h"   // not needed here — that's Complete Project mode's own header, unrelated to
-                      // this standalone file (left as a placeholder in case you're pasting this
-                      // screen's code into a Complete Project export by hand).`
+${widgets.length > 0 ? '#include <cstring>   // for strcmp() — used by the widget registry below\n' : ''}#include "ui.h"`
   ]
   if (identByAssetId.size > 0) c.push(`#include "${assetsHeaderFilename}"`)
   c.push('')
@@ -1221,12 +1242,47 @@ export async function generateUiScreenExport(project: Project, screenId: string,
   c.push('')
   c.push(`static inline lv_group_t* ${snake}_focus_group() { return s_focusGroup; }`)
   c.push('')
+  c.push('// Drops keyboard/encoder focus entirely (no widget shows the LV_STATE_FOCUSED border) —')
+  c.push("// useful right before switching screens, so the outgoing screen's last-focused widget")
+  c.push('// doesn\'t stay visually focused underneath whatever loads next.')
+  c.push('static inline void clearFocus() {')
+  c.push('  if (s_focusGroup == nullptr) return;')
+  c.push('  lv_obj_t* focused = lv_group_get_focused(s_focusGroup);')
+  c.push('  if (focused != nullptr) lv_obj_remove_state(focused, LV_STATE_FOCUSED);')
+  c.push('}')
+  c.push('')
 
   if (widgets.length > 0) {
+    c.push('// ---- Widget-by-ID registry — every widget below is Project_Register()-ed the moment it\'s')
+    c.push(`// created (see ${findWidgetFnName}() and the per-widget calls further down). Sized to exactly`)
+    c.push(`// this screen's own widget count (${widgets.length}), known up front since one widget always`)
+    c.push('// yields exactly one registration. ----')
+    c.push(`#define ${maxWidgetsMacro} ${widgets.length}`)
+    c.push('')
+    c.push(`static const char* s_widgetIds[${maxWidgetsMacro}];`)
+    c.push(`static lv_obj_t* s_widgetObjs[${maxWidgetsMacro}];`)
+    c.push('static int s_widgetCount = 0;')
+    c.push('')
+    c.push('static void Project_Register(const char* id, lv_obj_t* obj) {')
+    c.push(`  if (s_widgetCount < ${maxWidgetsMacro}) {`)
+    c.push('    s_widgetIds[s_widgetCount] = id;')
+    c.push('    s_widgetObjs[s_widgetCount] = obj;')
+    c.push('    s_widgetCount++;')
+    c.push('  }')
+    c.push('}')
+    c.push('')
+    c.push(`static inline lv_obj_t* ${findWidgetFnName}(const char* widgetId) {`)
+    c.push('  for (int i = 0; i < s_widgetCount; i++) {')
+    c.push('    if (strcmp(s_widgetIds[i], widgetId) == 0) return s_widgetObjs[i];')
+    c.push('  }')
+    c.push('  return nullptr;')
+    c.push('}')
+    c.push('')
+
     c.push('// ---- Widget objects — one `static lv_obj_t*` per widget, named after its Properties-panel')
-    c.push('// ID when it has one (e.g. id="wifiButton" -> wifiButton_obj). See the file-top comment for')
-    c.push('// the optional Project_Register() lookup-by-string template, and for how to reach one of')
-    c.push('// these from your own .cpp via a matching `extern lv_obj_t* wifiButton_obj;`. ----')
+    c.push('// ID when it has one (e.g. id="wifiButton" -> wifiButton_obj). Reach one of these from your')
+    c.push(`// own .cpp either via ${findWidgetFnName}("id") above, or with a matching`)
+    c.push('// `extern lv_obj_t* wifiButton_obj;` declaration if you\'d rather skip the string lookup. ----')
     const declared = new Set<string>()
     for (const w of widgets) {
       const v = widgetVarName(w)
@@ -1273,10 +1329,7 @@ export async function generateUiScreenExport(project: Project, screenId: string,
       fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, '  '))
       if (isFocusable) fnBuffer.push(`  lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
       fnBuffer.push(...styleApplyCalls(widget, rules, varName, '  '))
-      // Project_Register() is emitted commented-out too — see the file-top comment for why (no
-      // real registry exists in this standalone header; this is a ready-to-uncomment template for
-      // one, using the same id/var pairing Complete Project mode's real registry call would use).
-      fnBuffer.push(`  // Project_Register(${JSON.stringify(widget.tagId)}, ${varName});`)
+      fnBuffer.push(`  Project_Register(${JSON.stringify(widget.tagId)}, ${varName});`)
       if (ev) fnBuffer.push(`  lv_obj_add_event_cb(${varName}, ${ev.handlerName}, LV_EVENT_ALL, NULL);`)
       // Deliberately no lv_group_focus_obj() call here — leaving the group without an initial
       // focus means no widget shows the focused-style border on screen load; LVGL's own
@@ -1292,10 +1345,10 @@ export async function generateUiScreenExport(project: Project, screenId: string,
       buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, indent))
       if (isFocusable) buffer.push(`${indent}lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
       buffer.push(...styleApplyCalls(widget, rules, varName, indent))
-      // See the named-widget branch above for why this is commented out by default. Untagged
-      // widgets use their auto-generated fallback id (the same string already in their variable
-      // name, e.g. w_7wF5T4_obj -> "7wF5T4") — same convention Complete Project mode itself uses.
-      buffer.push(`${indent}// Project_Register(${JSON.stringify(widgetBaseName(widget))}, ${varName});`)
+      // Untagged widgets use their auto-generated fallback id (the same string already in their
+      // variable name, e.g. w_7wF5T4_obj -> "7wF5T4") — same convention Complete Project mode
+      // itself uses.
+      buffer.push(`${indent}Project_Register(${JSON.stringify(widgetBaseName(widget))}, ${varName});`)
       if (ev) buffer.push(`${indent}lv_obj_add_event_cb(${varName}, ${ev.handlerName}, LV_EVENT_ALL, NULL);`)
       if (isFocusable) buffer.push(`${indent}lv_group_add_obj(s_focusGroup, ${varName});`)
       for (const child of children(uiDesign, widget)) emitWidget(child, varName, buffer, indent)
@@ -1317,6 +1370,12 @@ export async function generateUiScreenExport(project: Project, screenId: string,
   }
 
   c.push(`static inline lv_obj_t* ${createFnName}() {`)
+  if (widgets.length > 0) {
+    c.push('  // Reset the registry every time this screen is (re)created — otherwise a second call')
+    c.push("  // would append past the widgets from the *previous* call's now-deleted lv_obj_t*s,")
+    c.push('  // leaving stale/dangling pointers behind old entries no one will ever overwrite.')
+    c.push('  s_widgetCount = 0;')
+  }
   c.push('  static bool s_stylesInited = false;')
   c.push('  if (!s_stylesInited) { s_stylesInited = true; Ui_InitStyles(); }')
   c.push('  if (s_focusGroup == nullptr) { s_focusGroup = lv_group_create(); }')
@@ -1348,19 +1407,32 @@ export async function generateUiScreenExport(project: Project, screenId: string,
     files.push({ name: assetsSourceFilename, content: assetsSourceRaw })
   }
   const exampleWidgetId = namedWidgets(widgets)[0]?.tagId ?? null
-  files.push({ name: 'USAGE.md', content: generateUsageMd(project, screen, snake, createFnName, showFnName, identByAssetId.size > 0, notes, exampleWidgetId) })
+  files.push({
+    name: 'USAGE.md',
+    content: generateUsageMd(project, screen, snake, createFnName, showFnName, identByAssetId.size > 0, notes, exampleWidgetId, widgets.length > 0 ? findWidgetFnName : null)
+  })
 
   return { files, notes }
 }
 
-function generateUsageMd(project: Project, screen: UiScreen, snake: string, createFnName: string, showFnName: string, hasAssets: boolean, notes: string[], exampleWidgetId: string | null): string {
-  return `# ${screen.name} — Standalone LVGL Screen
+function generateUsageMd(
+  project: Project,
+  screen: UiScreen,
+  snake: string,
+  createFnName: string,
+  showFnName: string,
+  hasAssets: boolean,
+  notes: string[],
+  exampleWidgetId: string | null,
+  findWidgetFnName: string | null
+): string {
+  return `# ${screen.name} — LVGL Screen
 
 "UI Screen Only" export from project "${project.name}". This is just this one screen, as a single
-self-contained header — no separate .cpp to add to your build, no LVGL/display/SPI/board
-initialization anywhere in \`${snake}_screen.h\`${hasAssets ? ` (plus \`${snake}_screen_assets.*\` for embedded images)` : ''}.
-Drop it into any existing LVGL ${LVGL_VERSION} project that already calls \`lv_init()\`
-and has a display registered.
+header — no separate .cpp to add to your build, no LVGL/display/SPI/board initialization anywhere
+in \`${snake}_screen.h\`${hasAssets ? ` (plus \`${snake}_screen_assets.*\` for embedded images)` : ''}.
+Drop it into your LVGL ${LVGL_VERSION} project alongside your own \`ui.h\` (this file includes it),
+already calling \`lv_init()\` with a display registered.
 
 ## Usage
 
@@ -1392,12 +1464,15 @@ lv_obj_send_event(${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 
 \`\`\`
 
 (This screen's widget variables — e.g. \`${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'wifiButton_obj'}\` — are \`static\` to \`${snake}_screen.h\`; reference
-them from your own \`.cpp\` file by adding your own \`extern\` declaration, or call
-\`lv_group_get_focused(${snake}_focus_group())\` if you just need "whatever's focused right now".
-Each widget also gets a commented-out \`Project_Register("id", ${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'wifiButton_obj'});\`
-call right next to where it's created — uncomment those and implement your own
-\`void Project_Register(const char* id, lv_obj_t* obj)\` if you'd rather look widgets up by string
-id, the way Complete Project mode's own registry works.)
+them from your own \`.cpp\` file by adding your own \`extern\` declaration.${
+    findWidgetFnName
+      ? ` Or skip the \`extern\`
+entirely and call \`${findWidgetFnName}("${exampleWidgetId ?? 'wifiButton'}")\` — every widget is registered under its
+Properties-panel ID (or its auto-generated fallback id, e.g. \`w_7wF5T4_obj\` -> "7wF5T4") the
+moment it's created, via \`Project_Register()\`.`
+      : ''
+  } Call \`lv_group_get_focused(${snake}_focus_group())\`
+if you just need "whatever's focused right now".)
 
 ## Focus (keyboard / rotary encoder / physical buttons)
 
@@ -1428,7 +1503,10 @@ ${exampleWidgetId ? `lv_group_focus_obj(${toCIdentifier(exampleWidgetId)}_obj); 
 \`lv_group_focus_obj()\` gives a widget real LVGL keyboard/encoder focus (the group's current
 selection). \`lv_obj_add_state(obj, LV_STATE_FOCUSED)\`/\`lv_obj_remove_state(obj, LV_STATE_FOCUSED)\`
 only change that widget's *visual* focused appearance without touching the group's selection — use
-those only if you want the focused look without real input-device focus.
+those only if you want the focused look without real input-device focus. Call \`clearFocus()\` to
+drop focus entirely — nothing shows the focused border until the next real encoder/keyboard input —
+which is useful right before you switch to a different screen, so this screen's last-focused widget
+doesn't stay visually focused underneath whatever loads next.
 ${notes.length > 0 ? `\n## Notes\n\n${notes.map((n) => `- ${n}`).join('\n')}\n` : ''}`
 }
 

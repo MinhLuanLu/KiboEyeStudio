@@ -336,7 +336,9 @@ export function LvglExportDialog() {
                   <span className="text-studio-muted font-mono">{screenBaseName}_screen.h</span>
                 </label>
               )}
-              <span className="text-studio-muted basis-full">Standalone .h/.cpp — no LVGL/display/SPI/board init, drop into any existing LVGL project.</span>
+              <span className="text-studio-muted basis-full">
+                Single header, no LVGL/display/SPI/board init — includes your project's own "ui.h", drop alongside it.
+              </span>
             </div>
           )}
 
