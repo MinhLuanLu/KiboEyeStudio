@@ -101,17 +101,22 @@ function toSnakeCase(raw: string): string {
   return words.map((w) => w.toLowerCase()).join('_')
 }
 
-/** Local C++ variable name for a widget's `lv_obj_t*` — stable, derived from tagId when set
- * (so generated code reads naturally, e.g. `wifi_btn`) or from the widget's short id otherwise.
+/** The stable, sanitized base name a widget's own identifiers key off — its tagId when set (so
+ * generated names read naturally, e.g. `wifi_btn`) or its short id otherwise. widget.id is a
+ * nanoid(), whose default alphabet includes '-' and '_' — not sanitizing the fallback path the
+ * same way the tagId path already is produces an invalid C++ identifier (e.g. `w_WO0lX-`)
+ * whenever a generated id happens to contain a '-' in its first few characters, breaking the
+ * compile. Exported so the event-callback naming (collectEvents) can build a clean
+ * `<base>_event_cb` name without carrying widgetVarName's own `_obj` suffix into it. */
+export function widgetBaseName(widget: UiWidget): string {
+  return widget.tagId ? toCIdentifier(widget.tagId) : toCIdentifier(`w_${widget.id.slice(0, 6)}`)
+}
+
+/** Local C++ variable name for a widget's `lv_obj_t*` — see widgetBaseName() above.
  * Exported for scriptLang/codegen.ts's CodegenContext (see buildCodegenContext below) — the
  * script codegen needs the exact same variable name this file's own widget-creation code uses. */
 export function widgetVarName(widget: UiWidget): string {
-  // widget.id is a nanoid(), whose default alphabet includes '-' and '_' — not sanitizing the
-  // fallback (no-tagId) path the same way the tagId path already is produces an invalid C++
-  // identifier (e.g. `w_WO0lX-_obj`) whenever a generated id happens to contain a '-' in its
-  // first few characters, breaking the compile.
-  const base = widget.tagId ? toCIdentifier(widget.tagId) : toCIdentifier(`w_${widget.id.slice(0, 6)}`)
-  return `${base}_obj`
+  return `${widgetBaseName(widget)}_obj`
 }
 
 /** `Create<Name>[<Kind>]()` function name for a named (tagId-bearing) widget — appends the
@@ -358,6 +363,11 @@ function exportLvglStyles(widgets: UiWidget[], rules: CssRuleExport[], identByAs
   for (const { ident } of rules) {
     lines.push(`static lv_style_t ${ident};`)
   }
+  // Default focused-state style — applied (as a baseline, before any CSS cascade) to every
+  // focusable widget so keyboard/encoder/button focus is visible even with no CSS authored for
+  // it; a rule or local override style with its own "focused" state (see rules'/widgets'
+  // `states.focused` below) is applied afterward and wins for whatever properties it sets.
+  lines.push('static lv_style_t s_focusedStyle;')
   for (const w of widgets) {
     if (hasVisualStyle(w.style)) lines.push(`static lv_style_t style_local_${widgetVarName(w)};`)
     for (const stateName of Object.keys(w.states) as UiWidgetStateName[]) {
@@ -371,6 +381,11 @@ function exportLvglStyles(widgets: UiWidget[], rules: CssRuleExport[], identByAs
   lines.push('  // "hover" styles authored in the CSS editor are intentionally not emitted here —')
   lines.push('  // LVGL has no hover state on a touchscreen; the closest real equivalent is')
   lines.push('  // LV_STATE_PRESSED, which "pressed" styles below already use.')
+  lines.push('  lv_style_init(&s_focusedStyle);')
+  lines.push('  lv_style_set_border_width(&s_focusedStyle, 3);')
+  lines.push('  lv_style_set_border_color(&s_focusedStyle, lv_color_hex(0x2196F3));')
+  lines.push('  lv_style_set_border_opa(&s_focusedStyle, LV_OPA_COVER);')
+  lines.push('')
   for (const { rule, ident } of rules) {
     lines.push(`  lv_style_init(&${ident});`)
     lines.push(...styleSetCalls(ident, rule.style, identByAssetId))
@@ -648,24 +663,41 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
   return lines
 }
 
+/** One `case` inside a widget's single event callback — `trigger`/`bodyLines` pairs sharing the
+ * same `lvglEvent` (checked/unchecked both land on LV_EVENT_VALUE_CHANGED, since LVGL has no
+ * separate checked/unchecked event) are grouped together so the switch never has two `case`
+ * labels for the same constant; see emitEventCallbackCase() for how each trigger's own content
+ * (real script body, or an empty TODO) renders inside the shared case. */
+interface EventCallbackTrigger {
+  trigger: string
+  /** null = empty `// TODO` (no script handler for this trigger — hand-edit in the export); an
+   * array (possibly empty) = real body generated from a `widget.on(trigger, ...)` block in the
+   * Logic tab's script. See scriptLang/codegen.ts's CodegenEventHandler. */
+  bodyLines: string[] | null
+}
+interface EventCallbackCase {
+  lvglEvent: string
+  triggers: EventCallbackTrigger[]
+}
+/** One widget's single generated event callback — always registered via
+ * `lv_obj_add_event_cb(varName, handlerName, LV_EVENT_ALL, NULL)`, with a
+ * `switch (lv_event_get_code(e))` inside filtering down to whichever LVGL events actually matter
+ * (see EventCallbackCase). `cases` empty means nothing specific was selected — the switch still
+ * gets emitted with just a `default:` so the function is real, compilable scaffolding. */
 interface EventExport {
   widget: UiWidget
   varName: string
-  trigger: string
-  lvglEvent: string
   handlerName: string
-  /** null = empty `// TODO` stub (no script handler for this trigger — hand-edit in the export);
-   * an array (possibly empty) = real body generated from a `widget.on(trigger, ...)` block in
-   * the Logic tab's script. See scriptLang/codegen.ts's CodegenEventHandler. */
-  bodyLines: string[] | null
+  cases: EventCallbackCase[]
 }
 
-/** Every trigger the script API's `.on(...)` supports and this pass can generate a real LVGL
- * event registration for — see scriptLang/restrictedSubset.ts and the feature's own plan for
- * why swipe gestures and animationCompleted aren't here yet (no gesture/anim-ready wiring in
- * this project's input model). checked/unchecked both register on VALUE_CHANGED — LVGL has no
- * separate checked/unchecked event, so the handler body is wrapped in an LV_STATE_CHECKED guard
- * at assembly time instead (see generateKiboUI's event-body loop). */
+/** Every trigger this pass can generate a real LVGL event registration for — both the script
+ * API's `.on(...)` (see scriptLang/restrictedSubset.ts) and the Properties panel's Events
+ * section checkbox list (a restricted subset — see EVENT_CALLBACK_TRIGGER_OPTIONS below) read
+ * from this same table, so the two can never disagree about what a trigger name maps to. Swipe
+ * gestures and animationCompleted aren't here yet (no gesture/anim-ready wiring in this
+ * project's input model). checked/unchecked both register on LV_EVENT_VALUE_CHANGED — see
+ * EventCallbackCase's own comment for how the shared case disambiguates them at emission time. */
 const TRIGGER_TO_LVGL_EVENT: Record<string, string> = {
   click: 'LV_EVENT_CLICKED',
   pressed: 'LV_EVENT_PRESSED',
@@ -676,20 +708,76 @@ const TRIGGER_TO_LVGL_EVENT: Record<string, string> = {
   unfocused: 'LV_EVENT_DEFOCUSED',
   checked: 'LV_EVENT_VALUE_CHANGED',
   unchecked: 'LV_EVENT_VALUE_CHANGED',
+  scroll: 'LV_EVENT_SCROLL',
   screenLoaded: 'LV_EVENT_SCREEN_LOADED',
   screenUnloaded: 'LV_EVENT_SCREEN_UNLOADED'
 }
 
-/** Collects every event to wire up. Script-derived handlers (from `widget.on(trigger, ...)` in
- * the Logic tab — see scriptLang/codegen.ts) take priority; the legacy `widget.events` array
- * (from before the Logic tab existed) and the default click-stub-for-named-buttons fallback
- * still apply for any widget+trigger the script doesn't cover, so older projects and
- * script-free designs keep working exactly as before. Every handler name (auto-derived or the
- * Properties panel's Events section's user-chosen `customName`) is run through one shared,
- * global `uniqueName` so two events can never generate the identical C++ function — the actual
- * enforcement behind "prevent duplicate callback functions" (validateLvglExport.ts's own
- * "Function name collisions" category reports it too, but this is what keeps the generated code
- * itself always compiling even if a user types the same custom name twice). */
+/** Widget kinds the automatic "every interactive widget gets an event callback" scaffolding
+ * applies to by default (see UiWidget.eventCallbackEnabled) — genuinely interactive LVGL
+ * controls, not passive/decorative ones (label/image/icon/bar/spinner/plain container). A
+ * widget of one of these types still gets skipped if its own eventCallbackEnabled is explicitly
+ * false, and a widget of ANY OTHER type still gets a callback if it has real script-authored
+ * events or legacy widget.events — this set only controls the *automatic default*. */
+export const EVENT_CAPABLE_WIDGET_TYPES = new Set<UiWidgetType>(['button', 'switch', 'slider', 'checkbox', 'dropdown', 'roller', 'textarea', 'list', 'arc', 'tabs'])
+
+/** The Properties panel's Events section checkbox list — a deliberately restricted subset of
+ * TRIGGER_TO_LVGL_EVENT's full vocabulary (no checked/unchecked/screenLoaded/screenUnloaded,
+ * which stay script-only/advanced) matching the LVGL event names most users actually reach for. */
+export const EVENT_CALLBACK_TRIGGER_OPTIONS: { value: string; label: string }[] = [
+  { value: 'click', label: 'Clicked' },
+  { value: 'pressed', label: 'Pressed' },
+  { value: 'released', label: 'Released' },
+  { value: 'longPress', label: 'Long Pressed' },
+  { value: 'valueChanged', label: 'Value Changed' },
+  { value: 'focused', label: 'Focused' },
+  { value: 'unfocused', label: 'Defocused' },
+  { value: 'scroll', label: 'Scroll' }
+]
+
+/** One-line "when does this fire" explanation for every LVGL event this file ever emits a case
+ * (real or commented-reference) for — shown as a beginner-friendly inline comment next to each
+ * one in the generated event callback, so a user can learn what's available without reaching for
+ * the LVGL docs. Keyed by the actual LVGL event constant (not the trigger name), since a couple
+ * of triggers already share one constant (checked/unchecked both fire LV_EVENT_VALUE_CHANGED). */
+const LVGL_EVENT_DESCRIPTIONS: Record<string, string> = {
+  LV_EVENT_CLICKED: 'Fires when the widget is clicked — a short press and release.',
+  LV_EVENT_PRESSED: 'Fires as soon as the widget is pressed down.',
+  LV_EVENT_RELEASED: 'Fires when a press is released, whether or not it counted as a click.',
+  LV_EVENT_LONG_PRESSED: 'Fires when the widget is held down past the long-press threshold.',
+  LV_EVENT_VALUE_CHANGED: "Fires when the widget's value changes (slider, switch, checkbox, dropdown, roller, ...).",
+  LV_EVENT_FOCUSED: 'Fires when the widget gains keyboard/encoder focus.',
+  LV_EVENT_DEFOCUSED: 'Fires when the widget loses keyboard/encoder focus.',
+  LV_EVENT_SCROLL: 'Fires repeatedly while the widget is being scrolled.',
+  LV_EVENT_SCROLL_END: 'Fires once scrolling has finished.',
+  LV_EVENT_READY: 'Fires when an animation or loading action on the widget finishes (e.g. a screen load).',
+  LV_EVENT_CANCEL: 'Fires when an action is cancelled (e.g. closing a dropdown/keyboard without a selection).',
+  LV_EVENT_SCREEN_LOADED: 'Fires once this screen has finished loading.',
+  LV_EVENT_SCREEN_UNLOADED: 'Fires once this screen has finished unloading.'
+}
+
+/** Purely-informational extra entries for the commented reference block — common LVGL events
+ * that aren't offered as Properties-panel checkboxes (EVENT_CALLBACK_TRIGGER_OPTIONS stays a
+ * deliberately short, most-used list) but are still worth showing beginners so the generated
+ * callback doubles as a quick reference instead of requiring a trip to the LVGL docs. */
+const EXTRA_REFERENCE_LVGL_EVENTS: string[] = ['LV_EVENT_SCROLL_END', 'LV_EVENT_READY', 'LV_EVENT_CANCEL']
+
+/** Collects every widget that needs a generated event callback, and what its `switch` should
+ * contain. Three sources feed each widget's trigger set (unioned, never producing more than one
+ * function per widget):
+ *   1. Script-derived handlers (`widget.on(trigger, ...)` in the Logic tab) — real bodies.
+ *   2. The legacy `widget.events` array (from before the Logic tab existed) — empty TODO stubs.
+ *   3. The Properties panel's Events section checkbox list (`eventCallbackTriggers`) for any
+ *      widget of an EVENT_CAPABLE_WIDGET_TYPES kind whose `eventCallbackEnabled` isn't
+ *      explicitly false — empty TODO stubs, or (if the widget has no selection at all) an empty
+ *      switch with just a `default:` case, still registered via LV_EVENT_ALL per the spec this
+ *      was built against.
+ * Every handler name (auto-derived from the widget's own var name, or the Properties panel's
+ * chosen `customName`) is run through one shared, global `uniqueName` so two widgets can never
+ * generate the identical C++ function — the actual enforcement behind "prevent duplicate
+ * callback functions" (validateLvglExport.ts's own "Function name collisions" category reports
+ * it too, but this is what keeps the generated code itself always compiling even if a user types
+ * the same custom name twice). */
 function collectEvents(widgets: UiWidget[], scriptHandlers: CodegenResult['eventHandlers']): EventExport[] {
   const byWidget = new Map<string, CodegenResult['eventHandlers']>()
   for (const h of scriptHandlers) {
@@ -716,28 +804,112 @@ function collectEvents(widgets: UiWidget[], scriptHandlers: CodegenResult['event
   for (const widget of widgets) {
     const varName = widgetVarName(widget)
     const scripted = byWidget.get(widget.id) ?? []
-    if (scripted.length > 0) {
-      const seenTriggers = new Map<string, number>()
-      for (const h of scripted) {
-        const lvglEvent = TRIGGER_TO_LVGL_EVENT[h.trigger]
-        if (!lvglEvent) continue // reported by validateScript.ts's "Unsupported JavaScript API" category
-        const n = (seenTriggers.get(h.trigger) ?? 0) + 1
-        seenTriggers.set(h.trigger, n)
-        const baseName = h.customName ? toCIdentifier(h.customName) : `${varName}_on_${h.trigger}${n > 1 ? `_${n}` : ''}`
-        out.push({ widget, varName, trigger: h.trigger, lvglEvent, handlerName: uniqueName(baseName), bodyLines: h.bodyLines })
-      }
-      continue
+    const scriptedByTrigger = new Map<string, string[]>()
+    let customName: string | undefined
+    for (const h of scripted) {
+      if (!TRIGGER_TO_LVGL_EVENT[h.trigger]) continue // reported by validateScript.ts's "Unsupported JavaScript API" category
+      scriptedByTrigger.set(h.trigger, h.bodyLines)
+      if (h.customName && !customName) customName = h.customName
     }
-    if (widget.events.length > 0) {
-      for (const ev of widget.events) {
-        const lvglEvent = TRIGGER_TO_LVGL_EVENT[ev.trigger] ?? 'LV_EVENT_CLICKED'
-        out.push({ widget, varName, trigger: ev.trigger, lvglEvent, handlerName: uniqueName(toCIdentifier(ev.handlerName)), bodyLines: null })
-      }
-    } else if (widget.type === 'button' && widget.tagId) {
-      out.push({ widget, varName, trigger: 'click', lvglEvent: 'LV_EVENT_CLICKED', handlerName: uniqueName(`${toCIdentifier(widget.tagId)}_clicked`), bodyLines: null })
+
+    // Union every trigger this widget's callback should cover, from all three sources.
+    const triggers = new Set<string>(scriptedByTrigger.keys())
+    for (const ev of widget.events) if (TRIGGER_TO_LVGL_EVENT[ev.trigger]) triggers.add(ev.trigger)
+    const autoEnabled = EVENT_CAPABLE_WIDGET_TYPES.has(widget.type) && widget.eventCallbackEnabled !== false
+    if (autoEnabled) for (const t of widget.eventCallbackTriggers ?? []) if (TRIGGER_TO_LVGL_EVENT[t]) triggers.add(t)
+
+    // Nothing to generate for this widget at all — no script/legacy events, and either it's not
+    // an event-capable type or it was explicitly opted out.
+    if (triggers.size === 0 && scripted.length === 0 && widget.events.length === 0 && !autoEnabled) continue
+
+    const byLvglEvent = new Map<string, EventCallbackTrigger[]>()
+    for (const trig of triggers) {
+      const lvglEvent = TRIGGER_TO_LVGL_EVENT[trig]
+      const list = byLvglEvent.get(lvglEvent) ?? []
+      list.push({ trigger: trig, bodyLines: scriptedByTrigger.get(trig) ?? null })
+      byLvglEvent.set(lvglEvent, list)
     }
+    const cases: EventCallbackCase[] = Array.from(byLvglEvent.entries()).map(([lvglEvent, triggerList]) => ({ lvglEvent, triggers: triggerList }))
+
+    const baseName = customName ? toCIdentifier(customName) : `${widgetBaseName(widget)}_event_cb`
+    out.push({ widget, varName, handlerName: uniqueName(baseName), cases })
   }
   return out
+}
+
+/** Renders one widget's event callback function body — the `switch (lv_event_get_code(e))`
+ * shared by every export mode (screen-only/module/complete-project/live preview), so the four
+ * emission call sites only differ in indentation/USER-CODE-marker style/what (if anything) runs
+ * after a real script-generated case body, never in overall structure. `afterRealBody`, when
+ * given, is appended (unindented — callers pass an already-indented line) after any case that
+ * contains at least one real script body — the Complete Project mode's data-binding refresh
+ * call, matching what the old per-trigger emission already did for script-derived handlers. */
+function emitEventCallbackBody(ev: EventExport, useUserCodeMarkers: boolean, afterRealBody?: string): string[] {
+  const lines: string[] = [`static void ${ev.handlerName}(lv_event_t * e) {`, '  lv_event_code_t code = lv_event_get_code(e);']
+  if (ev.widget.type === 'switch' || ev.widget.type === 'checkbox') {
+    lines.push(`  // Tip: check this widget's current on/off state any time (not just on a value-changed`)
+    lines.push(`  // event) with lv_obj_has_state(), e.g.:`)
+    lines.push(`  //   bool isOn = lv_obj_has_state(${ev.varName}, LV_STATE_CHECKED);`)
+  }
+  lines.push('  switch (code) {')
+  const describe = (lvglEvent: string): string => LVGL_EVENT_DESCRIPTIONS[lvglEvent] ?? ''
+  const stub = (trigger: string, lvglEvent: string): string[] => {
+    const desc = describe(lvglEvent)
+    const body = useUserCodeMarkers
+      ? [
+          `      // USER CODE BEGIN ${ev.handlerName}_${trigger}`,
+          ...(desc ? [`      // ${desc}`] : []),
+          `      // TODO: add your code here.`,
+          `      // USER CODE END ${ev.handlerName}_${trigger}`
+        ]
+      : [...(desc ? [`      // ${desc}`] : []), '      // TODO: add your code here.']
+    return body
+  }
+  for (const c of ev.cases) {
+    lines.push(`    case ${c.lvglEvent}: {`)
+    let hasRealBody = false
+    for (const t of c.triggers) {
+      const isCheckGuarded = t.trigger === 'checked' || t.trigger === 'unchecked'
+      if (t.bodyLines !== null) hasRealBody = true
+      const content = t.bodyLines === null ? stub(t.trigger, c.lvglEvent) : t.bodyLines.map((l) => `      ${l}`)
+      if (isCheckGuarded) {
+        const guard = t.trigger === 'checked' ? '' : '!'
+        lines.push(`      if (${guard}lv_obj_has_state(${ev.varName}, LV_STATE_CHECKED)) {`)
+        lines.push(...content.map((l) => `  ${l}`))
+        lines.push('      }')
+      } else {
+        lines.push(...content)
+      }
+    }
+    if (hasRealBody && afterRealBody) lines.push(`      ${afterRealBody}`)
+    lines.push('      break;')
+    lines.push('    }')
+  }
+  // Commented-out cases for the common LVGL events not already handled above, each with a short
+  // "when does this fire" description — beginner-friendly reference showing what's available so
+  // users can learn LVGL events without reaching for the docs; uncomment whichever one you need.
+  // Combines the Properties panel's selectable trigger list with a few read-only-reference-only
+  // extras (scroll-end/ready/cancel — not offered as checkboxes, just useful to know about), and
+  // only lists events not already active as a real case above, so a commented-out case never sits
+  // right next to an identical real one.
+  const activeLvglEvents = new Set(ev.cases.map((c) => c.lvglEvent))
+  const referenceEvents = new Map<string, string>() // lvglEvent -> label
+  for (const opt of EVENT_CALLBACK_TRIGGER_OPTIONS) referenceEvents.set(TRIGGER_TO_LVGL_EVENT[opt.value], opt.label)
+  for (const lvglEvent of EXTRA_REFERENCE_LVGL_EVENTS) if (!referenceEvents.has(lvglEvent)) referenceEvents.set(lvglEvent, '')
+  const inactiveEvents = Array.from(referenceEvents.entries()).filter(([lvglEvent]) => !activeLvglEvents.has(lvglEvent))
+  if (inactiveEvents.length > 0) {
+    lines.push('    // Other common events you can handle here — uncomment the ones you need:')
+    for (const [lvglEvent, label] of inactiveEvents) {
+      const desc = describe(lvglEvent)
+      lines.push(`    // case ${lvglEvent}:${label ? ` // ${label} — ${desc}` : desc ? ` // ${desc}` : ''}`)
+      lines.push('    //   break;')
+    }
+  }
+  lines.push('    default:')
+  lines.push('      break;')
+  lines.push('  }')
+  lines.push('}')
+  return lines
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -956,6 +1128,14 @@ export async function generateUiScreenExport(project: Project, screenId: string,
  * Usage:
  *   #include "${headerFilename}"
  *   ${showFnName}();   // creates + loads this screen
+ *
+ * Finding a widget by its ID: this standalone mode deliberately has no Project_Register()/
+ * FindWidget() registry (that's Complete Project export's own scaffolding — out of scope for a
+ * single dependency-free screen file). If you gave a widget an ID in the Properties panel (e.g.
+ * id="wifiButton"), its lv_obj_t* is a \`static\` variable named \`wifiButton_obj\` inside
+ * ${sourceFilename} — declare \`extern lv_obj_t* wifiButton_obj;\` in your own .cpp to reference it
+ * directly, or use ${snake}_focus_group()/lv_group_get_focused() below if you just need
+ * "whichever widget is currently focused."
  */
 #pragma once
 #include "lvgl.h"
@@ -967,6 +1147,12 @@ lv_obj_t* ${createFnName}();
 // Creates and loads this screen as the active LVGL screen, deleting whatever screen was active
 // before.
 void ${showFnName}();
+
+// Returns this screen's LVGL focus group — every focusable widget on it (buttons, switches,
+// sliders, checkboxes, dropdowns, rollers, text areas, list buttons, arcs, tabs, and any widget
+// with a click/press/release handler) is added to it. Connect a keyboard or rotary encoder input
+// device to it via lv_indev_set_group() for real hardware focus navigation.
+lv_group_t* ${snake}_focus_group();
 `
   ]
 
@@ -987,8 +1173,19 @@ void ${showFnName}();
   c.push(stylesCode)
   c.push('')
 
+  c.push('// ---- Focus group — every focusable widget on this screen is added to it (see the')
+  c.push('// per-widget lv_group_add_obj() calls below). ----')
+  c.push('static lv_group_t* s_focusGroup = nullptr;')
+  c.push('')
+  c.push(`lv_group_t* ${snake}_focus_group() { return s_focusGroup; }`)
+  c.push('')
+
   if (widgets.length > 0) {
-    c.push('// ---- Widget objects ----')
+    c.push('// ---- Widget objects — one `static lv_obj_t*` per widget, named after its Properties-panel')
+    c.push('// ID when it has one (e.g. id="wifiButton" -> wifiButton_obj). No Project_Register()/')
+    c.push('// FindWidget() lookup-by-string exists in this standalone mode (that\'s Complete Project')
+    c.push('// export\'s own scaffolding) — to reach one of these from your own .cpp, declare a matching')
+    c.push('// `extern lv_obj_t* wifiButton_obj;` instead. ----')
     const declared = new Set<string>()
     for (const w of widgets) {
       const v = widgetVarName(w)
@@ -1001,14 +1198,11 @@ void ${showFnName}();
     c.push('')
   }
 
+  const eventByWidgetId = new Map<string, EventExport>(events.map((ev) => [ev.widget.id, ev]))
   if (events.length > 0) {
-    c.push('// ---- Event callbacks — fill in the bodies (inside the USER CODE markers) with your own logic. ----')
+    c.push('// ---- Event Callbacks — fill in the switch cases (inside the USER CODE markers) with your own logic. ----')
     for (const ev of events) {
-      c.push(`static void ${ev.handlerName}(lv_event_t* e) {`)
-      c.push(`  // USER CODE BEGIN ${ev.handlerName}`)
-      c.push(`  // TODO: handle the "${ev.trigger}" event for "${ev.widget.tagId}" here.`)
-      c.push(`  // USER CODE END ${ev.handlerName}`)
-      c.push('}')
+      c.push(...emitEventCallbackBody(ev, true))
       c.push('')
     }
   }
@@ -1030,21 +1224,31 @@ void ${showFnName}();
   }
   const emitWidget = (widget: UiWidget, parentVar: string, buffer: string[], indent: string) => {
     const varName = widgetVarName(widget)
+    const ev = eventByWidgetId.get(widget.id)
+    const isFocusable = EVENT_CAPABLE_WIDGET_TYPES.has(widget.type) || !!ev
     if (widget.tagId) {
       const fnName = uniqueFnName(widgetCreateFnName(widget))
       const fnBuffer: string[] = []
       fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, '  '))
+      if (isFocusable) fnBuffer.push(`  lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
       fnBuffer.push(...styleApplyCalls(widget, rules, varName, '  '))
-      for (const ev of events) {
-        if (ev.widget.id === widget.id) fnBuffer.push(`  lv_obj_add_event_cb(${varName}, ${ev.handlerName}, ${ev.lvglEvent}, NULL);`)
-      }
+      if (ev) fnBuffer.push(`  lv_obj_add_event_cb(${varName}, ${ev.handlerName}, LV_EVENT_ALL, NULL);`)
+      // Deliberately no lv_group_focus_obj() call here — leaving the group without an initial
+      // focus means no widget shows the focused-style border on screen load; LVGL's own
+      // lv_group_focus_next()/prev() already fall back to the group's first object the moment the
+      // user actually turns the encoder, so the focus outline only ever appears once real encoder
+      // input starts, not by default.
+      if (isFocusable) fnBuffer.push(`  lv_group_add_obj(s_focusGroup, ${varName});`)
       for (const child of children(uiDesign, widget)) emitWidget(child, varName, fnBuffer, '  ')
       fnBuffer.push(`  return ${varName};`)
       namedFnBuffers.push([`static lv_obj_t* ${fnName}(lv_obj_t* parent) {`, ...fnBuffer, '}'])
       buffer.push(`${indent}${fnName}(${parentVar});`)
     } else {
       buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, indent))
+      if (isFocusable) buffer.push(`${indent}lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
       buffer.push(...styleApplyCalls(widget, rules, varName, indent))
+      if (ev) buffer.push(`${indent}lv_obj_add_event_cb(${varName}, ${ev.handlerName}, LV_EVENT_ALL, NULL);`)
+      if (isFocusable) buffer.push(`${indent}lv_group_add_obj(s_focusGroup, ${varName});`)
       for (const child of children(uiDesign, widget)) emitWidget(child, varName, buffer, indent)
     }
   }
@@ -1066,8 +1270,15 @@ void ${showFnName}();
   c.push(`lv_obj_t* ${createFnName}() {`)
   c.push('  static bool s_stylesInited = false;')
   c.push('  if (!s_stylesInited) { s_stylesInited = true; Ui_InitStyles(); }')
+  c.push('  if (s_focusGroup == nullptr) { s_focusGroup = lv_group_create(); }')
+  // LVGL's own lv_group_add_obj() auto-focuses an object the moment it's the first one added to
+  // an empty group (a built-in library behavior, not something this file controls) — freezing the
+  // group while the widgets below are created suppresses that, so nothing shows the focused-style
+  // border until the user's first real encoder/keyboard input.
+  c.push('  lv_group_focus_freeze(s_focusGroup, true);')
   c.push('  lv_obj_t* screen = lv_obj_create(NULL);')
   c.push(...bodyBuffer)
+  c.push('  lv_group_focus_freeze(s_focusGroup, false);')
   c.push('  return screen;')
   c.push('}')
   c.push('')
@@ -1090,12 +1301,13 @@ void ${showFnName}();
     files.push({ name: assetsHeaderFilename, content: assetsHeaderRaw })
     files.push({ name: assetsSourceFilename, content: assetsSourceRaw })
   }
-  files.push({ name: 'USAGE.md', content: generateUsageMd(project, screen, snake, createFnName, showFnName, identByAssetId.size > 0, notes) })
+  const exampleWidgetId = namedWidgets(widgets)[0]?.tagId ?? null
+  files.push({ name: 'USAGE.md', content: generateUsageMd(project, screen, snake, createFnName, showFnName, identByAssetId.size > 0, notes, exampleWidgetId) })
 
   return { files, notes }
 }
 
-function generateUsageMd(project: Project, screen: UiScreen, snake: string, createFnName: string, showFnName: string, hasAssets: boolean, notes: string[]): string {
+function generateUsageMd(project: Project, screen: UiScreen, snake: string, createFnName: string, showFnName: string, hasAssets: boolean, notes: string[], exampleWidgetId: string | null): string {
   return `# ${screen.name} — Standalone LVGL Screen
 
 "UI Screen Only" export from project "${project.name}". This is just this one screen — no LVGL/display/SPI/board initialization
@@ -1121,7 +1333,51 @@ immediately showing it (e.g. to pre-create it at startup and show it later).
 ## Event callbacks
 
 Every interactive widget on this screen got an empty \`// TODO\` callback stub in
-\`${snake}_screen.cpp\` — fill those in with your own logic.
+\`${snake}_screen.cpp\` — fill those in with your own logic. From anywhere else in your code, you
+can trigger the same callback manually (as if a touch/mouse/keyboard/encoder had produced it) with
+\`lv_obj_send_event()\`:
+
+\`\`\`cpp
+${exampleWidgetId ? `lv_obj_send_event(${toCIdentifier(exampleWidgetId)}_obj, LV_EVENT_CLICKED, nullptr);` : '// (no named widget on this screen yet — give one an ID in the Properties panel to reference it here)'}
+lv_obj_send_event(${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'someWidget_obj'}, LV_EVENT_PRESSED, nullptr);
+lv_obj_send_event(${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'someWidget_obj'}, LV_EVENT_RELEASED, nullptr);
+lv_obj_send_event(${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'someWidget_obj'}, LV_EVENT_VALUE_CHANGED, nullptr);
+\`\`\`
+
+(This screen's widget variables — e.g. \`${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'wifiButton_obj'}\` — are \`static\` to \`${snake}_screen.cpp\`; reference
+them from your own \`.cpp\` file by adding your own \`extern\` declaration, or call
+\`lv_group_get_focused(${snake}_focus_group())\` if you just need "whatever's focused right now".)
+
+## Focus (keyboard / rotary encoder / physical buttons)
+
+Every focusable widget (buttons, switches, sliders, checkboxes, dropdowns, rollers, text areas,
+list buttons, arcs, tabs, and any widget with a click/press/release handler) is automatically
+added to this screen's own LVGL focus group and gets a visible border (\`LV_STATE_FOCUSED\`) while
+focused — nothing is focused by default when the screen is created, so no border shows up until
+the user actually starts navigating; the first real encoder/keyboard input then focuses the
+group's first widget automatically (standard LVGL group behavior). Connect a keyboard or rotary
+encoder input device to it so hardware input can move focus:
+
+\`\`\`cpp
+lv_indev_t* encoderIndev = /* your registered LVGL encoder input device */;
+if (encoderIndev != nullptr) {
+  lv_indev_set_group(encoderIndev, ${snake}_focus_group());
+}
+\`\`\`
+
+Rotating the encoder moves focus between widgets; pressing it activates whichever widget is
+currently focused (LVGL generates \`LV_EVENT_CLICKED\` for you). You can also move focus from code:
+
+\`\`\`cpp
+lv_group_focus_next(${snake}_focus_group());   // move to the next focusable widget
+lv_group_focus_prev(${snake}_focus_group());   // move to the previous focusable widget
+${exampleWidgetId ? `lv_group_focus_obj(${toCIdentifier(exampleWidgetId)}_obj);         // give one specific widget real keyboard/encoder focus` : '// lv_group_focus_obj(someWidget_obj);   // give one specific widget real keyboard/encoder focus'}
+\`\`\`
+
+\`lv_group_focus_obj()\` gives a widget real LVGL keyboard/encoder focus (the group's current
+selection). \`lv_obj_add_state(obj, LV_STATE_FOCUSED)\`/\`lv_obj_remove_state(obj, LV_STATE_FOCUSED)\`
+only change that widget's *visual* focused appearance without touching the group's selection — use
+those only if you want the focused look without real input-device focus.
 ${notes.length > 0 ? `\n## Notes\n\n${notes.map((n) => `- ${n}`).join('\n')}\n` : ''}`
 }
 
@@ -1181,6 +1437,10 @@ export function generateLiveScreenCode(project: Project, screenId: string | null
   out.push(stylesCode)
   out.push('')
 
+  out.push('// ---- Focus group — every focusable widget on this screen is added to it ----')
+  out.push('static lv_group_t* s_focusGroup = nullptr;')
+  out.push('')
+
   if (widgets.length > 0) {
     out.push('// ---- Widget objects ----')
     const declared = new Set<string>()
@@ -1195,25 +1455,11 @@ export function generateLiveScreenCode(project: Project, screenId: string | null
     out.push('')
   }
 
+  const eventByWidgetId = new Map<string, EventExport>(events.map((ev) => [ev.widget.id, ev]))
   if (events.length > 0) {
-    out.push('// ---- Event callbacks ----')
+    out.push('// ---- Event Callbacks ----')
     for (const ev of events) {
-      out.push(`static void ${ev.handlerName}(lv_event_t* e) {`)
-      if (ev.bodyLines === null) {
-        out.push(`  // TODO: handle the "${ev.trigger}" event for "${ev.widget.tagId}" here.`)
-        out.push('  // (wire this up in the Properties panel\'s Events section or the Logic tab.)')
-      } else {
-        const body = ev.bodyLines.map((l) => `  ${l}`)
-        if (ev.trigger === 'checked' || ev.trigger === 'unchecked') {
-          const guard = ev.trigger === 'checked' ? '' : '!'
-          out.push(`  if (${guard}lv_obj_has_state(${ev.varName}, LV_STATE_CHECKED)) {`)
-          out.push(...body.map((l) => `  ${l}`))
-          out.push('  }')
-        } else {
-          out.push(...body)
-        }
-      }
-      out.push('}')
+      out.push(...emitEventCallbackBody(ev, false))
       out.push('')
     }
   }
@@ -1234,21 +1480,31 @@ export function generateLiveScreenCode(project: Project, screenId: string | null
   }
   const emitWidget = (widget: UiWidget, parentVar: string, buffer: string[], indent: string) => {
     const varName = widgetVarName(widget)
+    const ev = eventByWidgetId.get(widget.id)
+    const isFocusable = EVENT_CAPABLE_WIDGET_TYPES.has(widget.type) || !!ev
     if (widget.tagId) {
       const fnName = uniqueFnName(widgetCreateFnName(widget))
       const fnBuffer: string[] = []
       fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, '  '))
+      if (isFocusable) fnBuffer.push(`  lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
       fnBuffer.push(...styleApplyCalls(widget, rules, varName, '  '))
-      for (const ev of events) {
-        if (ev.widget.id === widget.id) fnBuffer.push(`  lv_obj_add_event_cb(${varName}, ${ev.handlerName}, ${ev.lvglEvent}, NULL);`)
-      }
+      if (ev) fnBuffer.push(`  lv_obj_add_event_cb(${varName}, ${ev.handlerName}, LV_EVENT_ALL, NULL);`)
+      // Deliberately no lv_group_focus_obj() call here — leaving the group without an initial
+      // focus means no widget shows the focused-style border on screen load; LVGL's own
+      // lv_group_focus_next()/prev() already fall back to the group's first object the moment the
+      // user actually turns the encoder, so the focus outline only ever appears once real encoder
+      // input starts, not by default.
+      if (isFocusable) fnBuffer.push(`  lv_group_add_obj(s_focusGroup, ${varName});`)
       for (const child of children(uiDesign, widget)) emitWidget(child, varName, fnBuffer, '  ')
       fnBuffer.push(`  return ${varName};`)
       namedFnBuffers.push([`static lv_obj_t* ${fnName}(lv_obj_t* parent) {`, ...fnBuffer, '}'])
       buffer.push(`${indent}${fnName}(${parentVar});`)
     } else {
       buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, indent))
+      if (isFocusable) buffer.push(`${indent}lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
       buffer.push(...styleApplyCalls(widget, rules, varName, indent))
+      if (ev) buffer.push(`${indent}lv_obj_add_event_cb(${varName}, ${ev.handlerName}, LV_EVENT_ALL, NULL);`)
+      if (isFocusable) buffer.push(`${indent}lv_group_add_obj(s_focusGroup, ${varName});`)
       for (const child of children(uiDesign, widget)) emitWidget(child, varName, buffer, indent)
     }
   }
@@ -1270,8 +1526,15 @@ export function generateLiveScreenCode(project: Project, screenId: string | null
   out.push(`lv_obj_t* ${createFnName}() {`)
   out.push('  static bool s_stylesInited = false;')
   out.push('  if (!s_stylesInited) { s_stylesInited = true; Ui_InitStyles(); }')
+  out.push('  if (s_focusGroup == nullptr) { s_focusGroup = lv_group_create(); }')
+  // LVGL's own lv_group_add_obj() auto-focuses an object the moment it's the first one added to
+  // an empty group (a built-in library behavior, not something this file controls) — freezing the
+  // group while the widgets below are created suppresses that, so nothing shows the focused-style
+  // border until the user's first real encoder/keyboard input.
+  out.push('  lv_group_focus_freeze(s_focusGroup, true);')
   out.push('  lv_obj_t* screen = lv_obj_create(NULL);')
   out.push(...bodyBuffer)
+  out.push('  lv_group_focus_freeze(s_focusGroup, false);')
   out.push('  return screen;')
   out.push('}')
   out.push('')
@@ -1293,6 +1556,12 @@ export function generateLiveScreenCode(project: Project, screenId: string | null
  * joined with section banners by generateKiboUIParts) — B2's file-consolidation goal folds what
  * used to be UIStyles.h/UICore.h/one-file-per-screen into this single file instead. */
 function generateUiCpp(cppBody: string, hasAssets: boolean): string {
+  // ui.cpp is a plain .cpp translation unit, not a .ino sketch — the Arduino core's implicit
+  // `Serial` global (and Arduino.h itself) is only auto-included for .ino files, so any
+  // Serial.* call reaching this file (a hardware stub, or a hand-typed USER CODE body) needs the
+  // include added explicitly here or it won't compile. Checked once against the whole assembled
+  // body rather than threaded through every generator that could possibly emit a Serial.* call.
+  const needsArduino = cppBody.includes('Serial.')
   const lines = [
     `/*
  * ui.cpp
@@ -1303,7 +1572,7 @@ function generateUiCpp(cppBody: string, hasAssets: boolean): string {
  * \`// TODO\` event-callback body, which is safe to fill in.
  */
 #include "ui.h"
-${hasAssets ? '#include "assets.h"\n' : ''}#include <string.h>
+${hasAssets ? '#include "assets.h"\n' : ''}${needsArduino ? '#include <Arduino.h> // for Serial — used by a callback/USER CODE body below\n' : ''}#include <string.h>
 `
   ]
   lines.push(cppBody)
@@ -1365,24 +1634,29 @@ async function buildKiboUiCore(project: Project) {
   const rules = usedCssRules(uiDesign, widgets)
   const { header: assetsHeader, source: assetsSource, identByAssetId } = await exportLvglAssets(uiDesign, widgets, rules, 'assets')
   const hasAssets = identByAssetId.size > 0
-  const stylesCode = exportLvglStyles(widgets, rules, identByAssetId, ns)
+  // Fixed "Project" prefix (not the project-derived `ns`) for the style-init function — this is
+  // internal scaffolding, not part of the branded public API, so it stays a stable generic name
+  // (`Project_InitStyles`) regardless of the project's name — see Project_Register below for the
+  // same reasoning applied to the widget registry.
+  const stylesCode = exportLvglStyles(widgets, rules, identByAssetId, 'Project')
   const codegen = runScriptCodegen(uiDesign, buildCodegenContext(uiDesign, rules, identByAssetId, ns))
   const events = collectEvents(widgets, codegen.eventHandlers)
   const named = namedWidgets(widgets)
-  const parts = generateKiboUIParts(uiDesign, widgets, rules, identByAssetId, events, named, stylesCode, codegen, ns)
+  const parts = generateKiboUIParts(uiDesign, widgets, rules, identByAssetId, events, stylesCode, codegen, ns)
   return { uiDesign, ns, widgets, rules, assetsHeader, assetsSource, identByAssetId, hasAssets, stylesCode, codegen, events, named, parts }
 }
 
 export async function generateLvglExport(project: Project, target: ExportTarget): Promise<LvglExportFile[]> {
-  const { uiDesign, ns, widgets, rules, assetsHeader, assetsSource, hasAssets, codegen, events, parts } = await buildKiboUiCore(project)
+  const { uiDesign, ns, widgets, rules, assetsHeader, assetsSource, hasAssets, codegen, events, named, parts } = await buildKiboUiCore(project)
 
   const config = generateKiboUIConfig(uiDesign.display, target, ns)
   const lvConf = generateLvConf()
   const mainShowFnName = uiDesign.screens[0] ? screenShowFnName(uiDesign.screens[0].name) : null
   const entryBaseName = sanitizeFilename(project.name)
   const entryFilename = target.format === 'arduino' ? `${entryBaseName}.ino` : 'src/main.cpp'
-  const mainEntry = generateMainEntry(mainShowFnName, target, entryFilename.replace(/^src\//, ''), ns)
-  const readme = generateReadme(project, widgets, rules, events, codegen, target, ns)
+  const exampleWidgetId = named[0]?.tagId ?? null
+  const mainEntry = generateMainEntry(mainShowFnName, target, entryFilename.replace(/^src\//, ''), ns, exampleWidgetId)
+  const readme = generateReadme(project, widgets, rules, events, codegen, target, ns, exampleWidgetId)
 
   const configPath = target.format === 'arduino' ? 'config.h' : 'include/config.h'
   const lvConfPath = target.format === 'arduino' ? 'lv_conf.h' : 'include/lv_conf.h'
@@ -1606,7 +1880,6 @@ function generateKiboUIParts(
   rules: CssRuleExport[],
   identByAssetId: Map<string, string>,
   events: EventExport[],
-  named: UiWidget[],
   stylesCode: string,
   codegen: CodegenResult,
   ns: string
@@ -1647,6 +1920,18 @@ function generateKiboUIParts(
   h.push('void SetWidgetValue(const char* widgetId, int32_t value);')
   h.push('// Looks up a widget\'s raw lv_obj_t* by id (for anything not covered by the helpers above) — returns nullptr if not found.')
   h.push('lv_obj_t* FindWidget(const char* widgetId);')
+  h.push('// The shared LVGL input-device focus group every focusable widget (buttons, switches,')
+  h.push('// sliders, checkboxes, dropdowns, rollers, text areas, list buttons, arcs, tabs, and any')
+  h.push('// widget with a click/press/release handler) is added to. Connect a keyboard or rotary')
+  h.push('// encoder input device to it via lv_indev_set_group() for real hardware focus navigation —')
+  h.push('// see ui.cpp\'s usage comments and README.md\'s "Focus & input devices" section.')
+  h.push('lv_group_t* GetFocusGroup();')
+  h.push('// Removes the focused-style border from whichever widget currently has it, returning the')
+  h.push('// screen to its no-focus default look (see ui.cpp\'s "Deliberately no lv_group_focus_obj()"')
+  h.push('// note) — call this any time you want to hide focus again, e.g. after a period of no encoder')
+  h.push('// input, or when leaving a screen. The group still remembers which widget was focused, so the')
+  h.push('// next real encoder input resumes navigation from the same place, not from the beginning.')
+  h.push('void ClearFocus();')
   if (uiDesign.variables.length > 0) {
     h.push('')
     h.push('// Variable Manager getters/setters (see the Variables tab) — data.<name> in the Logic tab\'s')
@@ -1681,6 +1966,10 @@ function generateKiboUIParts(
   h.push(`  void setValue(const char* widgetId, int32_t value) { ${ns}::SetWidgetValue(widgetId, value); }`)
   h.push('  // Looks up a widget\'s raw lv_obj_t* by id — returns nullptr if not found.')
   h.push(`  lv_obj_t* findWidget(const char* widgetId) { return ${ns}::FindWidget(widgetId); }`)
+  h.push('  // The shared LVGL focus group — see ui.h\'s GetFocusGroup() for details.')
+  h.push(`  lv_group_t* getFocusGroup() { return ${ns}::GetFocusGroup(); }`)
+  h.push('  // Hides the focused-style border again — see ui.h\'s ClearFocus() for details.')
+  h.push(`  void clearFocus() { ${ns}::ClearFocus(); }`)
   for (const { showFnName, screen } of screenFns) {
     const method = showFnName.charAt(0).toLowerCase() + showFnName.slice(1)
     h.push(`  // Shows the "${screen.name}" screen.`)
@@ -1736,12 +2025,19 @@ function generateKiboUIParts(
   }
 
   core.push('// ---- Widget registry (id -> lv_obj_t*), used by SetLabelText/SetWidgetVisible/SetWidgetValue/FindWidget ----')
-  core.push(`#define ${macroPrefix}_MAX_WIDGETS ${Math.max(1, named.length)}`)
+  // Sized to every widget, not just named.length (the tagId-bearing subset) — every widget gets
+  // Project_Register'd below (see emitWidget), using its own tagId when set or its auto-generated
+  // fallback id (the same string already shown in its variable name) otherwise, so FindWidget()
+  // works even for widgets the user never explicitly named.
+  core.push(`#define ${macroPrefix}_MAX_WIDGETS ${Math.max(1, widgets.length)}`)
   core.push(`static const char* s_widgetIds[${macroPrefix}_MAX_WIDGETS];`)
   core.push(`static lv_obj_t* s_widgetObjs[${macroPrefix}_MAX_WIDGETS];`)
   core.push('static int s_widgetCount = 0;')
   core.push('')
-  core.push(`static void ${ns}_Register(const char* id, lv_obj_t* obj) {`)
+  // Fixed "Project" prefix (not the project-derived `ns`) — internal scaffolding, not part of
+  // the branded public API, so it can never read e.g. "UntitledProject_Register" for a project
+  // that hasn't been renamed yet (see naming.ts's sanitizeIdentifier default).
+  core.push('static void Project_Register(const char* id, lv_obj_t* obj) {')
   core.push(`  if (s_widgetCount < ${macroPrefix}_MAX_WIDGETS) {`)
   core.push('    s_widgetIds[s_widgetCount] = id;')
   core.push('    s_widgetObjs[s_widgetCount] = obj;')
@@ -1754,6 +2050,25 @@ function generateKiboUIParts(
   core.push('    if (strcmp(s_widgetIds[i], widgetId) == 0) return s_widgetObjs[i];')
   core.push('  }')
   core.push('  return nullptr;')
+  core.push('}')
+  core.push('')
+  core.push('// ---- Shared LVGL focus group — every focusable widget across every screen is added to')
+  core.push('// this one group (see the per-widget lv_group_add_obj() calls in each screen\'s section')
+  core.push('// below). Connect a keyboard/encoder lv_indev_t to it via lv_indev_set_group() so rotating')
+  core.push('// the encoder moves focus and pressing it activates the focused widget. Call')
+  core.push(`// ${ns}::ClearFocus() (or UI.clearFocus() from your own code) any time you want to hide the`)
+  core.push('// focused-style border again without losing the group\'s place. ----')
+  core.push('static lv_group_t* g_uiFocusGroup = nullptr;')
+  core.push('')
+  core.push(`lv_group_t* ${ns}::GetFocusGroup() { return g_uiFocusGroup; }`)
+  core.push('')
+  // Visual-only: removes LV_STATE_FOCUSED from whatever's currently focused without telling the
+  // group anything changed, so g_uiFocusGroup's own internal selection is untouched — the next
+  // real lv_group_focus_next()/prev() (the next encoder turn) resumes from the same widget and
+  // re-applies the border correctly, exactly like it does on a fresh, never-focused screen.
+  core.push(`void ${ns}::ClearFocus() {`)
+  core.push('  lv_obj_t* focused = lv_group_get_focused(g_uiFocusGroup);')
+  core.push('  if (focused) lv_obj_remove_state(focused, LV_STATE_FOCUSED);')
   core.push('}')
   core.push('')
 
@@ -1857,31 +2172,15 @@ function generateKiboUIParts(
     core.push('')
   }
 
+  const eventByWidgetId = new Map<string, EventExport>(events.map((ev) => [ev.widget.id, ev]))
   if (events.length > 0) {
-    core.push('// ---- Event callbacks. Bodies generated from the Logic tab\'s script are regenerated')
+    core.push('// ---- Event Callbacks. Bodies generated from the Logic tab\'s script are regenerated')
     core.push('// on every export — edit the script, not this file, to change them. Empty // TODO stubs')
-    core.push('// (no script handler for that trigger) are safe to hand-edit; re-exporting preserves')
+    core.push('// (no script handler for that event) are safe to hand-edit; re-exporting preserves')
     core.push('// stub declarations but not any body you\'ve typed into one — move logic you want to')
     core.push(`// keep into your own .cpp file calling ${ns}::FindWidget() instead. ----`)
     for (const ev of events) {
-      core.push(`static void ${ev.handlerName}(lv_event_t* e) {`)
-      if (ev.bodyLines === null) {
-        core.push(`  // USER CODE BEGIN ${ev.handlerName}`)
-        core.push(`  // TODO: handle the "${ev.trigger}" event for "${ev.widget.tagId}" here.`)
-        core.push(`  // USER CODE END ${ev.handlerName}`)
-      } else {
-        const body = ev.bodyLines.map((l) => `  ${l}`)
-        if (ev.trigger === 'checked' || ev.trigger === 'unchecked') {
-          const guard = ev.trigger === 'checked' ? '' : '!'
-          core.push(`  if (${guard}lv_obj_has_state(${ev.varName}, LV_STATE_CHECKED)) {`)
-          core.push(...body.map((l) => `  ${l}`))
-          core.push('  }')
-        } else {
-          core.push(...body)
-        }
-        if (updateBindingsCall) core.push(updateBindingsCall)
-      }
-      core.push('}')
+      core.push(...emitEventCallbackBody(ev, true, hasBindings ? `${ns}_UpdateBindings();` : undefined))
       core.push('')
     }
   }
@@ -1898,10 +2197,21 @@ function generateKiboUIParts(
 
   core.push('// ---- Public API ----')
   core.push(`void ${ns}::Begin() {`)
-  core.push(`  ${ns}_InitStyles();`)
+  core.push('  if (g_uiFocusGroup == nullptr) {')
+  core.push('    g_uiFocusGroup = lv_group_create();')
+  core.push('  }')
+  // LVGL's own lv_group_add_obj() auto-focuses an object the moment it's the first one added to
+  // an empty group — a built-in behavior of the library itself, independent of whether this file
+  // ever calls lv_group_focus_obj(). Freezing the group for the duration of screen creation (every
+  // lv_group_add_obj() call below happens inside the *Screen() functions) suppresses that
+  // auto-focus too, so nothing shows the focused-style border until the user's first real
+  // encoder/keyboard input — see ClearFocus()'s doc comment in ui.h for the full picture.
+  core.push('  lv_group_focus_freeze(g_uiFocusGroup, true);')
+  core.push('  Project_InitStyles();')
   for (const { screen, fnName } of screenFns) {
     core.push(`  s_screen_${toCIdentifier(screen.id)} = ${fnName}();`)
   }
+  core.push('  lv_group_focus_freeze(g_uiFocusGroup, false);')
   if (screenFns.length > 0) core.push(`  s_currentScreen = s_screen_${toCIdentifier(screenFns[0].screen.id)};`)
   if (hasScriptInit) core.push(`  ${ns}_ScriptInit();`)
   core.push('}')
@@ -1971,26 +2281,42 @@ function generateKiboUIParts(
     return `${base}${i}`
   }
 
+  // A widget is focusable (added to g_uiFocusGroup, gets the default s_focusedStyle) when it's
+  // one of EVENT_CAPABLE_WIDGET_TYPES' genuinely-interactive kinds, OR it has its own generated
+  // event callback (`ev`) — covering a "custom clickable object" (e.g. a container the user wired
+  // a click handler onto in the Logic tab) without making every decorative label/image focusable.
   const emitWidget = (widget: UiWidget, parentVar: string, buffer: string[], indent: string, screenNamedBuffers: string[][]) => {
     const varName = widgetVarName(widget)
+    const ev = eventByWidgetId.get(widget.id)
+    const isFocusable = EVENT_CAPABLE_WIDGET_TYPES.has(widget.type) || !!ev
     if (widget.tagId) {
       const fnName = uniqueFnName(widgetCreateFnName(widget))
       const fnBuffer: string[] = []
       fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, '  '))
+      if (isFocusable) fnBuffer.push(`  lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
       fnBuffer.push(...styleApplyCalls(widget, rules, varName, '  '))
-      fnBuffer.push(`  ${ns}_Register(${JSON.stringify(widget.tagId)}, ${varName});`)
-      for (const ev of events) {
-        if (ev.widget.id === widget.id) {
-          fnBuffer.push(`  lv_obj_add_event_cb(${varName}, ${ev.handlerName}, ${ev.lvglEvent}, NULL);`)
-        }
-      }
+      fnBuffer.push(`  Project_Register(${JSON.stringify(widget.tagId)}, ${varName});`)
+      if (ev) fnBuffer.push(`  lv_obj_add_event_cb(${varName}, ${ev.handlerName}, LV_EVENT_ALL, NULL);`)
+      // Deliberately no lv_group_focus_obj() call here — leaving the group without an initial
+      // focus means no widget shows the focused-style border on screen load; LVGL's own
+      // lv_group_focus_next()/prev() already fall back to the group's first object the moment the
+      // user actually turns the encoder, so the focus outline only ever appears once real encoder
+      // input starts, not by default.
+      if (isFocusable) fnBuffer.push(`  lv_group_add_obj(g_uiFocusGroup, ${varName});`)
       for (const child of children(uiDesign, widget)) emitWidget(child, varName, fnBuffer, '  ', screenNamedBuffers)
       fnBuffer.push(`  return ${varName};`)
       screenNamedBuffers.push([`static lv_obj_t* ${fnName}(lv_obj_t* parent) {`, ...fnBuffer, '}'])
       buffer.push(`${indent}${fnName}(${parentVar});`)
     } else {
       buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, indent))
+      if (isFocusable) buffer.push(`${indent}lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
       buffer.push(...styleApplyCalls(widget, rules, varName, indent))
+      // No tagId was set on this widget — still register it, under its auto-generated fallback
+      // id (the same string already used in its variable name, e.g. w_7wF5T4_obj -> "7wF5T4"), so
+      // FindWidget() can locate it even though the user never typed a custom ID for it.
+      buffer.push(`${indent}Project_Register(${JSON.stringify(widgetBaseName(widget))}, ${varName});`)
+      if (ev) buffer.push(`${indent}lv_obj_add_event_cb(${varName}, ${ev.handlerName}, LV_EVENT_ALL, NULL);`)
+      if (isFocusable) buffer.push(`${indent}lv_group_add_obj(g_uiFocusGroup, ${varName});`)
       for (const child of children(uiDesign, widget)) emitWidget(child, varName, buffer, indent, screenNamedBuffers)
     }
   }
@@ -2089,9 +2415,10 @@ function generateDisplayInitCode(target: ExportTarget, macroPrefix: string): { i
   }
 }
 
-function generateMainEntry(mainShowFnName: string | null, target: ExportTarget, entryFilename: string, ns: string): string {
+function generateMainEntry(mainShowFnName: string | null, target: ExportTarget, entryFilename: string, ns: string, exampleWidgetId: string | null): string {
   const macroPrefix = macroPrefixFor(ns)
   const di = generateDisplayInitCode(target, macroPrefix)
+  const idLiteral = JSON.stringify(exampleWidgetId ?? 'yourWidgetId')
   return `/*
  * ${entryFilename}
  *
@@ -2155,6 +2482,62 @@ void loop() {
   UI.update();
   delay(5);
 }
+
+// =================================================================================================
+// Usage examples — not called from anywhere above; copy whatever you need into your own code.
+// ${idLiteral} is ${exampleWidgetId ? 'a real widget ID from this project (the "ID" field in the Properties panel / UI Design Mode).' : 'a placeholder — give a widget an ID in the Properties panel, then use that ID here instead.'}
+// =================================================================================================
+
+// ---- Finding a widget + triggering its events manually ----
+//
+// lv_obj_t* uiButton = UI.findWidget(${idLiteral});
+//
+// if (uiButton != nullptr) {
+//   // Trigger the same callback used by touch, mouse, keyboard, encoder, or another input source.
+//   lv_obj_send_event(uiButton, LV_EVENT_CLICKED, nullptr);
+//   lv_obj_send_event(uiButton, LV_EVENT_PRESSED, nullptr);
+//   lv_obj_send_event(uiButton, LV_EVENT_RELEASED, nullptr);
+//   lv_obj_send_event(uiButton, LV_EVENT_VALUE_CHANGED, nullptr);
+// } else {
+//   Serial.println("Widget not found");
+// }
+
+// ---- Focus: giving a widget real keyboard/encoder focus ----
+//
+// lv_obj_t* uiButton = UI.findWidget(${idLiteral});
+//
+// if (uiButton != nullptr) {
+//   lv_group_focus_obj(uiButton);   // real LVGL keyboard/encoder focus, not just the visual state
+// }
+//
+// if (uiButton != nullptr && lv_obj_has_state(uiButton, LV_STATE_FOCUSED)) {
+//   Serial.println("Widget is focused");
+// }
+//
+// // Force/remove only the *visual* focused appearance, without moving the group's real selection:
+// lv_obj_add_state(uiButton, LV_STATE_FOCUSED);
+// lv_obj_remove_state(uiButton, LV_STATE_FOCUSED);
+
+// ---- Focus: moving between widgets ----
+//
+// lv_group_t* focusGroup = UI.getFocusGroup();
+//
+// if (focusGroup != nullptr) {
+//   lv_group_focus_next(focusGroup);   // move to the next focusable widget
+//   lv_group_focus_prev(focusGroup);   // move to the previous focusable widget
+// }
+
+// ---- Focus: connecting a rotary encoder (or keyboard) input device ----
+//
+// lv_indev_t* encoderIndev = /* your registered LVGL encoder input device */;
+//
+// if (encoderIndev != nullptr) {
+//   lv_indev_set_group(encoderIndev, UI.getFocusGroup());
+// }
+//
+// Rotating the encoder moves the focused widget; pressing it activates the focused widget (LVGL
+// generates LV_EVENT_CLICKED for you). Focused widgets are drawn with whatever style was
+// registered for LV_STATE_FOCUSED.
 `
 }
 
@@ -2208,7 +2591,8 @@ build_flags =
 // README.md
 // ---------------------------------------------------------------------------------------------
 
-function generateReadme(project: Project, widgets: UiWidget[], rules: CssRuleExport[], events: EventExport[], codegen: CodegenResult, target: ExportTarget, ns: string): string {
+function generateReadme(project: Project, widgets: UiWidget[], rules: CssRuleExport[], events: EventExport[], codegen: CodegenResult, target: ExportTarget, ns: string, exampleWidgetId: string | null): string {
+  const idLiteral = JSON.stringify(exampleWidgetId ?? 'yourWidgetId')
   const display = project.uiDesign.display
   const macroPrefix = macroPrefixFor(ns)
   const w = Math.round(target.width)
@@ -2291,6 +2675,83 @@ ${
   '// Variable Manager variables (Variables tab) get their own UI.set<Name>()/UI.get<Name>() pair, once you add any.'
 }
 \`\`\`
+
+For anything not covered by the helpers above, look the widget up directly and call LVGL's own
+API on it — \`${idLiteral}\` is ${exampleWidgetId ? 'a real widget ID from this project (the "ID" field in the Properties panel).' : 'the "ID" you give a widget in the Properties panel (add one to try this).'}
+
+\`\`\`cpp
+lv_obj_t* uiButton = UI.findWidget(${idLiteral});
+
+if (uiButton != nullptr) {
+  // Trigger the same callback used by touch, mouse, keyboard, encoder, or another input source.
+  lv_obj_send_event(uiButton, LV_EVENT_CLICKED, nullptr);
+  lv_obj_send_event(uiButton, LV_EVENT_PRESSED, nullptr);
+  lv_obj_send_event(uiButton, LV_EVENT_RELEASED, nullptr);
+  lv_obj_send_event(uiButton, LV_EVENT_VALUE_CHANGED, nullptr);
+} else {
+  Serial.println("Widget not found");
+}
+\`\`\`
+
+## Focus & input devices
+
+Every focusable widget (buttons, switches, sliders, checkboxes, dropdowns, rollers, text areas,
+list buttons, arcs, tabs, and any widget with a click/press/release handler wired up) is
+automatically added to one shared LVGL focus group and gets a visible border
+(\`LV_STATE_FOCUSED\`, registered in \`Project_InitStyles()\`) while focused — nothing is focused by
+default when a screen is created, so no border shows up until the user actually starts navigating;
+the first real encoder/keyboard input then focuses the group's first widget automatically
+(standard LVGL group behavior).
+
+Connect a keyboard or rotary encoder input device to it so hardware input can move focus:
+
+\`\`\`cpp
+lv_indev_t* encoderIndev = /* your registered LVGL encoder input device */;
+
+if (encoderIndev != nullptr) {
+  lv_indev_set_group(encoderIndev, UI.getFocusGroup());
+}
+\`\`\`
+
+Rotating the encoder moves focus between widgets; pressing it activates whichever widget is
+currently focused (LVGL generates \`LV_EVENT_CLICKED\` for you). You can also drive focus from code:
+
+\`\`\`cpp
+lv_obj_t* uiButton = UI.findWidget(${idLiteral});
+
+if (uiButton != nullptr) {
+  lv_group_focus_obj(uiButton);   // real LVGL keyboard/encoder focus — moves the group's selection
+}
+
+lv_group_t* focusGroup = UI.getFocusGroup();
+if (focusGroup != nullptr) {
+  lv_group_focus_next(focusGroup);   // move to the next focusable widget
+  lv_group_focus_prev(focusGroup);   // move to the previous focusable widget
+}
+
+if (uiButton != nullptr && lv_obj_has_state(uiButton, LV_STATE_FOCUSED)) {
+  Serial.println("Widget is focused");
+}
+
+// Force/remove only the *visual* focused appearance, without moving the group's real selection:
+lv_obj_add_state(uiButton, LV_STATE_FOCUSED);
+lv_obj_remove_state(uiButton, LV_STATE_FOCUSED);
+
+// Or just call the ready-made helper to go back to the screen's original no-focus look:
+UI.clearFocus();
+\`\`\`
+
+Use \`lv_group_focus_obj()\`/\`lv_group_focus_next()\`/\`lv_group_focus_prev()\` for real
+encoder/keyboard focus; \`lv_obj_add_state()\`/\`lv_obj_remove_state()\` only change a widget's
+visual state and appearance, not the group's actual selection. \`UI.clearFocus()\` hides
+whichever widget's border is currently showing (the same effect as a fresh, never-touched
+screen) without disturbing the group's remembered selection — the next real encoder input
+picks up navigation right where it left off.
+
+Every generated event callback also already supports \`LV_EVENT_FOCUSED\`/\`LV_EVENT_DEFOCUSED\` —
+select "Focused"/"Defocused" in a widget's Properties panel Events section (or \`.on('focused', ...)\`/
+\`.on('unfocused', ...)\` in the Logic tab's script) to run your own code when focus moves onto or
+off of it.
 
 ## Required
 
@@ -2419,7 +2880,7 @@ function validationSummaryText(widgets: UiWidget[], rules: CssRuleExport[], even
     `LVGL widgets: Passed (${widgets.length} widget${widgets.length === 1 ? '' : 's'})`,
     `UI styles: Passed (${rules.length} rule${rules.length === 1 ? '' : 's'})`,
     'UI assets: Passed',
-    `Event callbacks: Passed (${events.length} handler${events.length === 1 ? '' : 's'})`,
+    `Event callbacks: Passed (${events.length} widget callback${events.length === 1 ? '' : 's'})`,
     'LVGL configuration: Passed',
     'Eye Studio code excluded: Passed',
     'Arduino example: Passed',

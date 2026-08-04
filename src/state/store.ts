@@ -692,7 +692,10 @@ interface StoreState {
   /** Sets a widget's HTML id (`tagId`, must be unique — used as the exported LVGL function
    * name) and/or class list. Renamed away from "updateUiWidgetStyle" naming since these are
    * structural/selector-relevant fields, not style. */
-  updateUiWidgetMeta: (id: string, partial: { tagId?: string | null; classNames?: string[]; allowOutsideBounds?: boolean }) => void
+  updateUiWidgetMeta: (
+    id: string,
+    partial: { tagId?: string | null; classNames?: string[]; allowOutsideBounds?: boolean; eventCallbackEnabled?: boolean; eventCallbackTriggers?: string[] }
+  ) => void
 
   // UI Design Mode — CSS rules (see UiCssRule in types/uiDesign.ts + lib/uiDesign/cssCascade.ts
   // for how they're applied at render time).
@@ -3022,6 +3025,8 @@ export const useStore = create<StoreState>()(
         if (partial.tagId !== undefined) w.tagId = partial.tagId ?? undefined
         if (partial.classNames !== undefined) w.classNames = partial.classNames
         if (partial.allowOutsideBounds !== undefined) w.allowOutsideBounds = partial.allowOutsideBounds
+        if (partial.eventCallbackEnabled !== undefined) w.eventCallbackEnabled = partial.eventCallbackEnabled
+        if (partial.eventCallbackTriggers !== undefined) w.eventCallbackTriggers = partial.eventCallbackTriggers
         s.dirty = true
       }),
 

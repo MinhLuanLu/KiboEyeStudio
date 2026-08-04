@@ -388,7 +388,11 @@ function normalizeUiDesign(raw: unknown): UiDesignProject {
         visible: wr.visible !== false,
         locked: Boolean(wr.locked),
         allowOutsideBounds: Boolean(wr.allowOutsideBounds),
-        events: Array.isArray(wr.events) ? (wr.events as UiWidget['events']) : []
+        events: Array.isArray(wr.events) ? (wr.events as UiWidget['events']) : [],
+        eventCallbackEnabled: typeof wr.eventCallbackEnabled === 'boolean' ? wr.eventCallbackEnabled : undefined,
+        eventCallbackTriggers: Array.isArray(wr.eventCallbackTriggers)
+          ? wr.eventCallbackTriggers.filter((t): t is string => typeof t === 'string')
+          : []
       }
     }
   }

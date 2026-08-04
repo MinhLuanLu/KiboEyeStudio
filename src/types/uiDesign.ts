@@ -225,6 +225,20 @@ export interface UiWidget {
    * warning for a widget that doesn't fit inside a circular display. */
   allowOutsideBounds: boolean
   events: UiWidgetEvent[]
+  /** Auto-generated event callback (see EVENT_CAPABLE_WIDGET_TYPES in lvglExport.ts) — every
+   * interactive widget gets a scaffolded `<var>_event_cb(lv_event_t* e)` with a
+   * `switch (lv_event_get_code(e))` by default; set false here to opt a specific widget out.
+   * Independent of the script-authored `.on(...)` events (Logic tab) and the legacy `events`
+   * array above — real bodies from either of those are folded into this same callback's switch
+   * automatically, they never produce a second function. */
+  eventCallbackEnabled?: boolean
+  /** Which LVGL event codes the auto-generated callback's switch actually handles (see the
+   * Properties panel's Events section) — empty/undefined means "no specific selection", which
+   * still registers via LV_EVENT_ALL but only emits a `default:` case (fill in your own
+   * `lv_event_get_code(e)` check). Values are this app's existing trigger vocabulary (see
+   * EVENT_OPTIONS in PropertiesPanel.tsx), restricted to the subset LV_EVENT_ALL scaffolding
+   * makes sense for: click/pressed/released/longPress/valueChanged/focused/unfocused/scroll. */
+  eventCallbackTriggers?: string[]
 }
 
 /** A CSS rule as authored — selector is intentionally restricted to a single simple tag/

@@ -4,7 +4,7 @@ import { UI_BACKGROUND_IMAGE_WIDGETS, UI_SRC_IMAGE_WIDGETS, UI_WIDGET_LABELS } f
 import type { UiLengthValue, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
 import { rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
 import { ACTION_TABLE, HARDWARE_ACTION_PRESETS } from '@/lib/uiDesign/scriptLang/actionTable'
-import { widgetVarName } from '@/lib/export/lvglExport'
+import { widgetVarName, widgetBaseName, EVENT_CAPABLE_WIDGET_TYPES, EVENT_CALLBACK_TRIGGER_OPTIONS } from '@/lib/export/lvglExport'
 import {
   addEventRow,
   parseVisualEventRows,
@@ -360,6 +360,60 @@ function BindingRow({
  * row. Edits splice the script text at the exact node offsets that produced the row — never a
  * full regenerate (structural edits — add/remove/duplicate/reorder/disable — rewrite just the
  * handler's own block body, see visualEvents.ts). */
+/** "Auto-generate an event callback for this widget" — the automatic, script-free scaffolding
+ * (see EVENT_CAPABLE_WIDGET_TYPES/collectEvents in lvglExport.ts): every interactive widget gets
+ * a `<var>_event_cb(lv_event_t* e)` with a `switch (lv_event_get_code(e))`, registered via
+ * `lv_obj_add_event_cb(widget, cb, LV_EVENT_ALL, NULL)`, with one empty `case` per event checked
+ * below (or just a `default:` if none are checked — still real, compilable scaffolding). This is
+ * independent of — and merges into the same function as — any script-authored `.on(...)` events
+ * from the Logic tab or the "Events" list below; nothing here duplicates those. */
+function AutoEventCallbackSection({ widget }: { widget: UiWidget }) {
+  const updateUiWidgetMeta = useStore((s) => s.updateUiWidgetMeta)
+  const checkpoint = useStore((s) => s.checkpoint)
+  if (!EVENT_CAPABLE_WIDGET_TYPES.has(widget.type)) return null
+
+  const enabled = widget.eventCallbackEnabled !== false
+  const selected = widget.eventCallbackTriggers ?? []
+  const fnName = `${widgetBaseName(widget)}_event_cb`
+
+  const toggleEnabled = () => {
+    checkpoint()
+    updateUiWidgetMeta(widget.id, { eventCallbackEnabled: !enabled })
+  }
+  const toggleTrigger = (value: string) => {
+    checkpoint()
+    const next = selected.includes(value) ? selected.filter((t) => t !== value) : [...selected, value]
+    updateUiWidgetMeta(widget.id, { eventCallbackTriggers: next })
+  }
+
+  return (
+    <div className="border-t border-studio-border pt-2.5 flex flex-col gap-1.5">
+      <label className="flex items-center gap-1.5 cursor-pointer">
+        <input type="checkbox" checked={enabled} onChange={toggleEnabled} />
+        <span className="studio-label">Auto Event Callback</span>
+      </label>
+      {enabled && (
+        <>
+          <span className="text-[11px] text-studio-muted font-mono">{fnName}(lv_event_t* e)</span>
+          <div className="grid grid-cols-2 gap-x-2 gap-y-1">
+            {EVENT_CALLBACK_TRIGGER_OPTIONS.map((opt) => (
+              <label key={opt.value} className="flex items-center gap-1.5 text-xs cursor-pointer">
+                <input type="checkbox" checked={selected.includes(opt.value)} onChange={() => toggleTrigger(opt.value)} />
+                {opt.label}
+              </label>
+            ))}
+          </div>
+          <span className="text-[11px] text-studio-muted">
+            {selected.length === 0
+              ? 'No events checked — registers with LV_EVENT_ALL and an empty default: case you fill in yourself.'
+              : `Registers with LV_EVENT_ALL; the switch handles ${selected.length} selected event${selected.length === 1 ? '' : 's'}.`}
+          </span>
+        </>
+      )}
+    </div>
+  )
+}
+
 function EventsSection({ widget }: { widget: UiWidget }) {
   const script = useStore((s) => s.project.uiDesign.script)
   const widgets = useStore((s) => s.project.uiDesign.widgets)
@@ -1085,6 +1139,7 @@ export function PropertiesPanel() {
       </div>
 
       {widget.tagId && <BindingsSection widget={widget} />}
+      <AutoEventCallbackSection widget={widget} />
       {widget.tagId && <EventsSection widget={widget} />}
     </div>
   )
