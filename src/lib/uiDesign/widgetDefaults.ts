@@ -14,7 +14,7 @@ const WIDGET_DEFAULTS: Record<
   button: { width: 100, height: 40, text: 'Button' },
   label: { width: 80, height: 20, text: 'Label' },
   image: { width: 64, height: 64 },
-  icon: { width: 24, height: 24, text: '' },
+  icon: { width: 24, height: 24, text: '', style: { fontSize: 24 } },
   switch: { width: 40, height: 20 },
   slider: { width: 120, height: 12, props: { min: 0, max: 100, value: 50 } },
   bar: { width: 120, height: 12, props: { min: 0, max: 100, value: 40 } },

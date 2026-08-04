@@ -157,12 +157,21 @@ export function WidgetInner({ widget }: { widget: UiWidget }) {
         </>
       )
     }
-    case 'icon':
+    case 'icon': {
+      // An LVGL built-in symbol (see the Icon Picker) takes priority over a custom image — same
+      // as button/label/checkbox below. Rendered as plain text (not an <img>) so it inherits
+      // size/color from the outer div's own style.fontSize/style.color, exactly like any other
+      // text — giving the icon independently adjustable size (font size) and color for free
+      // through the existing generic style pipeline, on top of the position/size (x/y/width/
+      // height) every widget already has.
+      const symbol = lvglSymbolById(widget.iconSymbol)
+      if (symbol) return <>{symbol.glyph}</>
       return asset ? (
         <img src={asset.dataUrl} alt="" className="max-w-full max-h-full" draggable={false} />
       ) : (
         <>{widget.text || '●'}</>
       )
+    }
     case 'image':
       return asset ? (
         <img

@@ -228,6 +228,22 @@ export function colorLiteral(css: string | undefined): string | null {
   return null // named CSS colors ("white", "red", ...) aren't resolved here — Properties panel's color picker always writes hex, so this only matters for hand-edited CSS text.
 }
 
+// Every built-in lv_font_montserrat_* size this export will ever reference — kept as one shared
+// list (not a duplicated literal) so styleSetCalls' font-size selection and generateLvConf's
+// "turn these on in lv_conf.h" step can never drift apart. Extends past the base ~20px text sizes
+// up to 48 specifically so a symbol icon (see the Icon Picker / standalone Icon widget's "Font
+// Size" field, which doubles as the icon's visual size — LVGL has no separate icon-size concept,
+// a symbol is just a glyph in a label) can actually be sized as large as icons are typically shown
+// on a small display, not capped at body-text sizes. Stops at 48 rather than enabling every LVGL
+// size up to 8px increments beyond that — each additional size is real flash cost for its own
+// glyph set, and nothing in this app currently asks for anything larger.
+const MONTSERRAT_SIZES_ALWAYS_AVAILABLE = [12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48]
+
+function nearestMontserratSize(px: number): number {
+  for (const size of MONTSERRAT_SIZES_ALWAYS_AVAILABLE) if (px <= size) return size
+  return MONTSERRAT_SIZES_ALWAYS_AVAILABLE[MONTSERRAT_SIZES_ALWAYS_AVAILABLE.length - 1]
+}
+
 /** Emits `lv_style_set_*` calls for the style fields this pass supports, skipping any field
  * `undefined` on `style` (LVGL default applies). Position (x/y) and size (width/height) are
  * intentionally excluded — those are layout, set per-widget via lv_obj_set_pos/set_size in the
@@ -273,7 +289,7 @@ function styleSetCalls(varName: string, style: Partial<UiWidgetStyle>, identByAs
     if (c) set(`lv_style_set_text_color(&${varName}, ${c});`)
   }
   if (style.fontSize !== undefined) {
-    const size = style.fontSize <= 12 ? 12 : style.fontSize <= 14 ? 14 : style.fontSize <= 16 ? 16 : style.fontSize <= 18 ? 18 : style.fontSize <= 20 ? 20 : 24
+    const size = nearestMontserratSize(style.fontSize)
     set(`lv_style_set_text_font(&${varName}, &lv_font_montserrat_${size}); // nearest built-in LVGL font size to ${Math.round(style.fontSize)}px`)
   }
   if (style.letterSpacing !== undefined) set(`lv_style_set_text_letter_space(&${varName}, ${Math.round(style.letterSpacing)});`)
@@ -602,14 +618,34 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
       lines.push(`${indent}${varName} = lv_label_create(${parentVar});`)
       lines.push(`${indent}lv_label_set_text(${varName}, ${widgetTextLiteralWithIcon(widget)});`)
       break
-    case 'image':
-    case 'icon': {
+    case 'image': {
       lines.push(`${indent}${varName} = lv_image_create(${parentVar});`)
       const ident = widget.src ? identByAssetId.get(widget.src) : undefined
       if (ident) lines.push(`${indent}lv_image_set_src(${varName}, &${ident});`)
-      else lines.push(`${indent}// No image asset assigned in the Asset Manager for this ${widget.type} yet.`)
+      else lines.push(`${indent}// No image asset assigned in the Asset Manager for this image yet.`)
       if (widget.style.rotation) {
         lines.push(`${indent}lv_image_set_rotation(${varName}, ${Math.round(widget.style.rotation * 10)}); // 0.1-degree units`)
+      }
+      break
+    }
+    case 'icon': {
+      // An LVGL built-in symbol (see the Icon Picker) takes priority over a custom image, mirroring
+      // WidgetRenderer.tsx's own precedence — LVGL has no dedicated "icon" object; a symbol icon is
+      // just a label displaying one of the built-in LV_SYMBOL_* glyphs, which is exactly why this
+      // gets its own real size (font size, via the shared fontSize->nearest-built-in-font handling
+      // in styleSetCalls) and its own real color (text_color, same as any label) for free through
+      // the existing generic style pipeline — no icon-specific style plumbing needed.
+      if (widget.iconSymbol) {
+        lines.push(`${indent}${varName} = lv_label_create(${parentVar});`)
+        lines.push(`${indent}lv_label_set_text(${varName}, ${widgetTextLiteralWithIcon(widget)});`)
+      } else {
+        lines.push(`${indent}${varName} = lv_image_create(${parentVar});`)
+        const ident = widget.src ? identByAssetId.get(widget.src) : undefined
+        if (ident) lines.push(`${indent}lv_image_set_src(${varName}, &${ident});`)
+        else lines.push(`${indent}// No icon symbol picked and no image asset assigned in the Asset Manager for this icon yet.`)
+        if (widget.style.rotation) {
+          lines.push(`${indent}lv_image_set_rotation(${varName}, ${Math.round(widget.style.rotation * 10)}); // 0.1-degree units`)
+        }
       }
       break
     }
@@ -1021,15 +1057,13 @@ function runScriptCodegen(uiDesign: UiDesignProject, ctx: CodegenContext): Codeg
 // not a hand-authored subset. Two edits are applied: (1) flip the "Content enable" #if 0 guard
 // to #if 1 — LVGL ships the template disabled by default, and copying it without this flip is
 // this export's single most common first compile failure; (2) turn on whichever built-in
-// lv_font_montserrat_* sizes styleSetCalls() can ever reference (the fixed {12,14,16,18,20,24}
-// set matching its font-size-selection ternary above), so any design using one compiles without
-// a separate manual step. Every other setting is left at LVGL's own stock defaults on purpose —
-// deviating further risks producing a different, more confusing error than the real template
-// would. The two exceptions are LV_BUILD_EXAMPLES/LV_BUILD_DEMOS, turned off in the embedded
-// template itself (not here) since this export never needs LVGL's own example/demo code.
+// lv_font_montserrat_* sizes styleSetCalls() can ever reference (MONTSERRAT_SIZES_ALWAYS_AVAILABLE,
+// defined alongside styleSetCalls above), so any design using one compiles without a separate
+// manual step. Every other setting is left at LVGL's own stock defaults on purpose — deviating
+// further risks producing a different, more confusing error than the real template would. The two
+// exceptions are LV_BUILD_EXAMPLES/LV_BUILD_DEMOS, turned off in the embedded template itself (not
+// here) since this export never needs LVGL's own example/demo code.
 // ---------------------------------------------------------------------------------------------
-
-const MONTSERRAT_SIZES_ALWAYS_AVAILABLE = [12, 14, 16, 18, 20, 24]
 
 function generateLvConf(): string {
   let conf = LV_CONF_TEMPLATE_V9.replace(

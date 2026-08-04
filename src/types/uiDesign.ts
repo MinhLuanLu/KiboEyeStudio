@@ -81,10 +81,15 @@ export const UI_WIDGET_LABELS: Record<UiWidgetType, string> = {
  * PropertiesPanel.tsx's background-image field, so the three stay in agreement about which
  * widget kinds support which. */
 export const UI_SRC_IMAGE_WIDGETS: ReadonlySet<UiWidgetType> = new Set(['image', 'icon'])
-/** Widget kinds whose `text` is actually rendered/exported (see lvglExport.ts's
- * widgetCreateCalls) — the only kinds a built-in LVGL symbol icon (UiWidget.iconSymbol) can
- * meaningfully attach to, since the icon is emitted as part of that same text literal. */
-export const UI_ICON_TEXT_WIDGETS: ReadonlySet<UiWidgetType> = new Set(['button', 'label', 'checkbox'])
+/** Widget kinds a built-in LVGL symbol icon (UiWidget.iconSymbol) can attach to — button/label/
+ * checkbox emit it as a prefix baked into their own text literal (see lvglExport.ts's
+ * widgetTextLiteralWithIcon); the standalone `icon` widget emits it as the *entire* text literal
+ * of its own `lv_label_create()` (see widgetCreateCalls' `'icon'` case) — LVGL has no dedicated
+ * icon object, a symbol icon is just a label whose text happens to be one of the built-in
+ * `LV_SYMBOL_*` glyphs, which is exactly why it already gets independently adjustable size (font
+ * size) and color (text color) through the same generic style pipeline every label uses, on top
+ * of the position/size every widget already has. */
+export const UI_ICON_TEXT_WIDGETS: ReadonlySet<UiWidgetType> = new Set(['button', 'label', 'checkbox', 'icon'])
 export const UI_BACKGROUND_IMAGE_WIDGETS: ReadonlySet<UiWidgetType> = new Set([
   'screen',
   'container',
