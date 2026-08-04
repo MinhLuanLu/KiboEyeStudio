@@ -28,6 +28,7 @@ import { cppTypeFor, generateScriptCpp, type CodegenContext, type CodegenResult,
 import { parseScript } from '@/lib/uiDesign/scriptLang/parser'
 import { LV_CONF_TEMPLATE_V9 } from './lvConfTemplate'
 import { sanitizeFilename, sanitizeIdentifier } from './naming'
+import { lvglSymbolById } from '@/lib/uiDesign/lvglSymbols'
 import { boardIdFor, DISPLAY_MODEL_LABELS, type ExportTarget } from './exportTarget'
 
 const LVGL_VERSION = '9.x'
@@ -214,7 +215,7 @@ function selectorIdent(selector: string): string {
   return toCIdentifier(selector.replace(/^[.#]/, selector[0] === '#' ? 'id_' : 'class_'))
 }
 
-function colorLiteral(css: string | undefined): string | null {
+export function colorLiteral(css: string | undefined): string | null {
   if (!css) return null
   const hex = css.trim().match(/^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$/)
   if (hex) {
@@ -548,6 +549,19 @@ function widgetTextLiteral(text: string | undefined): string {
   return JSON.stringify(text ?? '')
 }
 
+/** Like widgetTextLiteral, but prepends a built-in LVGL symbol-font macro when the widget has
+ * one selected (UiWidget.iconSymbol, set via the Properties panel's Icon picker) — adjacent C
+ * string literals concatenate, so `LV_SYMBOL_WIFI " Wi-Fi"` is one valid string, matching LVGL's
+ * own documented icon+text convention. An icon with no text emits the bare macro (no trailing
+ * empty `""`); text with no icon falls back to plain widgetTextLiteral, unchanged from every
+ * other text-bearing widget/call site. */
+export function widgetTextLiteralWithIcon(widget: UiWidget): string {
+  const symbol = lvglSymbolById(widget.iconSymbol)
+  if (!symbol) return widgetTextLiteral(widget.text)
+  if (!widget.text) return symbol.id
+  return `${symbol.id} ${JSON.stringify(' ' + widget.text)}`
+}
+
 /** Emits the LVGL creation call(s) for one widget kind — position/size + kind-specific setup.
  * `varName` is the local `lv_obj_t*` this widget's create call assigns to; `parentVar` is its
  * LVGL parent object. */
@@ -555,7 +569,7 @@ function widgetTextLiteral(text: string | undefined): string {
 // LV_SIZE_CONTENT (size-to-fit — the closest available behavior); "N%" becomes lv_pct(N), LVGL's
 // percentage-of-parent sizing — this is what makes a percentage-sized widget in the studio
 // preview actually stay proportional on real hardware too, including across a display resize.
-function lengthToLvglSize(v: UiWidget['style']['width']): string {
+export function lengthToLvglSize(v: UiWidget['style']['width']): string {
   if (typeof v === 'number') return String(Math.round(v))
   if (typeof v === 'string' && v.endsWith('%')) return `lv_pct(${Math.round(Number(v.slice(0, -1)))})`
   return 'LV_SIZE_CONTENT'
@@ -581,12 +595,12 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
       // renderWidgetMethodCall — always has somewhere to write, even for a button with no
       // initial text.
       lines.push(`${indent}${varName}_label = lv_label_create(${varName});`)
-      if (widget.text) lines.push(`${indent}lv_label_set_text(${varName}_label, ${widgetTextLiteral(widget.text)});`)
+      if (widget.text || widget.iconSymbol) lines.push(`${indent}lv_label_set_text(${varName}_label, ${widgetTextLiteralWithIcon(widget)});`)
       lines.push(`${indent}lv_obj_center(${varName}_label);`)
       break
     case 'label':
       lines.push(`${indent}${varName} = lv_label_create(${parentVar});`)
-      lines.push(`${indent}lv_label_set_text(${varName}, ${widgetTextLiteral(widget.text)});`)
+      lines.push(`${indent}lv_label_set_text(${varName}, ${widgetTextLiteralWithIcon(widget)});`)
       break
     case 'image':
     case 'icon': {
@@ -620,7 +634,7 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
       break
     case 'checkbox':
       lines.push(`${indent}${varName} = lv_checkbox_create(${parentVar});`)
-      lines.push(`${indent}lv_checkbox_set_text(${varName}, ${widgetTextLiteral(widget.text)});`)
+      lines.push(`${indent}lv_checkbox_set_text(${varName}, ${widgetTextLiteralWithIcon(widget)});`)
       if (widget.props.checked) lines.push(`${indent}lv_obj_add_state(${varName}, LV_STATE_CHECKED);`)
       break
     case 'dropdown':
@@ -1404,8 +1418,7 @@ ${notes.length > 0 ? `\n## Notes\n\n${notes.map((n) => `- ${n}`).join('\n')}\n` 
  *     synchronous (no asset decode) so callers can call this directly on every render/store
  *     change with no debounce needed, the same way HtmlEditor/CssEditor's live text already
  *     works. */
-export function generateLiveScreenCode(project: Project, screenId: string | null): string {
-  const uiDesign = project.uiDesign
+export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: string | null): string {
   const screen = uiDesign.screens.find((s) => s.id === screenId) ?? uiDesign.screens[0]
   if (!screen) return '// Add a screen in UI/UX Design Mode to see its generated LVGL code here.'
 

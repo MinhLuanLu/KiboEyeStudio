@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useStore } from '@/state/store'
-import { UI_BACKGROUND_IMAGE_WIDGETS, UI_SRC_IMAGE_WIDGETS, UI_WIDGET_LABELS } from '@/types'
+import { UI_BACKGROUND_IMAGE_WIDGETS, UI_ICON_TEXT_WIDGETS, UI_SRC_IMAGE_WIDGETS, UI_WIDGET_LABELS } from '@/types'
 import type { UiLengthValue, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
 import { rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
 import { ACTION_TABLE, HARDWARE_ACTION_PRESETS } from '@/lib/uiDesign/scriptLang/actionTable'
 import { widgetVarName, widgetBaseName, EVENT_CAPABLE_WIDGET_TYPES, EVENT_CALLBACK_TRIGGER_OPTIONS } from '@/lib/export/lvglExport'
+import { IconPicker } from './IconPicker'
 import {
   addEventRow,
   parseVisualEventRows,
@@ -1002,6 +1003,16 @@ export function PropertiesPanel() {
             onChange={(e) => updateUiWidgetText(widget.id, e.target.value)}
           />
         </div>
+      )}
+
+      {UI_ICON_TEXT_WIDGETS.has(widget.type) && (
+        <IconPicker
+          value={widget.iconSymbol}
+          onSelect={(symbolId) => {
+            checkpoint()
+            updateUiWidgetMeta(widget.id, { iconSymbol: symbolId })
+          }}
+        />
       )}
 
       {UI_SRC_IMAGE_WIDGETS.has(widget.type) && (

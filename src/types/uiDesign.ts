@@ -81,6 +81,10 @@ export const UI_WIDGET_LABELS: Record<UiWidgetType, string> = {
  * PropertiesPanel.tsx's background-image field, so the three stay in agreement about which
  * widget kinds support which. */
 export const UI_SRC_IMAGE_WIDGETS: ReadonlySet<UiWidgetType> = new Set(['image', 'icon'])
+/** Widget kinds whose `text` is actually rendered/exported (see lvglExport.ts's
+ * widgetCreateCalls) — the only kinds a built-in LVGL symbol icon (UiWidget.iconSymbol) can
+ * meaningfully attach to, since the icon is emitted as part of that same text literal. */
+export const UI_ICON_TEXT_WIDGETS: ReadonlySet<UiWidgetType> = new Set(['button', 'label', 'checkbox'])
 export const UI_BACKGROUND_IMAGE_WIDGETS: ReadonlySet<UiWidgetType> = new Set([
   'screen',
   'container',
@@ -212,6 +216,12 @@ export interface UiWidget {
   text?: string
   /** Asset id reference for image/icon widgets — see UiAsset. */
   src?: string
+  /** Built-in LVGL symbol-font macro (e.g. "LV_SYMBOL_WIFI") shown alongside `text` — see
+   * lib/uiDesign/lvglSymbols.ts for the full list and lvglExport.ts's
+   * widgetTextLiteralWithIcon() for how the two combine into one `LV_SYMBOL_WIFI " Wi-Fi"`
+   * C string. null/undefined = no icon. Only meaningful on widgets that render `text`
+   * (button/label/checkbox today). */
+  iconSymbol?: string | null
   /** Widget-kind-specific data: slider min/max/value, dropdown/roller options, checkbox
    * checked, arc angles, tabs names, etc. Loosely typed (not one interface per widget kind)
    * to keep the model flat — see lib/uiDesign/widgetDefaults.ts for the shape each kind uses. */
@@ -270,6 +280,20 @@ export interface UiScreen {
   id: string
   name: string
   rootWidgetId: string
+  /** Manually-edited override of the "LVGL Code" panel's live-generated text for this screen —
+   * see LvglCodePanel.tsx. null/undefined = show the freshly generated code (today's default,
+   * always-regenerated behavior). Once set (via that panel's "Apply Changes" button), the panel
+   * shows THIS text instead, surviving further visual-designer edits, mirroring how htmlSource/
+   * cssSource freeze until the user re-syncs — see customCodeBaseline below for how staleness
+   * against the design is detected. This is a Studio-side scratchpad only (matches the panel's
+   * own existing "not a downloadable export" scope) — it is never read by generateLvglExport/
+   * generateUiScreenExport, so it can't silently diverge from or break the real export output. */
+  customCode?: string | null
+  /** The live-generated code text captured at the moment customCode was last applied — compared
+   * against the CURRENT live-generated text to detect "the design changed since you edited this"
+   * (see LvglCodePanel.tsx's staleness banner). Kept in lockstep with customCode; both are
+   * cleared together by "Reset to Generated Code". */
+  customCodeBaseline?: string | null
 }
 
 // UI Design Mode's own display configuration — deliberately a completely separate object from

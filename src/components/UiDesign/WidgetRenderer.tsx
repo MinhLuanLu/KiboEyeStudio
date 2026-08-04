@@ -4,6 +4,7 @@ import type { UiAsset, UiWidget, UiWidgetType } from '@/types'
 import { computeEffectiveStyle } from '@/lib/uiDesign/cssCascade'
 import { clampRectToDisplayShape, rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
 import { dispatchWidgetEvent, isSandboxRunning, subscribeAffectedWidget } from '@/lib/uiDesign/scriptLang/sandboxRuntime'
+import { lvglSymbolById } from '@/lib/uiDesign/lvglSymbols'
 
 const AFFECTED_HIGHLIGHT_MS = 400
 
@@ -147,8 +148,15 @@ export function WidgetInner({ widget }: { widget: UiWidget }) {
 
   switch (widget.type) {
     case 'button':
-    case 'label':
-      return <>{widget.text}</>
+    case 'label': {
+      const symbol = lvglSymbolById(widget.iconSymbol)
+      return (
+        <>
+          {symbol && <span style={{ marginRight: widget.text ? 4 : 0 }}>{symbol.glyph}</span>}
+          {widget.text}
+        </>
+      )
+    }
     case 'icon':
       return asset ? (
         <img src={asset.dataUrl} alt="" className="max-w-full max-h-full" draggable={false} />
@@ -235,7 +243,8 @@ export function WidgetInner({ widget }: { widget: UiWidget }) {
         />
       )
     }
-    case 'checkbox':
+    case 'checkbox': {
+      const symbol = lvglSymbolById(widget.iconSymbol)
       return (
         <>
           <div
@@ -248,9 +257,11 @@ export function WidgetInner({ widget }: { widget: UiWidget }) {
               background: widget.props.checked ? '#2196f3' : 'transparent'
             }}
           />
+          {symbol && <span style={{ marginRight: widget.text ? 4 : 0 }}>{symbol.glyph}</span>}
           <span>{widget.text}</span>
         </>
       )
+    }
     case 'dropdown': {
       const first = String(widget.props.options ?? '').split('\n')[0] ?? ''
       return (

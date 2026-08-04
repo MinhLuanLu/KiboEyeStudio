@@ -379,6 +379,7 @@ function normalizeUiDesign(raw: unknown): UiDesignProject {
         parentId: typeof wr.parentId === 'string' ? wr.parentId : null,
         childIds: Array.isArray(wr.childIds) ? wr.childIds.filter((c): c is string => typeof c === 'string') : [],
         tagId: typeof wr.tagId === 'string' ? wr.tagId : undefined,
+        iconSymbol: typeof wr.iconSymbol === 'string' ? wr.iconSymbol : undefined,
         classNames: Array.isArray(wr.classNames) ? wr.classNames.filter((c): c is string => typeof c === 'string') : [],
         text: typeof wr.text === 'string' ? wr.text : undefined,
         src: typeof wr.src === 'string' ? wr.src : undefined,

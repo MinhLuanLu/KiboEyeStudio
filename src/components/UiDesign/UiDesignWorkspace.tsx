@@ -54,8 +54,20 @@ export function UiDesignWorkspace({ toolbarActions }: { toolbarActions: ToolbarA
       <UiDesignTopBar actions={toolbarActions} />
       <div className="flex-1 min-h-0">
         <PanelGroup direction="horizontal">
-          <Panel defaultSize={18} minSize={14} maxSize={30}>
-            <div className="h-full studio-panel m-2 mr-1 flex flex-col overflow-hidden">
+          {/* Every <Panel> below gets className="flex flex-col" so it establishes a real flex
+              container for its own child — react-resizable-panels sizes a Panel itself via
+              inline `flex: <grow> 1 0px` on a plain (non-flex) block div, so a child relying on
+              `height: 100%` to fill it is resolving a percentage against a box whose `height`
+              CSS property was never explicitly set (only its flex-basis was) — some browsers
+              don't propagate that as a definite size to percentage-height grandchildren, so the
+              child silently falls back to its own intrinsic content height instead of being
+              capped. That's latent in every panel here, but only visibly breaks the ones whose
+              content can genuinely grow past the allotted space (the LVGL Code editor, backed by
+              CodeMirror, is the one that actually does) — making the Panel a real flex container
+              and using `flex-1 min-h-0` (flex-item-to-flex-item sizing, not percentage-height)
+              on the child sidesteps the ambiguity entirely, for all four panels alike. */}
+          <Panel defaultSize={18} minSize={14} maxSize={30} className="flex flex-col">
+            <div className="flex-1 min-h-0 studio-panel m-2 mr-1 flex flex-col overflow-hidden">
               <PanelTabs tabs={LEFT_TABS} active={leftTab} onChange={setLeftTab} />
               <div className="flex-1 min-h-0 overflow-y-auto">
                 {leftTab === 'toolbox' && <Toolbox />}
@@ -66,18 +78,18 @@ export function UiDesignWorkspace({ toolbarActions }: { toolbarActions: ToolbarA
 
           <ResizeHandle />
 
-          <Panel defaultSize={56} minSize={35}>
+          <Panel defaultSize={56} minSize={35} className="flex flex-col">
             <PanelGroup direction="vertical">
-              <Panel defaultSize={58} minSize={25}>
-                <div className="h-full m-2 mx-1 mb-1 studio-panel overflow-hidden">
+              <Panel defaultSize={58} minSize={25} className="flex flex-col">
+                <div className="flex-1 min-h-0 m-2 mx-1 mb-1 studio-panel overflow-hidden">
                   <Canvas />
                 </div>
               </Panel>
 
               <ResizeHandle direction="horizontal" />
 
-              <Panel defaultSize={42} minSize={15}>
-                <div className="h-full m-2 mx-1 mt-1 studio-panel flex flex-col overflow-hidden">
+              <Panel defaultSize={42} minSize={15} className="flex flex-col">
+                <div className="flex-1 min-h-0 m-2 mx-1 mt-1 studio-panel flex flex-col overflow-hidden">
                   <div className="px-2 py-1.5 border-b border-studio-border text-xs font-medium shrink-0">LVGL Code</div>
                   <LvglCodePanel />
                 </div>
@@ -87,8 +99,8 @@ export function UiDesignWorkspace({ toolbarActions }: { toolbarActions: ToolbarA
 
           <ResizeHandle />
 
-          <Panel defaultSize={26} minSize={18} maxSize={38}>
-            <div className="h-full studio-panel m-2 ml-1 flex flex-col overflow-hidden">
+          <Panel defaultSize={26} minSize={18} maxSize={38} className="flex flex-col">
+            <div className="flex-1 min-h-0 studio-panel m-2 ml-1 flex flex-col overflow-hidden">
               <PanelTabs tabs={RIGHT_TABS} active={rightTab} onChange={setRightTab} />
               <div className="flex-1 min-h-0 overflow-y-auto">
                 {rightTab === 'properties' && <PropertiesPanel />}

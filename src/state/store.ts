@@ -694,8 +694,25 @@ interface StoreState {
    * structural/selector-relevant fields, not style. */
   updateUiWidgetMeta: (
     id: string,
-    partial: { tagId?: string | null; classNames?: string[]; allowOutsideBounds?: boolean; eventCallbackEnabled?: boolean; eventCallbackTriggers?: string[] }
+    partial: {
+      tagId?: string | null
+      classNames?: string[]
+      allowOutsideBounds?: boolean
+      eventCallbackEnabled?: boolean
+      eventCallbackTriggers?: string[]
+      iconSymbol?: string | null
+    }
   ) => void
+
+  // UI Design Mode — LVGL Code panel manual-edit override (see UiScreen.customCode in
+  // types/uiDesign.ts and LvglCodePanel.tsx for the full picture).
+  applyUiScreenCustomCode: (screenId: string, code: string, generatedBaseline: string) => void
+  resetUiScreenCustomCode: (screenId: string) => void
+  /** Forward-sync only (WIDGETS -> CODE) — rewrites the recognized calls already inside an
+   * applied override to match current widget values (see codeSync.ts's patchCodeWithWidgetValues).
+   * Not a user-initiated edit — no checkpoint semantics implied, callers don't call checkpoint()
+   * first (the actual undoable action was whatever widget edit triggered this patch). */
+  patchUiScreenCustomCode: (screenId: string, code: string) => void
 
   // UI Design Mode — CSS rules (see UiCssRule in types/uiDesign.ts + lib/uiDesign/cssCascade.ts
   // for how they're applied at render time).
@@ -3027,6 +3044,33 @@ export const useStore = create<StoreState>()(
         if (partial.allowOutsideBounds !== undefined) w.allowOutsideBounds = partial.allowOutsideBounds
         if (partial.eventCallbackEnabled !== undefined) w.eventCallbackEnabled = partial.eventCallbackEnabled
         if (partial.eventCallbackTriggers !== undefined) w.eventCallbackTriggers = partial.eventCallbackTriggers
+        if (partial.iconSymbol !== undefined) w.iconSymbol = partial.iconSymbol ?? undefined
+        s.dirty = true
+      }),
+
+    applyUiScreenCustomCode: (screenId, code, generatedBaseline) =>
+      set((s) => {
+        const screen = s.project.uiDesign.screens.find((sc) => sc.id === screenId)
+        if (!screen) return
+        screen.customCode = code
+        screen.customCodeBaseline = generatedBaseline
+        s.dirty = true
+      }),
+
+    resetUiScreenCustomCode: (screenId) =>
+      set((s) => {
+        const screen = s.project.uiDesign.screens.find((sc) => sc.id === screenId)
+        if (!screen) return
+        screen.customCode = undefined
+        screen.customCodeBaseline = undefined
+        s.dirty = true
+      }),
+
+    patchUiScreenCustomCode: (screenId, code) =>
+      set((s) => {
+        const screen = s.project.uiDesign.screens.find((sc) => sc.id === screenId)
+        if (!screen || screen.customCode == null || screen.customCode === code) return
+        screen.customCode = code
         s.dirty = true
       }),
 
