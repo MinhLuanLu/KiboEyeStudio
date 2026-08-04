@@ -850,6 +850,13 @@ function emitEventCallbackBody(ev: EventExport, useUserCodeMarkers: boolean, aft
     lines.push(`  // Tip: check this widget's current on/off state any time (not just on a value-changed`)
     lines.push(`  // event) with lv_obj_has_state(), e.g.:`)
     lines.push(`  //   bool isOn = lv_obj_has_state(${ev.varName}, LV_STATE_CHECKED);`)
+  } else if (ev.widget.type === 'button') {
+    lines.push(`  // Tip: buttons aren't checkable/toggleable by default. The Properties panel doesn't`)
+    lines.push(`  // have a "Checkable" option yet, but you can turn this one into a toggle button by`)
+    lines.push(`  // hand — add once, e.g. right after this button is created:`)
+    lines.push(`  //   lv_obj_add_flag(${ev.varName}, LV_OBJ_FLAG_CHECKABLE);`)
+    lines.push(`  // then read its on/off state the same way switch/checkbox do:`)
+    lines.push(`  //   bool isOn = lv_obj_has_state(${ev.varName}, LV_STATE_CHECKED);`)
   }
   lines.push('  switch (code) {')
   const describe = (lvglEvent: string): string => LVGL_EVENT_DESCRIPTIONS[lvglEvent] ?? ''
