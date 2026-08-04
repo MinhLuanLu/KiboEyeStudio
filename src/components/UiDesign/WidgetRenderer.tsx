@@ -116,7 +116,13 @@ export const DEFAULT_VISUAL_CSS: Partial<Record<UiWidgetType, React.CSSPropertie
   flex: { background: 'transparent', border: '1px dashed #cbd5e1', display: 'flex' },
   button: { background: '#2196f3', color: '#ffffff', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center' },
   image: { background: '#e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: 10 },
-  icon: { background: 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 },
+  // Icon defaults to a visible dashed outline (matching container/flex's own "empty container"
+  // affordance below) — without it, a freshly-placed icon with no symbol/image/text picked yet
+  // renders as a lone small glyph with a fully transparent, borderless box, which is very easy
+  // to miss-click on the canvas (you end up clicking the screen behind it instead, which just
+  // deselects). This is purely a default fallback: mergeDefined() drops it the moment the user
+  // sets a real background or border via the Properties panel.
+  icon: { background: 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, border: '1px dashed #cbd5e1' },
   switch: { background: '#cbd5e1', borderRadius: 999 },
   slider: { background: '#cbd5e1', borderRadius: 999 },
   bar: { background: '#e2e8f0', borderRadius: 4 },

@@ -748,7 +748,7 @@ interface EventExport {
  * gestures and animationCompleted aren't here yet (no gesture/anim-ready wiring in this
  * project's input model). checked/unchecked both register on LV_EVENT_VALUE_CHANGED — see
  * EventCallbackCase's own comment for how the shared case disambiguates them at emission time. */
-const TRIGGER_TO_LVGL_EVENT: Record<string, string> = {
+export const TRIGGER_TO_LVGL_EVENT: Record<string, string> = {
   click: 'LV_EVENT_CLICKED',
   pressed: 'LV_EVENT_PRESSED',
   released: 'LV_EVENT_RELEASED',

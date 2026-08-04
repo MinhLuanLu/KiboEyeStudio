@@ -6,6 +6,7 @@ import { parseScript } from './parser'
 import { applyTextEdits, type TextEdit } from './textSplice'
 import { walkAllNodes } from './astWalk'
 import { ACTION_TABLE, type PreviewActionCtx } from './actionTable'
+import { widgetVarName, TRIGGER_TO_LVGL_EVENT } from '@/lib/export/lvglExport'
 
 // Live-preview execution — runs the ACTUAL script text via the browser's own JS engine
 // (`new Function(...)`, not the Acorn AST) so preview behavior uses genuine JS semantics for
@@ -17,13 +18,48 @@ import { ACTION_TABLE, type PreviewActionCtx } from './actionTable'
 // expressions can be re-evaluated on every tick (see BINDING_METHODS below). C++ export
 // (codegen.ts) is a completely separate walk of the untouched AST — this file never feeds into it.
 
-export type SandboxLogKind = 'log' | 'warn' | 'error' | 'event'
+// 'log'/'warn'/'error'/'debug' come from the script's own console.* calls (rendered as
+// USER/WARNING/ERROR/DEBUG — 'log' reads as "USER" since, in this sandbox, everything a running
+// script prints is the user's own application output, the same role LV_LOG_USER plays in real
+// LVGL firmware). 'event' is a fired widget/hardware event (rendered as EVENT). 'info' is this
+// runtime's own lifecycle messages (Preview started/stopped) — never emitted by user code.
+export type SandboxLogKind = 'log' | 'warn' | 'error' | 'debug' | 'event' | 'info'
+
+export const LOG_KIND_LEVEL: Record<SandboxLogKind, string> = {
+  log: 'USER',
+  warn: 'WARNING',
+  error: 'ERROR',
+  debug: 'DEBUG',
+  event: 'EVENT',
+  info: 'INFO'
+}
+
+/** Structured detail attached only to `kind: 'event'` entries — this is what the Logic tab's
+ * optional "Event Inspector" mode reads to show Widget/Type/Event/Value/Callback as separate
+ * fields instead of one flattened message string. `widgetVarName`/`lvglEvent` deliberately reuse
+ * the exact same naming (`widgetVarName()`/`TRIGGER_TO_LVGL_EVENT`) the real C++ export uses, so
+ * what you see firing live in the preview terminal names things identically to what you'll see in
+ * the exported `ui.cpp` — same "preview and export must agree" precedent as this feature's
+ * dispatch-trigger-name vocabulary already followed. `userData` has no real backing concept in
+ * this JS sandbox (LVGL's `lv_obj_add_event_cb(..., user_data)` has no preview-side equivalent
+ * today) — always `undefined`, shown as "—" in the UI rather than a fabricated value. */
+export interface SandboxEventDetail {
+  widgetId: string
+  widgetType: string
+  widgetVarName: string
+  trigger: string
+  lvglEvent: string
+  value?: unknown
+  userData?: unknown
+  callbackName?: string
+}
 
 export interface SandboxLogEntry {
   id: number
   kind: SandboxLogKind
   message: string
   timestamp: number
+  event?: SandboxEventDetail
 }
 
 export interface SimulateTargets {
@@ -80,10 +116,13 @@ const EASINGS: Record<string, (t: number) => number> = {
   easeInOut: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
 }
 
-class ScriptSandbox {
+// Exported (only) so scratch/unit-style scripts can drive it directly without mounting React —
+// the public surface real callers use is still the `useScriptSandbox()` hook / module-level
+// dispatchWidgetEvent/isSandboxRunning below, which wrap exactly one shared instance per app.
+export class ScriptSandbox {
   private cb: SandboxCallbacks
   private timers = new Set<number>()
-  private eventHandlers = new Map<string, Record<string, ((...a: unknown[]) => void)[]>>()
+  private eventHandlers = new Map<string, Record<string, { fn: (...a: unknown[]) => void; name?: string }[]>>()
   private hardwareButtons = new Map<string, (() => void)[]>()
   private hardwareEncoder: ((direction: number) => void)[] = []
   private hardwareSensors = new Map<string, ((value: number) => void)[]>()
@@ -216,14 +255,37 @@ class ScriptSandbox {
     const hardwareSandbox = this.buildHardwareSandbox()
     const consoleSandbox = this.buildConsoleSandbox()
     const dataSandbox = this.buildDataSandbox()
+    const serialSandbox = this.buildSerialSandbox()
 
     this.running = true
     this.cb.onRunningChange(true)
+    this.log('info', 'Preview started')
 
     try {
       // eslint-disable-next-line no-new-func
-      const fn = new Function('ui', 'hardware', 'console', 'data', '__vars', '__bindingsHolder', fullSource)
-      fn(uiSandbox, hardwareSandbox, consoleSandbox, dataSandbox, this.varsProxy, this.bindingsHolder)
+      const fn = new Function(
+        'ui',
+        'hardware',
+        'console',
+        'data',
+        '__vars',
+        '__bindingsHolder',
+        'Serial',
+        'printf',
+        'LV_LOG_USER',
+        fullSource
+      )
+      fn(
+        uiSandbox,
+        hardwareSandbox,
+        consoleSandbox,
+        dataSandbox,
+        this.varsProxy,
+        this.bindingsHolder,
+        serialSandbox,
+        (...args: unknown[]) => this.log('log', formatPrintfStyle(args)),
+        (...args: unknown[]) => this.log('log', formatPrintfStyle(args))
+      )
     } catch (err) {
       this.logError(err)
       this.running = false
@@ -241,6 +303,7 @@ class ScriptSandbox {
 
   stop(): void {
     if (!this.running && !this.snapshot) return
+    if (this.running) this.log('info', 'Preview stopped')
     for (const id of this.timers) {
       window.clearInterval(id)
       window.clearTimeout(id)
@@ -271,11 +334,23 @@ class ScriptSandbox {
     const handlers = this.eventHandlers.get(widgetId)?.[event]
     if (!handlers || handlers.length === 0) return
     const w = useStore.getState().project.uiDesign.widgets[widgetId]
-    this.log('event', `${event} on ${w?.tagId ?? widgetId}`)
+    const varName = w ? widgetVarName(w) : widgetId
+    this.logEvent(
+      {
+        widgetId,
+        widgetType: w?.type ?? 'unknown',
+        widgetVarName: varName,
+        trigger: event,
+        lvglEvent: TRIGGER_TO_LVGL_EVENT[event] ?? event,
+        value: args.length > 0 ? args[0] : undefined,
+        callbackName: handlers.find((h) => h.name)?.name
+      },
+      `${event} on ${w?.tagId ?? widgetId}`
+    )
     notifyAffectedWidget(widgetId)
-    for (const h of handlers) {
+    for (const { fn } of handlers) {
       try {
-        h(...args)
+        fn(...args)
       } catch (err) {
         this.logError(err)
       }
@@ -411,9 +486,13 @@ class ScriptSandbox {
         ctx.updateMeta(widget.id, { classNames: w.classNames.filter((c) => c !== cls) })
       }
     }
-    proxy.on = (event: string, handler: (...a: unknown[]) => void) => {
+    // The optional 3rd arg mirrors the export-only `.on(trigger, callback, "name")` shape
+    // codegen.ts already recognizes for a custom C++ callback function name — reusing that exact
+    // syntax here means it's already valid per restrictedSubset.ts (no export-validator change
+    // needed) and doubles as the "Callback" field the Event Inspector shows for a fired event.
+    proxy.on = (event: string, handler: (...a: unknown[]) => void, name?: string) => {
       const forWidget = this.eventHandlers.get(widget.id) ?? {}
-      forWidget[event] = [...(forWidget[event] ?? []), handler]
+      forWidget[event] = [...(forWidget[event] ?? []), { fn: handler, name }]
       this.eventHandlers.set(widget.id, forWidget)
     }
     proxy.animate = (config: Record<string, unknown>) => {
@@ -539,7 +618,21 @@ class ScriptSandbox {
     return {
       log: (...args: unknown[]) => this.log('log', args.map(stringifyLogArg).join(' ')),
       warn: (...args: unknown[]) => this.log('warn', args.map(stringifyLogArg).join(' ')),
-      error: (...args: unknown[]) => this.log('error', args.map(stringifyLogArg).join(' '))
+      error: (...args: unknown[]) => this.log('error', args.map(stringifyLogArg).join(' ')),
+      debug: (...args: unknown[]) => this.log('debug', args.map(stringifyLogArg).join(' '))
+    }
+  }
+
+  /** A small `Serial` shim so real Arduino-style logging idioms — `Serial.println("Clicked")`,
+   * `Serial.print(x)` — work verbatim inside an event handler and land in the Terminal, same as
+   * `console.log`. This is still real JS execution (Serial.println really is just a function call
+   * that runs when the event fires), not a simulation — it exists purely because "Serial" isn't a
+   * real global in a browser, so without this shim that exact line would throw a ReferenceError
+   * instead of doing what a user coming from Arduino firmware code would expect. */
+  private buildSerialSandbox(): Record<string, unknown> {
+    return {
+      println: (...args: unknown[]) => this.log('log', args.map(stringifyLogArg).join(' ')),
+      print: (...args: unknown[]) => this.log('log', args.map(stringifyLogArg).join(' '))
     }
   }
 
@@ -565,6 +658,10 @@ class ScriptSandbox {
   private log(kind: SandboxLogKind, message: string): void {
     this.cb.onLog({ id: this.nextLogId++, kind, message, timestamp: Date.now() })
   }
+
+  private logEvent(detail: SandboxEventDetail, message: string): void {
+    this.cb.onLog({ id: this.nextLogId++, kind: 'event', message, timestamp: Date.now(), event: detail })
+  }
 }
 
 function stringifyLogArg(v: unknown): string {
@@ -574,6 +671,38 @@ function stringifyLogArg(v: unknown): string {
   } catch {
     return String(v)
   }
+}
+
+/** Backs the `printf`/`LV_LOG_USER` sandbox globals — real C printf-style substitution
+ * (`%d`/`%i`/`%u`/`%f`/`%s`/`%%`) against a format-string first argument, matching exactly the
+ * `LV_LOG_USER("Slider value: %d", value)` shape LVGL firmware code actually uses, so that line
+ * works unmodified in preview. A trailing `\n` (from the `printf("...\n")` convention) is trimmed
+ * since each Terminal entry is already its own line. Falls back to space-joining every argument,
+ * same as console.log, when the first argument isn't a format string (no `%` in it) — so a plain
+ * `printf("Button clicked")` with no substitutions still works. */
+function formatPrintfStyle(args: unknown[]): string {
+  if (args.length === 0) return ''
+  const first = args[0]
+  if (typeof first !== 'string' || !first.includes('%')) {
+    // No format specifiers to substitute, but a bare `printf("Button clicked\n")` — no "%"
+    // anywhere — is exactly as common as the substitution form, so the trailing-newline trim
+    // below must not be conditional on which branch ran, or a plain printf call keeps a stray
+    // blank-looking newline baked into the one Terminal entry it produces.
+    return args
+      .map(stringifyLogArg)
+      .join(' ')
+      .replace(/\n+$/, '')
+  }
+  let argIndex = 1
+  const formatted = first.replace(/%[sdiuf%]/g, (spec) => {
+    if (spec === '%%') return '%'
+    if (argIndex >= args.length) return spec
+    const v = args[argIndex++]
+    if (spec === '%d' || spec === '%i' || spec === '%u') return String(Math.trunc(Number(v)))
+    if (spec === '%f') return String(Number(v))
+    return String(v)
+  })
+  return formatted.replace(/\n+$/, '')
 }
 
 // Module-level singleton — only one Logic tab/script sandbox exists at a time in this app, so
@@ -609,15 +738,24 @@ export function subscribeAffectedWidget(listener: AffectedWidgetListener): () =>
   return () => affectedWidgetListeners.delete(listener)
 }
 
+// Bounded well past the default 200 — a terminal meant for real interactive debugging (lots of
+// EVENT entries from clicking around the preview) fills that up fast; 1000 is still a trivial
+// amount of memory for plain log-entry objects and keeps meaningfully more session history
+// on-screen for the text filter to search across.
+const LOG_RETENTION = 1000
+
 export interface ScriptSandboxApi {
   running: boolean
   logs: SandboxLogEntry[]
   variables: Record<string, unknown>
   simulateTargets: SimulateTargets
+  paused: boolean
   start: () => void
   stop: () => void
   restart: () => void
   clearLogs: () => void
+  pause: () => void
+  resume: () => void
   simulateButtonPress: (name: string) => void
   simulateEncoderRotate: (direction: number) => void
   simulateSensorChange: (name: string, value: number) => void
@@ -628,11 +766,25 @@ export function useScriptSandbox(): ScriptSandboxApi {
   const [logs, setLogs] = useState<SandboxLogEntry[]>([])
   const [variables, setVariables] = useState<Record<string, unknown>>({})
   const [simulateTargets, setSimulateTargets] = useState<SimulateTargets>({ buttons: [], hasEncoder: false, sensors: [] })
+  const [paused, setPaused] = useState(false)
   const sandboxRef = useRef<ScriptSandbox | null>(null)
+  // Pause/resume is purely a "stop appending to what's displayed" toggle — the sandbox itself
+  // keeps running and generating real entries the whole time (pausing the terminal must never
+  // pause script execution), they're just buffered here instead of hitting `logs` until Resume,
+  // so nothing is silently lost. A ref (not state) because it's read synchronously inside the
+  // onLog callback, which can fire many times per render cycle during a burst of events.
+  const pausedRef = useRef(false)
+  const bufferedRef = useRef<SandboxLogEntry[]>([])
 
   if (!sandboxRef.current) {
     sandboxRef.current = new ScriptSandbox({
-      onLog: (entry) => setLogs((prev) => [...prev.slice(-199), entry]),
+      onLog: (entry) => {
+        if (pausedRef.current) {
+          bufferedRef.current.push(entry)
+          return
+        }
+        setLogs((prev) => [...prev.slice(-(LOG_RETENTION - 1)), entry])
+      },
       onVariablesChange: setVariables,
       onRunningChange: setRunning,
       onSimulateTargetsChange: setSimulateTargets
@@ -659,10 +811,40 @@ export function useScriptSandbox(): ScriptSandboxApi {
     logs,
     variables,
     simulateTargets,
-    start: () => sandboxRef.current?.start(),
+    paused,
+    // A fresh Run/Restart is a fresh debugging session — clearing here (rather than leaving old
+    // entries to intermix with the new run's output) is what makes "reruns the preview" one of
+    // this terminal's two documented ways logs get cleared, the other being the explicit Clear
+    // button (see clearLogs below). Stopping alone does NOT clear — you may still want to read the
+    // final state after a run ends.
+    start: () => {
+      setLogs([])
+      bufferedRef.current = []
+      sandboxRef.current?.start()
+    },
     stop: () => sandboxRef.current?.stop(),
-    restart: () => sandboxRef.current?.restart(),
-    clearLogs: () => setLogs([]),
+    restart: () => {
+      setLogs([])
+      bufferedRef.current = []
+      sandboxRef.current?.restart()
+    },
+    clearLogs: () => {
+      setLogs([])
+      bufferedRef.current = []
+    },
+    pause: () => {
+      pausedRef.current = true
+      setPaused(true)
+    },
+    resume: () => {
+      pausedRef.current = false
+      setPaused(false)
+      if (bufferedRef.current.length > 0) {
+        const buffered = bufferedRef.current
+        bufferedRef.current = []
+        setLogs((prev) => [...prev, ...buffered].slice(-LOG_RETENTION))
+      }
+    },
     simulateButtonPress: (name) => sandboxRef.current?.simulateButtonPress(name),
     simulateEncoderRotate: (direction) => sandboxRef.current?.simulateEncoderRotate(direction),
     simulateSensorChange: (name, value) => sandboxRef.current?.simulateSensorChange(name, value)
