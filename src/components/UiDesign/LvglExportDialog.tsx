@@ -333,9 +333,7 @@ export function LvglExportDialog() {
                     value={screenCustomName}
                     onChange={(e) => setScreenCustomName(e.target.value)}
                   />
-                  <span className="text-studio-muted font-mono">
-                    {screenBaseName}_screen.h / .cpp
-                  </span>
+                  <span className="text-studio-muted font-mono">{screenBaseName}_screen.h</span>
                 </label>
               )}
               <span className="text-studio-muted basis-full">Standalone .h/.cpp — no LVGL/display/SPI/board init, drop into any existing LVGL project.</span>

@@ -73,6 +73,13 @@ interface SandboxCallbacks {
   onVariablesChange: (vars: Record<string, unknown>) => void
   onRunningChange: (running: boolean) => void
   onSimulateTargetsChange: (targets: SimulateTargets) => void
+  // Fired when Start/Restart's top-level script execution throws before a single event handler
+  // ever gets registered (e.g. a ReferenceError from a stray identifier) — distinct from an error
+  // thrown later *inside* an already-running event handler (dispatchWidgetEvent's own try/catch),
+  // which only logs to the Terminal since the rest of the script is still live. A startup failure
+  // means the whole run never actually started, so it needs a signal that can't be missed by
+  // scrolling past one Terminal line — see LogicPanel.tsx's red banner. `null` clears it.
+  onStartupError: (message: string | null) => void
 }
 
 const BINDING_METHODS = new Set(['bindText', 'bindValue', 'bindVisible'])
@@ -139,12 +146,15 @@ export class ScriptSandbox {
 
   start(): void {
     if (this.running) return
+    this.cb.onStartupError(null)
     const state = useStore.getState()
     const uiDesign = state.project.uiDesign
     const source = uiDesign.script
     const parsed = parseScript(source)
     if (!parsed.program) {
-      this.log('error', `Line ${parsed.errors[0]?.line ?? 1}: ${parsed.errors[0]?.message ?? 'Could not parse script.'}`)
+      const message = `Line ${parsed.errors[0]?.line ?? 1}: ${parsed.errors[0]?.message ?? 'Could not parse script.'}`
+      this.log('error', message)
+      this.cb.onStartupError(message)
       return
     }
 
@@ -287,7 +297,9 @@ export class ScriptSandbox {
         (...args: unknown[]) => this.log('log', formatPrintfStyle(args))
       )
     } catch (err) {
-      this.logError(err)
+      const message = this.formatErrorMessage(err)
+      this.log('error', message)
+      this.cb.onStartupError(message)
       this.running = false
       this.cb.onRunningChange(false)
       return
@@ -322,6 +334,7 @@ export class ScriptSandbox {
     this.cb.onRunningChange(false)
     this.cb.onVariablesChange({})
     this.cb.onSimulateTargetsChange({ buttons: [], hasEncoder: false, sensors: [] })
+    this.cb.onStartupError(null)
   }
 
   restart(): void {
@@ -645,14 +658,20 @@ export class ScriptSandbox {
     this.afterTick()
   }
 
-  private logError(err: unknown): void {
+  private formatErrorMessage(err: unknown): string {
     const message = err instanceof Error ? err.message : String(err)
     let line: number | undefined
     if (err instanceof Error && err.stack) {
       const m = err.stack.match(/<anonymous>:(\d+):\d+/)
       if (m) line = Number(m[1])
     }
-    this.log('error', line ? `Line ${line}: ${message}` : message)
+    const base = line ? `Line ${line}: ${message}` : message
+    const hint = lvglMisuseHint(message)
+    return hint ? `${base} ${hint}` : base
+  }
+
+  private logError(err: unknown): void {
+    this.log('error', this.formatErrorMessage(err))
   }
 
   private log(kind: SandboxLogKind, message: string): void {
@@ -662,6 +681,24 @@ export class ScriptSandbox {
   private logEvent(detail: SandboxEventDetail, message: string): void {
     this.cb.onLog({ id: this.nextLogId++, kind: 'event', message, timestamp: Date.now(), event: detail })
   }
+}
+
+// A common first mistake: pasting literal LVGL C event-callback code (e.g. `switch (code) { case
+// LV_EVENT_CLICKED: ... }`) directly into this scripting language, where none of those
+// identifiers exist — it's syntactically valid JS (switch/case is real JS), so it parses fine and
+// only fails at runtime with a plain "X is not defined" ReferenceError, which on its own doesn't
+// explain *why*. Recognized narrowly, only for names that are unambiguously LVGL vocabulary (the
+// conventional `code` param from `lv_event_get_code(e)`, or an `LV_EVENT_*`/`LV_STATE_*`/
+// `LV_OBJ_FLAG_*`/`LV_ALIGN_*`/`LV_PART_*` constant) — deliberately not generic names like `e`/
+// `obj`/`evt`, which are common in unrelated, genuinely unrelated JS typos and would make this
+// hint misleading more often than helpful.
+function lvglMisuseHint(message: string): string | undefined {
+  const m = message.match(/^(\w+) is not defined$/)
+  if (!m) return undefined
+  const name = m[1]
+  const looksLvgl = name === 'code' || /^LV_(EVENT|STATE|OBJ_FLAG|ALIGN|PART)_/.test(name)
+  if (!looksLvgl) return undefined
+  return `— this looks like literal LVGL C event-callback code. This scripting language is JS-like, not C: write "const w = ui.get(\"#yourWidget\"); w.on(\"click\", () => { ... });" instead of a switch(code)/case LV_EVENT_... block.`
 }
 
 function stringifyLogArg(v: unknown): string {
@@ -750,6 +787,11 @@ export interface ScriptSandboxApi {
   variables: Record<string, unknown>
   simulateTargets: SimulateTargets
   paused: boolean
+  // Set when the most recent Start/Restart failed before the script ever finished its top-level
+  // run (a parse error, or a thrown error before a single event handler got registered) — cleared
+  // on the next successful Start/Restart or on Stop. See LogicPanel.tsx's banner, which is the
+  // whole point of tracking this separately from the Terminal's own (easy-to-miss) error line.
+  startupError: string | null
   start: () => void
   stop: () => void
   restart: () => void
@@ -767,6 +809,7 @@ export function useScriptSandbox(): ScriptSandboxApi {
   const [variables, setVariables] = useState<Record<string, unknown>>({})
   const [simulateTargets, setSimulateTargets] = useState<SimulateTargets>({ buttons: [], hasEncoder: false, sensors: [] })
   const [paused, setPaused] = useState(false)
+  const [startupError, setStartupError] = useState<string | null>(null)
   const sandboxRef = useRef<ScriptSandbox | null>(null)
   // Pause/resume is purely a "stop appending to what's displayed" toggle — the sandbox itself
   // keeps running and generating real entries the whole time (pausing the terminal must never
@@ -787,7 +830,8 @@ export function useScriptSandbox(): ScriptSandboxApi {
       },
       onVariablesChange: setVariables,
       onRunningChange: setRunning,
-      onSimulateTargetsChange: setSimulateTargets
+      onSimulateTargetsChange: setSimulateTargets,
+      onStartupError: setStartupError
     })
   }
 
@@ -812,6 +856,7 @@ export function useScriptSandbox(): ScriptSandboxApi {
     variables,
     simulateTargets,
     paused,
+    startupError,
     // A fresh Run/Restart is a fresh debugging session — clearing here (rather than leaving old
     // entries to intermix with the new run's output) is what makes "reruns the preview" one of
     // this terminal's two documented ways logs get cleared, the other being the explicit Clear

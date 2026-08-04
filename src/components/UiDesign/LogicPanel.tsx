@@ -226,6 +226,17 @@ export function LogicPanel() {
         {hasUnappliedChanges && syntaxIssues.length === 0 && <span className="text-[11px] text-studio-muted">Unapplied changes — click Apply &amp; Run.</span>}
       </div>
 
+      {sandbox.startupError && (
+        <div className="text-[11px] bg-red-500/10 border border-red-500/30 text-red-300 rounded px-2 py-1.5">
+          <div className="font-medium">✕ Run failed — the script didn&apos;t start.</div>
+          <div className="mt-0.5">{sandbox.startupError}</div>
+          <div className="text-red-300/70 mt-0.5">
+            Nothing will happen when you interact with widgets until this is fixed and you click Apply &amp; Run again. (Also
+            logged in the Terminal below.)
+          </div>
+        </div>
+      )}
+
       <div className="border border-studio-border rounded overflow-hidden" style={{ height: 220 }}>
         <CodeMirror
           value={draft}
