@@ -1,4 +1,5 @@
-import type { UiDesignProject } from './uiDesign'
+import type { UiDesignProject, UiWorkspaceViewSettings } from './uiDesign'
+import { defaultUiWorkspaceView } from './uiDesign'
 
 export interface EyeParams {
   width: number
@@ -940,6 +941,10 @@ export interface EditorState {
   selectedExpressionId: string | null
   activeAnimationId: string
   mode: PlaybackMode
+  /** UI Design Mode's canvas zoom/pan/rulers/snap/grid preferences — lives here (not on
+   * `Project.uiDesign`) specifically so undo/redo, which only ever snapshots/swaps `Project`,
+   * can never revert a pan or zoom change — see UiWorkspaceViewSettings' own doc comment. */
+  uiWorkspaceView: UiWorkspaceViewSettings
 }
 
 export function defaultEditorState(project: Project): EditorState {
@@ -947,7 +952,8 @@ export function defaultEditorState(project: Project): EditorState {
     eyeTarget: 'both',
     selectedExpressionId: null,
     activeAnimationId: project.animations[0]?.id ?? '',
-    mode: 'design'
+    mode: 'design',
+    uiWorkspaceView: defaultUiWorkspaceView()
   }
 }
 

@@ -124,6 +124,43 @@ export function rectFitsDisplayShape(display: Pick<DisplayMaskOptions, 'width' |
  * for a circle, a reasonable approximation for a non-square oval, and standard technique for
  * convex-region containment (Minkowski erosion). Width/height are never changed, only x/y.
  * Returns the original rect's x/y unchanged if it already fits, or shape !== 'circle'. */
+export type UiWidgetVisibilityStatus = 'fully-visible' | 'partially-clipped' | 'outside-safe-area' | 'outside-display'
+
+function isPointInDisplay(display: Pick<DisplayMaskOptions, 'width' | 'height' | 'shape'>, x: number, y: number): boolean {
+  if (display.shape !== 'circle') return x >= 0 && x <= display.width && y >= 0 && y <= display.height
+  const cx = display.width / 2
+  const cy = display.height / 2
+  const rx = display.width / 2
+  const ry = display.height / 2
+  const nx = rx > 0 ? (x - cx) / rx : 0
+  const ny = ry > 0 ? (y - cy) / ry : 0
+  return nx * nx + ny * ny <= 1
+}
+
+/** Classifies a widget's rect against the display boundary and an eroded "safe area" inset by
+ * `safeAreaMargin` px on every side — the four states the spec asks for while dragging: fully
+ * inside the safe area, fully inside the display but reaching into the margin, some corners
+ * outside the display shape entirely, or the whole rect outside it. Reuses the exact same
+ * corner-in-ellipse test `rectFitsDisplayShape` already established (generalized here to also
+ * cover square/rectangle displays via a plain bounding-box check), so this can never disagree
+ * with the existing "does it fit" check used elsewhere. */
+export function classifyWidgetVisibility(display: Pick<DisplayMaskOptions, 'width' | 'height' | 'shape'>, rect: DisplayRect, safeAreaMargin: number): UiWidgetVisibilityStatus {
+  const corners: [number, number][] = [
+    [rect.x, rect.y],
+    [rect.x + rect.width, rect.y],
+    [rect.x, rect.y + rect.height],
+    [rect.x + rect.width, rect.y + rect.height]
+  ]
+  const insideDisplay = corners.map(([x, y]) => isPointInDisplay(display, x, y))
+  const allInsideDisplay = insideDisplay.every(Boolean)
+  const noneInsideDisplay = insideDisplay.every((v) => !v)
+  if (!allInsideDisplay) return noneInsideDisplay ? 'outside-display' : 'partially-clipped'
+
+  const safeDisplay = { width: Math.max(0, display.width - safeAreaMargin * 2), height: Math.max(0, display.height - safeAreaMargin * 2), shape: display.shape }
+  const allInsideSafeArea = corners.every(([x, y]) => isPointInDisplay(safeDisplay, x - safeAreaMargin, y - safeAreaMargin))
+  return allInsideSafeArea ? 'fully-visible' : 'outside-safe-area'
+}
+
 export function clampRectToDisplayShape(display: Pick<DisplayMaskOptions, 'width' | 'height' | 'shape'>, rect: DisplayRect): { x: number; y: number } {
   if (display.shape !== 'circle' || rectFitsDisplayShape(display, rect)) return { x: rect.x, y: rect.y }
 

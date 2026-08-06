@@ -3,8 +3,79 @@ import type { UiThemeId } from '@/types'
 import type { ToolbarActions } from '@/components/Layout/Toolbar'
 import { SaveStatusLabel } from '@/components/Layout/SaveStatusLabel'
 import { UI_THEME_LABELS } from '@/lib/uiDesign/themes'
+import { UI_ZOOM_PRESETS, UI_ZOOM_STEP_FACTOR, clampUiZoom, fitZoomToDisplay } from '@/lib/uiDesign/canvasZoom'
 
 const THEME_ORDER: UiThemeId[] = ['light', 'dark', 'amoled', 'material', 'fluent', 'apple', 'gaming', 'automotive', 'cyberpunk', 'custom']
+
+/** Matches a live zoom value to one of the spec's preset percentages within a small epsilon, so
+ * the dropdown shows e.g. "100%" selected right after clicking it rather than immediately
+ * looking like a mismatched custom value due to float rounding. */
+function matchZoomPreset(zoom: number): number | null {
+  const preset = UI_ZOOM_PRESETS.find((p) => Math.abs(p - zoom) < 0.005)
+  return preset ?? null
+}
+
+function ZoomControls() {
+  const view = useStore((s) => s.uiWorkspaceView)
+  const updateUiWorkspaceView = useStore((s) => s.updateUiWorkspaceView)
+  const display = useStore((s) => s.uiPreviewDisplayOverride ?? s.project.uiDesign.display)
+  const viewportSize = useStore((s) => s.uiCanvasViewportSize)
+
+  const matchedPreset = matchZoomPreset(view.zoom)
+  const selectValue = matchedPreset !== null ? String(matchedPreset) : 'custom'
+
+  const handlePresetChange = (raw: string) => {
+    if (raw === 'fit') {
+      if (!viewportSize) return
+      updateUiWorkspaceView({ zoom: fitZoomToDisplay(viewportSize, display, 'contain'), panX: 0, panY: 0 })
+      return
+    }
+    if (raw === 'fitWidth') {
+      if (!viewportSize) return
+      updateUiWorkspaceView({ zoom: fitZoomToDisplay(viewportSize, display, 'width'), panX: 0, panY: 0 })
+      return
+    }
+    if (raw === 'actual') {
+      updateUiWorkspaceView({ zoom: 1 })
+      return
+    }
+    if (raw === 'custom') return
+    updateUiWorkspaceView({ zoom: clampUiZoom(Number(raw)) })
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      <button className="studio-btn text-xs" onClick={() => updateUiWorkspaceView({ zoom: clampUiZoom(view.zoom / UI_ZOOM_STEP_FACTOR) })} title="Zoom out">
+        −
+      </button>
+      <select
+        className="bg-studio-panel border border-studio-border rounded px-1.5 py-1 text-xs w-[7.5rem]"
+        value={selectValue}
+        onChange={(e) => handlePresetChange(e.target.value)}
+        title="Preview scale — only affects the editor preview, never the exported LVGL widget coordinates"
+      >
+        {selectValue === 'custom' && <option value="custom">{Math.round(view.zoom * 100)}%</option>}
+        {UI_ZOOM_PRESETS.map((p) => (
+          <option key={p} value={p}>
+            {Math.round(p * 100)}%
+          </option>
+        ))}
+        <option value="fit">Fit to workspace</option>
+        <option value="fitWidth">Fit width</option>
+        <option value="actual">Actual pixels</option>
+      </select>
+      <button className="studio-btn text-xs" onClick={() => updateUiWorkspaceView({ zoom: clampUiZoom(view.zoom * UI_ZOOM_STEP_FACTOR) })} title="Zoom in">
+        +
+      </button>
+      <button className="studio-btn text-xs" onClick={() => updateUiWorkspaceView({ zoom: 1, panX: 0, panY: 0 })} title="Reset zoom to 100% and re-center">
+        Reset
+      </button>
+      <button className="studio-btn text-xs" onClick={() => updateUiWorkspaceView({ panX: 0, panY: 0 })} title="Center the display in the workspace">
+        Center
+      </button>
+    </div>
+  )
+}
 
 // UI Design Mode's own top bar — deliberately NOT the Eye Studio Toolbar with some buttons
 // hidden. It's a separately composed component with a different button set (no
@@ -86,6 +157,8 @@ export function UiDesignTopBar({ actions }: { actions: ToolbarActions }) {
           Export LVGL C++...
         </button>
       </div>
+
+      <ZoomControls />
 
       <button
         className={`studio-btn text-xs ${esp32PreviewMode ? 'text-studio-accent' : ''}`}

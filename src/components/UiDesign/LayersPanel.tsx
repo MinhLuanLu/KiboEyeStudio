@@ -3,6 +3,8 @@ import type { UiWidget } from '@/types'
 import { UI_WIDGET_LABELS } from '@/types'
 import { rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
 
+const REVEAL_FLASH_MS = 600
+
 function LayerRow({ widget, depth }: { widget: UiWidget; depth: number }) {
   const widgets = useStore((s) => s.project.uiDesign.widgets)
   const uiDisplay = useStore((s) => s.project.uiDesign.display)
@@ -14,6 +16,7 @@ function LayerRow({ widget, depth }: { widget: UiWidget; depth: number }) {
   const duplicateUiWidget = useStore((s) => s.duplicateUiWidget)
   const deleteUiWidget = useStore((s) => s.deleteUiWidget)
   const checkpoint = useStore((s) => s.checkpoint)
+  const setUiRevealWidgetId = useStore((s) => s.setUiRevealWidgetId)
 
   const isSelected = selectedWidgetId === widget.id
   const isScreen = widget.type === 'screen'
@@ -34,7 +37,11 @@ function LayerRow({ widget, depth }: { widget: UiWidget; depth: number }) {
           isSelected ? 'bg-studio-accent/20 border border-studio-accent/40' : 'hover:bg-studio-panel2 border border-transparent'
         } ${!widget.visible ? 'opacity-40' : ''}`}
         style={{ paddingLeft: 6 + depth * 14 }}
-        onClick={() => selectUiWidget(widget.id)}
+        onClick={() => {
+          selectUiWidget(widget.id)
+          setUiRevealWidgetId(widget.id)
+          setTimeout(() => useStore.getState().setUiRevealWidgetId(null), REVEAL_FLASH_MS)
+        }}
       >
         <span className="flex-1 truncate">
           {UI_WIDGET_LABELS[widget.type]}

@@ -10,6 +10,7 @@ import type { MaterialPresetId } from '@/lib/uiDesign/materialPresets'
 import { DEFAULT_ALT_CHARS } from '@/lib/uiDesign/keyboardLayouts'
 import { missingDanishCodepoints } from '@/lib/uiDesign/fontImport'
 import { rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
+import { centerPanForRect, fitZoomToDisplay } from '@/lib/uiDesign/canvasZoom'
 import { ACTION_TABLE, HARDWARE_ACTION_PRESETS } from '@/lib/uiDesign/scriptLang/actionTable'
 import { widgetVarName, widgetBaseName, toCIdentifier, EVENT_CAPABLE_WIDGET_TYPES, EVENT_CALLBACK_TRIGGER_OPTIONS } from '@/lib/export/lvglExport'
 import { IconPicker } from './IconPicker'
@@ -2012,6 +2013,27 @@ function VisibleWhenField({ widget }: { widget: UiWidget }) {
 // switches these fields to edit that state's override on top of the Default appearance (which
 // itself already layers on top of any matching CSS rule — see cssCascade.ts), matching LVGL's
 // own per-state style model.
+/** Absolute display-local bounding box for a widget — sums ancestor x/y offsets up to (but not
+ * including) the screen root, since a nested widget's own x/y are parent-relative (see
+ * WidgetRenderer.tsx's isTopLevelWidget doc comment for the same distinction). Used by the
+ * Navigator's Center-in-workspace/Zoom-to-selection actions, which need a real display-local
+ * point to center the viewport on regardless of how deeply the selected widget is nested. */
+function absoluteWidgetRect(allWidgets: Record<string, UiWidget>, widget: UiWidget): { x: number; y: number; width: number; height: number } {
+  let x = typeof widget.style.x === 'number' ? widget.style.x : 0
+  let y = typeof widget.style.y === 'number' ? widget.style.y : 0
+  const width = typeof widget.style.width === 'number' ? widget.style.width : 0
+  const height = typeof widget.style.height === 'number' ? widget.style.height : 0
+  let parentId = widget.parentId
+  while (parentId) {
+    const parent = allWidgets[parentId]
+    if (!parent || parent.type === 'screen') break
+    x += typeof parent.style.x === 'number' ? parent.style.x : 0
+    y += typeof parent.style.y === 'number' ? parent.style.y : 0
+    parentId = parent.parentId
+  }
+  return { x, y, width, height }
+}
+
 export function PropertiesPanel() {
   const selectedWidgetId = useStore((s) => s.selectedWidgetId)
   const widget = useStore((s) => (s.selectedWidgetId ? s.project.uiDesign.widgets[s.selectedWidgetId] : null))
@@ -2027,6 +2049,8 @@ export function PropertiesPanel() {
   const setUiWidgetThemeToken = useStore((s) => s.setUiWidgetThemeToken)
   const applyMaterialPreset = useStore((s) => s.applyMaterialPreset)
   const checkpoint = useStore((s) => s.checkpoint)
+  const selectUiWidget = useStore((s) => s.selectUiWidget)
+  const updateUiWorkspaceView = useStore((s) => s.updateUiWorkspaceView)
   const [stateTab, setStateTab] = useState<StateTab>('default')
 
   if (!selectedWidgetId || !widget) {
@@ -2059,6 +2083,48 @@ export function PropertiesPanel() {
           </button>
         )}
       </div>
+
+      {widget.type !== 'screen' && (
+        <div className="flex items-center gap-1 flex-wrap text-[11px]">
+          <button
+            className="studio-btn px-1.5 py-0.5"
+            title="Center this widget in the workspace at the current zoom level"
+            onClick={() => {
+              const viewport = useStore.getState().uiCanvasViewportSize
+              if (!viewport) return
+              const rect = absoluteWidgetRect(allWidgets, widget)
+              const { panX, panY } = centerPanForRect(display, useStore.getState().uiWorkspaceView.zoom, rect)
+              updateUiWorkspaceView({ panX, panY })
+            }}
+          >
+            Center in workspace
+          </button>
+          <button
+            className="studio-btn px-1.5 py-0.5"
+            title="Zoom the workspace to fit this widget"
+            onClick={() => {
+              const viewport = useStore.getState().uiCanvasViewportSize
+              if (!viewport) return
+              const rect = absoluteWidgetRect(allWidgets, widget)
+              const zoom = fitZoomToDisplay(viewport, { width: Math.max(rect.width, 1), height: Math.max(rect.height, 1) }, 'contain', 0.5)
+              const { panX, panY } = centerPanForRect(display, zoom, rect)
+              updateUiWorkspaceView({ zoom, panX, panY })
+            }}
+          >
+            Zoom to selection
+          </button>
+          {widget.parentId && (
+            <button className="studio-btn px-1.5 py-0.5" title="Select the parent widget" onClick={() => selectUiWidget(widget.parentId!)}>
+              Select parent
+            </button>
+          )}
+          {widget.childIds.length > 0 && (
+            <button className="studio-btn px-1.5 py-0.5" title="Select the first child widget" onClick={() => selectUiWidget(widget.childIds[0])}>
+              Select child
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-2">
         <NumberField label="X" value={x} onChange={(v) => updateUiWidgetStyle(widget.id, { x: v })} />

@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '@/state/store'
-import type { UiAsset, UiDesignProject, UiWidget, UiWidgetType } from '@/types'
+import type { UiSnapGuide } from '@/state/store'
+import type { UiAsset, UiDesignProject, UiWidget, UiWidgetType, UiWorkspaceViewSettings } from '@/types'
+import { applySnap, computeSpacingIndicators, type SnapContext, type SnapRect } from '@/lib/uiDesign/snapEngine'
 import { computeEffectiveStyle } from '@/lib/uiDesign/cssCascade'
-import { clampRectToDisplayShape, rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
+import { clampRectToDisplayShape, classifyWidgetVisibility, rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
 import { dispatchWidgetEvent, isSandboxRunning, subscribeAffectedWidget } from '@/lib/uiDesign/scriptLang/sandboxRuntime'
 import { lvglSymbolById } from '@/lib/uiDesign/lvglSymbols'
 import {
@@ -224,6 +226,56 @@ export const CONTAINER_LIKE: ReadonlySet<UiWidgetType> = new Set(['screen', 'con
 function numProp(widget: UiWidget, key: string, fallback: number): number {
   const v = widget.props[key]
   return typeof v === 'number' ? v : fallback
+}
+
+/** Builds the snapEngine.ts SnapContext for whichever widget is currently being dragged/resized —
+ * parentBounds is null for a top-level widget (its own bounds effectively ARE the display, so
+ * "snap to parent" would be redundant with "snap to display edges"); siblingRects excludes the
+ * dragged widget itself and, for a nested widget, is scoped to its own parent's other children
+ * (matching the parent-relative coordinate convention every nested widget already uses). */
+function buildSnapContext(
+  allWidgets: Record<string, UiWidget>,
+  display: { width: number; height: number },
+  view: UiWorkspaceViewSettings,
+  draggedWidgetId: string,
+  parentId: string | null
+): SnapContext {
+  const parent = parentId ? allWidgets[parentId] : undefined
+  const parentBounds: SnapRect | null =
+    parent && parent.type !== 'screen' && typeof parent.style.x === 'number' && typeof parent.style.y === 'number' && typeof parent.style.width === 'number' && typeof parent.style.height === 'number'
+      ? { x: parent.style.x, y: parent.style.y, width: parent.style.width, height: parent.style.height }
+      : null
+  const siblingIds = parent ? parent.childIds : []
+  const siblingRects = siblingIds
+    .filter((id) => id !== draggedWidgetId)
+    .map((id) => allWidgets[id])
+    .filter((w): w is UiWidget => !!w && w.visible)
+    .map((w) => ({
+      id: w.id,
+      rect: {
+        x: typeof w.style.x === 'number' ? w.style.x : 0,
+        y: typeof w.style.y === 'number' ? w.style.y : 0,
+        width: typeof w.style.width === 'number' ? w.style.width : 0,
+        height: typeof w.style.height === 'number' ? w.style.height : 0
+      }
+    }))
+  return {
+    display,
+    safeAreaMargin: view.safeAreaMargin,
+    parentBounds,
+    siblingRects,
+    gridSize: view.gridSize,
+    snapDistance: view.snapDistance,
+    magneticStrength: view.magneticStrength,
+    toggles: {
+      grid: view.snapToGrid,
+      center: view.snapToCenter,
+      displayEdges: view.snapToDisplayEdges,
+      safeArea: view.snapToSafeArea,
+      parent: view.snapToParent,
+      widgets: view.snapToWidgets
+    }
+  }
 }
 
 /** Walks a widget's own ancestor chain looking for the nearest `dataList` — used to detect "am I
@@ -989,8 +1041,26 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   const moveUiWidget = useStore((s) => s.moveUiWidget)
   const updateUiWidgetStyle = useStore((s) => s.updateUiWidgetStyle)
   const updateUiWidgetProps = useStore((s) => s.updateUiWidgetProps)
+  // Raw pointer deltas below are measured in SCREEN px; under the canvas's zoom transform (see
+  // Canvas.tsx/lib/uiDesign/canvasZoom.ts) they must be divided by the current zoom to land back
+  // in the LOGICAL px space `UiWidget.style.x/y/width/height` (and the exported LVGL values) live
+  // in. Pan doesn't need accounting for here — it's a constant offset per gesture and cancels out
+  // of any delta.
+  const zoom = useStore((s) => s.uiWorkspaceView.zoom)
+  const setUiDragPreview = useStore((s) => s.setUiDragPreview)
+  const dragPreview = useStore((s) => s.uiDragPreview)
+  const view = useStore((s) => s.uiWorkspaceView)
+  const duplicateUiWidget = useStore((s) => s.duplicateUiWidget)
   const checkpoint = useStore((s) => s.checkpoint)
-  const dragState = useRef<{ startClientX: number; startClientY: number; startX: number; startY: number } | null>(null)
+  const dragState = useRef<{
+    widgetId: string
+    startClientX: number
+    startClientY: number
+    startX: number
+    startY: number
+    width: number
+    height: number
+  } | null>(null)
   // A keyboard key's own short-press handler (KeyboardWidgetInner's handleShortPress) calls
   // e.stopPropagation() on its pointerup so a key-tap doesn't ALSO fire a generic click/released
   // event on the keyboard widget itself — but that stopPropagation happens during the BUBBLE
@@ -1078,6 +1148,11 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   // store.ts's simulateFocusNext/Previous/Press) — a distinct color from the design-time
   // selection outline above so the two never look ambiguous during a live-preview walkthrough.
   const isSimFocused = simulatedFocusWidgetId === widget.id
+  // M6: brief flash when this widget was just selected via a Layers-panel row click (a distinct
+  // ephemeral channel from A6's `affected` above — "just selected from Layers" is a different
+  // trigger than "a running script's action touched this widget" — but reuses the exact same
+  // green-flash visual language for continuity).
+  const revealed = useStore((s) => s.uiRevealWidgetId === widget.id)
 
   // Select-on-click + pointer-drag move — same onPointerDown/Move/Up + getBoundingClientRect-
   // free delta math already used for sticker dragging in PreviewCanvas.tsx. stopPropagation so
@@ -1085,13 +1160,24 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   const handlePointerDown = (e: React.PointerEvent) => {
     if (widget.locked) return
     e.stopPropagation()
-    selectUiWidget(widget.id)
     checkpoint()
+    // Ctrl+drag = duplicate — the original stays put, the new copy follows the cursor for the
+    // rest of this gesture. Design-time only (a running sandbox test shouldn't spawn widgets).
+    let draggedId = widget.id
+    if ((e.ctrlKey || e.metaKey) && !isSandboxRunning()) {
+      const newId = duplicateUiWidget(widget.id)
+      if (newId) draggedId = newId
+    }
+    selectUiWidget(draggedId)
+    const draggedWidget = draggedId === widget.id ? widget : allWidgets[draggedId] ?? widget
     dragState.current = {
+      widgetId: draggedId,
       startClientX: e.clientX,
       startClientY: e.clientY,
-      startX: typeof widget.style.x === 'number' ? widget.style.x : 0,
-      startY: typeof widget.style.y === 'number' ? widget.style.y : 0
+      startX: typeof draggedWidget.style.x === 'number' ? draggedWidget.style.x : 0,
+      startY: typeof draggedWidget.style.y === 'number' ? draggedWidget.style.y : 0,
+      width: typeof draggedWidget.style.width === 'number' ? draggedWidget.style.width : 0,
+      height: typeof draggedWidget.style.height === 'number' ? draggedWidget.style.height : 0
     }
     // setPointerCapture is a robustness nicety (keeps the drag tracking even if the cursor
     // outruns the element) — it can throw in edge cases (e.g. the pointer id is no longer
@@ -1119,20 +1205,73 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     const drag = dragState.current
     if (!drag) return
     e.stopPropagation()
-    moveUiWidget(widget.id, drag.startX + (e.clientX - drag.startClientX), drag.startY + (e.clientY - drag.startClientY))
+    let dxScreen = e.clientX - drag.startClientX
+    let dyScreen = e.clientY - drag.startClientY
+    // Shift = axis-lock — continuously recomputed from the CURRENT cumulative delta (not fixed
+    // once at gesture start), so reversing direction can switch the locked axis, matching how
+    // this constraint behaves in every other design tool.
+    if (e.shiftKey) {
+      if (Math.abs(dxScreen) >= Math.abs(dyScreen)) dyScreen = 0
+      else dxScreen = 0
+    }
+    let x = drag.startX + dxScreen / zoom
+    let y = drag.startY + dyScreen / zoom
+    let guides: UiSnapGuide[] = []
+
+    if (view.snapEnabled && !e.altKey) {
+      const draggedWidget = allWidgets[drag.widgetId]
+      const ctx = buildSnapContext(allWidgets, display, view, drag.widgetId, draggedWidget?.parentId ?? null)
+      const snapped = applySnap({ x, y, width: drag.width, height: drag.height }, ctx)
+      x = snapped.x
+      y = snapped.y
+      guides = view.guidesVisible ? snapped.guides : []
+    }
+    if (view.pixelAccurateMode) {
+      x = Math.round(x)
+      y = Math.round(y)
+    }
+
+    moveUiWidget(drag.widgetId, x, y)
+    // Read by Canvas.tsx's rulers/DragInfoPanel/guide+spacing overlays — see UiDragPreview's own
+    // doc comment in store.ts for why this is the one shared piece of transient drag state every
+    // overlay reads from instead of each re-deriving it independently.
+    const draggedWidgetNow = allWidgets[drag.widgetId]
+    const siblingRects =
+      draggedWidgetNow?.parentId && allWidgets[draggedWidgetNow.parentId]
+        ? allWidgets[draggedWidgetNow.parentId].childIds
+            .filter((id) => id !== drag.widgetId)
+            .map((id) => allWidgets[id])
+            .filter((w): w is UiWidget => !!w && w.visible)
+            .map((w) => ({
+              id: w.id,
+              rect: {
+                x: typeof w.style.x === 'number' ? w.style.x : 0,
+                y: typeof w.style.y === 'number' ? w.style.y : 0,
+                width: typeof w.style.width === 'number' ? w.style.width : 0,
+                height: typeof w.style.height === 'number' ? w.style.height : 0
+              }
+            }))
+        : []
+    setUiDragPreview({
+      widgetId: drag.widgetId,
+      rect: { x, y, width: drag.width, height: drag.height },
+      guides,
+      spacing: view.guidesVisible ? computeSpacingIndicators({ x, y, width: drag.width, height: drag.height }, siblingRects) : []
+    })
   }
   // Capture phase — see dragState's own comment above for why this must be a separate handler
   // from the bubble-phase one below, rather than just inlining the clear at the top of it.
   const handlePointerUpCapture = () => {
     pointerUpSnapshot.current = dragState.current
     dragState.current = null
+    setUiDragPreview(null)
   }
   const handlePointerUp = (e: React.PointerEvent) => {
     const drag = pointerUpSnapshot.current
     if (!drag) return
     pointerUpSnapshot.current = null
     e.stopPropagation()
-    snapInsideDisplayIfNeeded()
+    snapInsideDisplayIfNeeded(drag.widgetId)
 
     if (longPressTimer.current) {
       clearTimeout(longPressTimer.current)
@@ -1167,16 +1306,19 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   // entirely if the widget has allowOutsideBounds set (see the Properties panel's "Allow
   // outside display" checkbox), so a deliberately-placed off-display widget is never yanked
   // back. See renderer/displayMask.ts's clampRectToDisplayShape for the actual geometry.
-  const snapInsideDisplayIfNeeded = () => {
-    if (!isTopLevelWidget || widget.allowOutsideBounds) return
+  const snapInsideDisplayIfNeeded = (targetWidgetId: string = widget.id) => {
+    const target = targetWidgetId === widget.id ? widget : allWidgets[targetWidgetId]
+    if (!target) return
+    const targetIsTopLevel = target.parentId ? allWidgets[target.parentId]?.type === 'screen' : true
+    if (!targetIsTopLevel || target.allowOutsideBounds) return
     const rect = {
-      x: typeof widget.style.x === 'number' ? widget.style.x : 0,
-      y: typeof widget.style.y === 'number' ? widget.style.y : 0,
-      width: typeof widget.style.width === 'number' ? widget.style.width : 0,
-      height: typeof widget.style.height === 'number' ? widget.style.height : 0
+      x: typeof target.style.x === 'number' ? target.style.x : 0,
+      y: typeof target.style.y === 'number' ? target.style.y : 0,
+      width: typeof target.style.width === 'number' ? target.style.width : 0,
+      height: typeof target.style.height === 'number' ? target.style.height : 0
     }
     const clamped = clampRectToDisplayShape(display, rect)
-    if (clamped.x !== rect.x || clamped.y !== rect.y) moveUiWidget(widget.id, clamped.x, clamped.y)
+    if (clamped.x !== rect.x || clamped.y !== rect.y) moveUiWidget(targetWidgetId, clamped.x, clamped.y)
   }
 
   // 8-handle resize — a new interaction pattern for this codebase (nothing else resizes via
@@ -1207,8 +1349,8 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     const r = resizeState.current
     if (!r) return
     e.stopPropagation()
-    const dx = e.clientX - r.startClientX
-    const dy = e.clientY - r.startClientY
+    const dx = (e.clientX - r.startClientX) / zoom
+    const dy = (e.clientY - r.startClientY) / zoom
     const wantsW = r.handle.includes('w')
     const wantsE = r.handle.includes('e')
     const wantsN = r.handle.includes('n')
@@ -1230,13 +1372,41 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
       y = r.startY + (r.startHeight - height)
     }
 
+    // Resize snapping is scoped to grid-snapping the moving edge(s) only (not the full center/
+    // sibling-edge alignment-guide machinery drag-move gets) — a deliberately smaller scope that
+    // still covers the practically valuable case (snapping a resized edge to the grid) without
+    // the added complexity of guide rendering mid-resize.
+    if (view.snapEnabled && !e.altKey && view.snapToGrid && view.gridSize > 0) {
+      const g = view.gridSize
+      if (wantsE) width = Math.max(MIN_WIDGET_SIZE, Math.round((x + width) / g) * g - x)
+      if (wantsS) height = Math.max(MIN_WIDGET_SIZE, Math.round((y + height) / g) * g - y)
+      if (wantsW) {
+        const newX = Math.round(x / g) * g
+        width = Math.max(MIN_WIDGET_SIZE, width + (x - newX))
+        x = newX
+      }
+      if (wantsN) {
+        const newY = Math.round(y / g) * g
+        height = Math.max(MIN_WIDGET_SIZE, height + (y - newY))
+        y = newY
+      }
+    }
+    if (view.pixelAccurateMode) {
+      x = Math.round(x)
+      y = Math.round(y)
+      width = Math.round(width)
+      height = Math.round(height)
+    }
+
     updateUiWidgetStyle(widget.id, { x, y, width, height })
+    setUiDragPreview({ widgetId: widget.id, rect: { x, y, width, height }, guides: [], spacing: [] })
   }
   const handleResizeUp = (e: React.PointerEvent) => {
     if (!resizeState.current) return
     e.stopPropagation()
     resizeState.current = null
     snapInsideDisplayIfNeeded()
+    setUiDragPreview(null)
   }
 
   // Data List template (row 0) text substitution — a widget nested under a `dataList` shows its
@@ -1280,6 +1450,22 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
       height: typeof widget.style.height === 'number' ? widget.style.height : 0
     })
 
+  // While THIS widget is actively being dragged/resized (not just selected), the selection
+  // outline swaps to a 4-color visibility classification (see displayMask.ts's
+  // classifyWidgetVisibility) instead of the plain static blue — "while dragging, show whether
+  // the selected widget is fully visible / partially clipped / outside safe area / outside
+  // display" from the spec. Only meaningful for a top-level widget (same isTopLevelWidget
+  // reasoning as outOfBounds above); a nested widget's rect is parent-relative, not
+  // display-relative, so classifying it against the display shape wouldn't mean anything.
+  const isActivelyDragged = isTopLevelWidget && dragPreview?.widgetId === widget.id
+  const dragVisibility = isActivelyDragged ? classifyWidgetVisibility(display, dragPreview.rect, view.safeAreaMargin) : null
+  const dragOutlineColor: Record<string, string> = {
+    'fully-visible': '#22c55e',
+    'outside-safe-area': '#f59e0b',
+    'partially-clipped': '#f97316',
+    'outside-display': '#ef4444'
+  }
+
   const commonProps = {
     'data-widget-id': widget.id,
     'data-out-of-bounds': outOfBounds || undefined,
@@ -1287,22 +1473,24 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     style: {
       ...css,
       position: 'absolute' as const,
-      outline: affected
+      outline: affected || revealed
         ? '2px solid #22c55e'
         : isSimFocused
           ? '2px solid #f59e0b'
-          : isSelected
-            ? '1.5px solid #4fa8ff'
-            : outOfBounds
-              ? '1.5px dashed #ef4444'
-              : undefined,
-      outlineOffset: affected || isSimFocused || isSelected || outOfBounds ? 1 : undefined,
-      boxShadow: affected ? '0 0 8px 2px rgba(34,197,94,0.6)' : (css.boxShadow as string | undefined),
+          : dragVisibility
+            ? `2px solid ${dragOutlineColor[dragVisibility]}`
+            : isSelected
+              ? '1.5px solid #4fa8ff'
+              : outOfBounds
+                ? '1.5px dashed #ef4444'
+                : undefined,
+      outlineOffset: affected || revealed || isSimFocused || isSelected || outOfBounds ? 1 : undefined,
+      boxShadow: affected || revealed ? '0 0 8px 2px rgba(34,197,94,0.6)' : (css.boxShadow as string | undefined),
       cursor: widget.locked ? 'default' : 'grab',
       opacity: isDisabled ? ((css.opacity as number | undefined) ?? 1) * 0.5 : css.opacity,
       pointerEvents: isDisabled ? ('none' as const) : undefined
     },
-    title: outOfBounds ? 'Outside the visible display area' : undefined,
+    title: dragVisibility ? dragVisibility.replace('-', ' ') : outOfBounds ? 'Outside the visible display area' : undefined,
     onPointerDown: handlePointerDown,
     onPointerMove: handlePointerMove,
     onPointerUp: handlePointerUp,

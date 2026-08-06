@@ -40,7 +40,8 @@ import type {
   UiWidget,
   UiWidgetStateName,
   UiWidgetStyle,
-  UiWidgetType
+  UiWidgetType,
+  UiWorkspaceViewSettings
 } from '@/types'
 import type { MaterialPresetId } from '@/lib/uiDesign/materialPresets'
 import type { ComponentTemplateId } from '@/lib/uiDesign/componentTemplates'
@@ -60,6 +61,7 @@ import {
   computeStyleOverrides,
   createDefaultTracks,
   createTrack,
+  defaultUiWorkspaceView,
   defaultVisualReference,
   effectiveEyeColors,
   effectiveEyeParams,
@@ -905,6 +907,64 @@ interface StoreState {
    * size instead of arbitrary CSS pixel sizes. */
   uiEsp32PreviewMode: boolean
   toggleUiEsp32Preview: () => void
+
+  // UI Design Mode — canvas zoom/pan/rulers/snap/grid preferences (UiWorkspaceViewSettings,
+  // see its own doc comment in types/uiDesign.ts for why this lives in EditorState/here rather
+  // than on project.uiDesign — in short: undo/redo swaps `project` wholesale, and a view
+  // preference must never be reverted by an unrelated Ctrl+Z).
+  uiWorkspaceView: UiWorkspaceViewSettings
+  /** Deliberately does NOT require the caller to checkpoint() first — a documented deviation
+   * from this store's usual "caller checkpoints before every mutator" convention. Zoom/pan/
+   * grid/snap settings are view preferences, not design decisions; making every zoom tick or
+   * pan drag its own undo-stack entry would make Ctrl+Z useless for real edits. Safe by
+   * construction (not just by convention) since uiWorkspaceView lives outside `s.project` and
+   * so is never touched by undo()/redo()'s `s.project = prev` swap. */
+  updateUiWorkspaceView: (partial: Partial<UiWorkspaceViewSettings>) => void
+  /** The single piece of transient per-frame drag/resize state — written by WidgetRenderer's
+   * pointer-move handlers on every move, cleared on pointer-up. Read by Canvas.tsx to render
+   * ruler markers, alignment guides, spacing labels, and the floating position-info panel from
+   * one source, instead of each overlay re-deriving drag state independently. Never persisted. */
+  uiDragPreview: UiDragPreview | null
+  setUiDragPreview: (preview: UiDragPreview | null) => void
+  /** The Canvas viewport div's measured size (via ResizeObserver in Canvas.tsx) — read by
+   * UiDesignTopBar's Fit-to-Workspace/Fit-Width buttons (see lib/uiDesign/canvasZoom.ts) since
+   * those need to know the available screen space and only Canvas.tsx can measure it. Never
+   * persisted. Null until Canvas.tsx has mounted and measured at least once. */
+  uiCanvasViewportSize: { width: number; height: number } | null
+  setUiCanvasViewportSize: (size: { width: number; height: number } | null) => void
+  /** Brief "just selected this from the Layers panel" flash, distinct from the A6
+   * affected-widget-highlight channel (which means "a running script's action touched this
+   * widget") — a different trigger deserves its own channel rather than overloading that one.
+   * Set by LayersPanel's row click, auto-cleared via setTimeout. Never persisted. */
+  uiRevealWidgetId: string | null
+  setUiRevealWidgetId: (id: string | null) => void
+}
+
+/** A single alignment guide line to render while dragging/resizing — 'x' guides are vertical
+ * lines (constant x), 'y' guides are horizontal lines (constant y). `label` is set only for the
+ * center-alignment cases the spec calls out explicitly ("Centered horizontally" etc). */
+export interface UiSnapGuide {
+  axis: 'x' | 'y'
+  value: number
+  source: string
+  label?: string
+}
+
+/** A "N px" spacing readout between the dragged/resized widget and its nearest neighbor on one
+ * axis, rendered at the gap's midpoint. */
+export interface UiSpacingIndicator {
+  axis: 'x' | 'y'
+  distancePx: number
+  /** Midpoint of the gap, in the same logical display-px space as everything else. */
+  x: number
+  y: number
+}
+
+export interface UiDragPreview {
+  widgetId: string
+  rect: { x: number; y: number; width: number; height: number }
+  guides: UiSnapGuide[]
+  spacing: UiSpacingIndicator[]
 }
 
 function activeAnimationOf(project: Project, id: string): Animation | undefined {
@@ -1142,6 +1202,10 @@ export const useStore = create<StoreState>()(
     selectedWidgetId: null,
     uiPreviewDisplayOverride: null,
     uiEsp32PreviewMode: false,
+    uiWorkspaceView: defaultUiWorkspaceView(),
+    uiDragPreview: null,
+    uiCanvasViewportSize: null,
+    uiRevealWidgetId: null,
 
     mode: 'design',
     playbackState: 'stopped',
@@ -1207,6 +1271,8 @@ export const useStore = create<StoreState>()(
         s.mode = 'design'
         s.playbackState = 'stopped'
         s.playbackTimeMs = 0
+        s.uiWorkspaceView = defaultUiWorkspaceView()
+        s.uiDragPreview = null
       }),
 
     loadProject: (project, editorState, filePath) =>
@@ -1225,6 +1291,8 @@ export const useStore = create<StoreState>()(
         s.mode = editorState.mode
         s.playbackState = 'stopped'
         s.playbackTimeMs = 0
+        s.uiWorkspaceView = editorState.uiWorkspaceView
+        s.uiDragPreview = null
       }),
 
     renameProject: (name) =>
@@ -3884,7 +3952,13 @@ export const useStore = create<StoreState>()(
     },
 
     setUiPreviewDisplayOverride: (display) => set((s) => void (s.uiPreviewDisplayOverride = display)),
-    toggleUiEsp32Preview: () => set((s) => void (s.uiEsp32PreviewMode = !s.uiEsp32PreviewMode))
+
+    setUiRevealWidgetId: (id) => set((s) => void (s.uiRevealWidgetId = id)),
+    toggleUiEsp32Preview: () => set((s) => void (s.uiEsp32PreviewMode = !s.uiEsp32PreviewMode)),
+
+    updateUiWorkspaceView: (partial) => set((s) => void Object.assign(s.uiWorkspaceView, partial)),
+    setUiDragPreview: (preview) => set((s) => void (s.uiDragPreview = preview)),
+    setUiCanvasViewportSize: (size) => set((s) => void (s.uiCanvasViewportSize = size))
   }))
 )
 

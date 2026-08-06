@@ -15,9 +15,11 @@ import { LogicPanel } from './LogicPanel'
 import { VariableManagerPanel } from './VariableManagerPanel'
 import { DataSourceManagerPanel } from './DataSourceManagerPanel'
 import { LvglCodePanel } from './LvglCodePanel'
+import { useUiDesignKeyboardShortcuts } from '@/lib/uiDesign/useUiDesignKeyboardShortcuts'
+import { WorkspaceSettingsPanel } from './WorkspaceSettingsPanel'
 
 type LeftTab = 'toolbox' | 'layers'
-type RightTab = 'properties' | 'html' | 'css' | 'assets' | 'display' | 'logic' | 'variables' | 'dataSources'
+type RightTab = 'properties' | 'html' | 'css' | 'assets' | 'display' | 'logic' | 'variables' | 'dataSources' | 'workspace'
 
 const LEFT_TABS: { value: LeftTab; label: string }[] = [
   { value: 'toolbox', label: 'Toolbox' },
@@ -26,13 +28,15 @@ const LEFT_TABS: { value: LeftTab; label: string }[] = [
 
 const RIGHT_TABS: { value: RightTab; label: string }[] = [
   { value: 'properties', label: 'Properties' },
+  { value: 'dataSources', label: 'Data Sources' },
+  { value: 'assets', label: 'Assets' },
+  { value: 'display', label: 'Display' },
+  { value: 'workspace', label: 'Workspace' },
+  // Less frequently used than the panels above — kept at the end of the tab list.
   { value: 'html', label: 'HTML' },
   { value: 'css', label: 'CSS' },
   { value: 'logic', label: 'Logic' },
-  { value: 'variables', label: 'Variables' },
-  { value: 'dataSources', label: 'Data Sources' },
-  { value: 'assets', label: 'Assets' },
-  { value: 'display', label: 'Display' }
+  { value: 'variables', label: 'Variables' }
 ]
 
 function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'horizontal' }) {
@@ -50,6 +54,7 @@ function ResizeHandle({ direction = 'vertical' }: { direction?: 'vertical' | 'ho
 export function UiDesignWorkspace({ toolbarActions }: { toolbarActions: ToolbarActions }) {
   const [leftTab, setLeftTab] = useState<LeftTab>('toolbox')
   const [rightTab, setRightTab] = useState<RightTab>('properties')
+  useUiDesignKeyboardShortcuts()
 
   return (
     <div className="flex flex-col h-full">
@@ -113,6 +118,7 @@ export function UiDesignWorkspace({ toolbarActions }: { toolbarActions: ToolbarA
                 {rightTab === 'dataSources' && <DataSourceManagerPanel />}
                 {rightTab === 'assets' && <AssetManagerPanel />}
                 {rightTab === 'display' && <DisplaySettingsPanel />}
+                {rightTab === 'workspace' && <WorkspaceSettingsPanel />}
               </div>
             </div>
           </Panel>

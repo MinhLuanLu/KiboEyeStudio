@@ -55,13 +55,16 @@ import type {
   UiKeyboardCustomLayout,
   UiKeyboardEdgePadding,
   UiListItem,
+  UiPositionInfoField,
   UiScreen,
   UiThemeId,
   UiThemeTokens,
   UiVariable,
-  UiWidget
+  UiWidget,
+  UiWorkspaceViewSettings
 } from '@/types'
 import { DEFAULT_CUSTOM_THEME_TOKENS } from '@/lib/uiDesign/themes'
+import { defaultUiWorkspaceView } from '@/types'
 
 const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
 const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
@@ -831,6 +834,57 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
   }
 }
 
+const UI_POSITION_INFO_FIELDS: UiPositionInfoField[] = [
+  'x',
+  'y',
+  'width',
+  'height',
+  'centerX',
+  'centerY',
+  'distanceFromScreenCenter',
+  'distanceFromParentEdges',
+  'rotation',
+  'zoomLevel'
+]
+
+/** Same per-field defensive-fallback idiom as normalizeUiDisplay above — an old save (or one
+ * from before this feature existed) just gets sane defaults per-field rather than the whole
+ * settings object being discarded. */
+function normalizeUiWorkspaceView(raw: unknown): UiWorkspaceViewSettings {
+  const d = defaultUiWorkspaceView()
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Partial<UiWorkspaceViewSettings> & Record<string, unknown>
+  const clampNum = (v: unknown, fallback: number, min: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : fallback
+  const bool = (v: unknown, fallback: boolean): boolean => (typeof v === 'boolean' ? v : fallback)
+
+  return {
+    zoom: clampNum(r.zoom, d.zoom, 0.1, 8),
+    panX: clampNum(r.panX, d.panX, -100000, 100000),
+    panY: clampNum(r.panY, d.panY, -100000, 100000),
+    gridSize: clampNum(r.gridSize, d.gridSize, 1, 200),
+    gridVisible: bool(r.gridVisible, d.gridVisible),
+    gridOpacity: clampNum(r.gridOpacity, d.gridOpacity, 0, 100),
+    gridSubdivision: clampNum(r.gridSubdivision, d.gridSubdivision, 1, 20),
+    snapEnabled: bool(r.snapEnabled, d.snapEnabled),
+    snapDistance: clampNum(r.snapDistance, d.snapDistance, 0, 100),
+    magneticStrength: clampNum(r.magneticStrength, d.magneticStrength, 0, 100),
+    snapToGrid: bool(r.snapToGrid, d.snapToGrid),
+    snapToCenter: bool(r.snapToCenter, d.snapToCenter),
+    snapToDisplayEdges: bool(r.snapToDisplayEdges, d.snapToDisplayEdges),
+    snapToSafeArea: bool(r.snapToSafeArea, d.snapToSafeArea),
+    snapToParent: bool(r.snapToParent, d.snapToParent),
+    snapToWidgets: bool(r.snapToWidgets, d.snapToWidgets),
+    rulersVisible: bool(r.rulersVisible, d.rulersVisible),
+    guidesVisible: bool(r.guidesVisible, d.guidesVisible),
+    safeAreaVisible: bool(r.safeAreaVisible, d.safeAreaVisible),
+    safeAreaMargin: clampNum(r.safeAreaMargin, d.safeAreaMargin, 0, 200),
+    pixelAccurateMode: bool(r.pixelAccurateMode, d.pixelAccurateMode),
+    positionInfoFields: Array.isArray(r.positionInfoFields)
+      ? (r.positionInfoFields as unknown[]).filter((f): f is UiPositionInfoField => UI_POSITION_INFO_FIELDS.includes(f as UiPositionInfoField))
+      : d.positionInfoFields
+  }
+}
+
 function normalizeEditorState(raw: Partial<EditorState> | undefined, project: Project): EditorState {
   const fallback = defaultEditorState(project)
   if (!raw || typeof raw !== 'object') return fallback
@@ -845,8 +899,9 @@ function normalizeEditorState(raw: Partial<EditorState> | undefined, project: Pr
     typeof raw.selectedExpressionId === 'string' && project.expressions.some((e) => e.id === raw.selectedExpressionId)
       ? raw.selectedExpressionId
       : null
+  const uiWorkspaceView = normalizeUiWorkspaceView((raw as unknown as Record<string, unknown>).uiWorkspaceView)
 
-  return { eyeTarget, selectedExpressionId, activeAnimationId, mode }
+  return { eyeTarget, selectedExpressionId, activeAnimationId, mode, uiWorkspaceView }
 }
 
 function looksLikeProject(raw: unknown): raw is Partial<Project> & Record<string, unknown> {

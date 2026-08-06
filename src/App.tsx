@@ -18,7 +18,8 @@ function currentEditorState(): EditorState {
     eyeTarget: s.eyeTarget,
     selectedExpressionId: s.selectedExpressionId,
     activeAnimationId: s.activeAnimationId,
-    mode: s.mode
+    mode: s.mode,
+    uiWorkspaceView: s.uiWorkspaceView
   }
 }
 

@@ -743,3 +743,96 @@ export interface UiDesignProject {
    * data model. See scriptLang/restrictedSubset.ts for exactly what subset of JS is supported. */
   script: string
 }
+
+/** Which computed values the drag/resize floating info panel (Canvas.tsx / DragInfoPanel.tsx)
+ * shows, user-configurable via the 'workspace' right-panel tab. Purely a display-workspace
+ * preference — see UiWorkspaceViewSettings' own doc comment for why this whole group of
+ * settings lives in EditorState, not here in UiDesignProject. */
+export type UiPositionInfoField =
+  | 'x'
+  | 'y'
+  | 'width'
+  | 'height'
+  | 'centerX'
+  | 'centerY'
+  | 'distanceFromScreenCenter'
+  | 'distanceFromParentEdges'
+  | 'rotation'
+  | 'zoomLevel'
+
+/** Preview-scale / rulers / snapping / alignment-guide preferences for the UI Design Mode
+ * canvas — a pure editor-view concern, never exported to LVGL and never affecting the real
+ * `UiWidget.style.x/y/width/height` values (see Canvas.tsx/WidgetRenderer.tsx: zoom/pan is
+ * applied as a single CSS transform *above* the otherwise-unchanged 1:1-px display box).
+ *
+ * Deliberately NOT a field on `UiDesignProject`: `store.ts`'s `checkpoint()`/`undo()`/`redo()`
+ * operate on a wholesale deep-clone/swap of the whole `project` object, so anything stored
+ * inside `project.uiDesign` gets silently reverted by an unrelated undo — exactly wrong for a
+ * view preference (panning after a checkpointed edit and then hitting Ctrl+Z should never also
+ * un-pan the canvas). Instead this lives on `EditorState` (types/index.ts), the existing
+ * "restored alongside Project on load, immune to undo/redo" slot already used for
+ * eyeTarget/selectedExpressionId/etc — see EditorState's own doc comment. */
+export interface UiWorkspaceViewSettings {
+  /** 1 = 100%. Clamped to [0.1, 8] everywhere it's set. */
+  zoom: number
+  /** Px offset of the stage's (0,0) origin from the viewport's top-left. */
+  panX: number
+  panY: number
+  /** Px spacing of the snap/visual grid. One of the UI's preset values (1/2/4/5/8/10/16) but
+   * stored as a plain number so custom values round-trip fine too. */
+  gridSize: number
+  gridVisible: boolean
+  /** 0-100. */
+  gridOpacity: number
+  /** Minor grid lines drawn per major line, e.g. 4. */
+  gridSubdivision: number
+  snapEnabled: boolean
+  /** Px catch radius before magneticStrength widens it — see snapEngine.ts's applySnap(). */
+  snapDistance: number
+  /** 0-100. Scales the effective snap catch radius; not a simulated physical pull. */
+  magneticStrength: number
+  snapToGrid: boolean
+  snapToCenter: boolean
+  snapToDisplayEdges: boolean
+  snapToSafeArea: boolean
+  snapToParent: boolean
+  /** Sibling widget edges + centers. */
+  snapToWidgets: boolean
+  rulersVisible: boolean
+  guidesVisible: boolean
+  safeAreaVisible: boolean
+  /** Px inset from the display edge. */
+  safeAreaMargin: number
+  /** Reduced-scope interpretation (see lvglExport/Canvas doc comments) — rounds every
+   * drag/resize/nudge commit to whole logical px and auto-shows the grid at high zoom, since
+   * true anti-aliasing control has no meaningful effect on solid-color CSS boxes. */
+  pixelAccurateMode: boolean
+  positionInfoFields: UiPositionInfoField[]
+}
+
+export function defaultUiWorkspaceView(): UiWorkspaceViewSettings {
+  return {
+    zoom: 1,
+    panX: 0,
+    panY: 0,
+    gridSize: 8,
+    gridVisible: false,
+    gridOpacity: 35,
+    gridSubdivision: 4,
+    snapEnabled: true,
+    snapDistance: 6,
+    magneticStrength: 50,
+    snapToGrid: true,
+    snapToCenter: true,
+    snapToDisplayEdges: true,
+    snapToSafeArea: false,
+    snapToParent: true,
+    snapToWidgets: true,
+    rulersVisible: true,
+    guidesVisible: true,
+    safeAreaVisible: false,
+    safeAreaMargin: 12,
+    pixelAccurateMode: false,
+    positionInfoFields: ['x', 'y', 'width', 'height', 'centerX', 'centerY']
+  }
+}
