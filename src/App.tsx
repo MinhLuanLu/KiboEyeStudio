@@ -2,7 +2,9 @@ import { useEffect, useRef } from 'react'
 import { useStore, isComboTimelineActive, getActiveAnimation } from '@/state/store'
 import type { EditorState } from '@/types'
 import { AppShell } from '@/components/Layout/AppShell'
+import { LoginScreen } from '@/components/Auth/LoginScreen'
 import { useKeyboardShortcuts } from '@/lib/shortcuts'
+import { getAuthStatus } from '@/state/authPersistence'
 import { autosaveRead, autosaveWrite, openProjectDialog, openProjectFromPath, removeRecentProject, saveProjectAs, saveProjectToPath } from '@/state/persistence'
 import { getShowGuideOnStartup } from '@/components/Guide/UserGuideModal'
 import { animationDuration } from '@/engine/interpolate'
@@ -56,9 +58,25 @@ export default function App() {
   const copySelection = useStore((s) => s.copySelection)
   const pasteSelectionAt = useStore((s) => s.pasteSelectionAt)
   const moveSelectionByDelta = useStore((s) => s.moveSelectionByDelta)
+  const authChecked = useStore((s) => s.authChecked)
+  const authenticated = useStore((s) => s.authenticated)
+  const setAuthSession = useStore((s) => s.setAuthSession)
+  const setAuthChecked = useStore((s) => s.setAuthChecked)
 
   const loadedAutosave = useRef(false)
   const saveStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Restore a "remembered" login session (if any) on launch, so the login gate only shows up
+  // when there's genuinely nobody signed in yet — see LoginScreen.tsx / authPersistence.ts.
+  useEffect(() => {
+    let cancelled = false
+    getAuthStatus().then((status) => {
+      if (cancelled) return
+      if (status.sessionEmail) setAuthSession(status.sessionEmail)
+      else setAuthChecked(true)
+    })
+    return () => void (cancelled = true)
+  }, [setAuthSession, setAuthChecked])
 
   // Load any autosave on first launch so work survives a crash / accidental close.
   useEffect(() => {
@@ -388,6 +406,10 @@ export default function App() {
     return () => unsubs.forEach((u) => u())
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeAnimationId, selectedKeyframeId, filePath, dirty, project])
+
+  // Don't flash the login form for the instant it takes to check for a remembered session.
+ /*  if (!authChecked) return null
+  if (!authenticated) return <LoginScreen /> */
 
   return <AppShell actions={actions} />
 }

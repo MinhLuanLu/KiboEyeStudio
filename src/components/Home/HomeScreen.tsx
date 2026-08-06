@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useStore } from '@/state/store'
 import type { ToolbarActions } from '@/components/Layout/Toolbar'
 import { getRecentProjects, hasElectron, removeRecentProject } from '@/state/persistence'
+import { logout } from '@/state/authPersistence'
 
 export interface HomeScreenActions extends ToolbarActions {
   openRecentProject: (path: string) => void
@@ -49,13 +50,28 @@ export function HomeScreen({ actions }: { actions: HomeScreenActions }) {
   const setSettingsOpen = useStore((s) => s.setSettingsOpen)
   const projectName = useStore((s) => s.project.name)
   const filePath = useStore((s) => s.filePath)
+  const authUserEmail = useStore((s) => s.authUserEmail)
+  const setAuthSession = useStore((s) => s.setAuthSession)
   // getRecentProjects() reads localStorage fresh on every render — this setter's only job is
   // forcing a re-render after a removal (its value is never read).
   const [, forceRecentRefresh] = useState(0)
   const recent = getRecentProjects()
 
+  const handleLogOut = async () => {
+    await logout()
+    setAuthSession(null)
+  }
+
   return (
     <div className="h-full w-full overflow-y-auto flex flex-col items-center px-6 py-10 gap-10">
+      {authUserEmail && (
+        <div className="self-end flex items-center gap-2 text-xs text-studio-muted -mb-6">
+          <span>Signed in as {authUserEmail}</span>
+          <button className="underline underline-offset-2 hover:text-studio-text" onClick={handleLogOut}>
+            Log out
+          </button>
+        </div>
+      )}
       <div className="flex flex-col items-center gap-2 text-center">
         <span className="text-5xl">👁️🖥️</span>
         <h1 className="text-2xl font-semibold tracking-wide text-studio-accent">Kibo Studio</h1>

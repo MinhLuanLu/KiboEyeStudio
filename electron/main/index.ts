@@ -265,6 +265,50 @@ ipcMain.handle('export:save-binary-file', async (_e, defaultName: string, base64
   return { canceled: false, filePath: result.filePath }
 })
 
+// ---------------------------------------------------------------------------------------
+// Local login gate — "remember me" storage only. Credential checking itself happens against
+// the real backend over HTTP (src/lib/http/authApi.ts, called directly from the renderer);
+// this main-process side just remembers which email last logged in successfully, so the app
+// can skip straight past the login form on the next launch when the user opted in. Nothing
+// here validates a password — it's pure local session bookkeeping, written to a JSON file in
+// the user's own app-data directory.
+// ---------------------------------------------------------------------------------------
+
+interface AuthFile {
+  // Present only when the user checked "Remember me" — its mere presence on disk is what
+  // makes the next launch skip straight past the login form.
+  session: { email: string } | null
+}
+
+function authFilePath(): string {
+  return join(app.getPath('userData'), 'auth.json')
+}
+
+async function readAuthFile(): Promise<AuthFile> {
+  try {
+    const raw = await readFile(authFilePath(), 'utf-8')
+    const parsed = JSON.parse(raw)
+    const session = parsed?.session && typeof parsed.session.email === 'string' ? { email: parsed.session.email as string } : null
+    return { session }
+  } catch {
+    return { session: null }
+  }
+}
+
+async function writeAuthFile(data: AuthFile): Promise<void> {
+  await atomicWriteFile(authFilePath(), JSON.stringify(data))
+}
+
+ipcMain.handle('auth:status', async () => {
+  const data = await readAuthFile()
+  return { sessionEmail: data.session?.email ?? null }
+})
+
+ipcMain.handle('auth:set-session', async (_e, email: string | null) => {
+  await writeAuthFile({ session: email ? { email } : null })
+  return { ok: true }
+})
+
 ipcMain.handle('import:open-json', async () => {
   if (!mainWindow) return { canceled: true }
   const result = await dialog.showOpenDialog(mainWindow, {

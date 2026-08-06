@@ -3,6 +3,7 @@ import {
   allReachableWidgets,
   buildValidationCodegenContext,
   indicatorFunctionBaseName,
+  indicatorScreenFunctionPrefix,
   INDICATOR_VALUE_WIDGET_TYPES,
   isIndicatorWidget,
   reachableWidgetsForScreen,
@@ -509,6 +510,14 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
       record(screenFocusPreviousFnName(s.name), `screen "${s.name}"'s focus-previous helper`)
       record(screenPressFnName(s.name), `screen "${s.name}"'s press helper`)
     }
+    // Widget -> owning screen name, for indicatorScreenFunctionPrefix below — mirrors
+    // lvglExport.ts's own indicatorScreenNameById (generateKiboUIParts) / direct screen-name
+    // threading (generateUiScreenExport/generateLiveScreenCode) so this check validates the exact
+    // same screen-prefixed names those actually generate, not the pre-prefix ones.
+    const screenNameByWidgetId = new Map<string, string>()
+    for (const s of scopedScreens) {
+      for (const w of reachableWidgetsForScreen(uiDesign, s)) screenNameByWidgetId.set(w.id, s.name)
+    }
     for (const w of widgets) {
       if (w.tagId) record(widgetCreateFnName(w), `widget "${w.tagId}"`)
       if (w.type === 'list' && (w.listItems?.length ?? 0) > 0) {
@@ -522,21 +531,26 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
         }
         record(`${widgetBaseName(w)}_item_event_cb`, `list "${w.tagId ?? w.id}"'s item click callback`)
       }
-      // Indicator helper functions (set<Base>Value/animate<Base>[To]/start|stop<Base>Animation/
-      // reset<Base> — see lvglExport.ts's emitIndicatorHelperFunctions) land in the same flat
-      // function namespace too, keyed off indicatorFunctionBaseName (the tagId/id-derived default,
-      // or the Properties panel's "Function name" override) — a widget without a tagId still gets
-      // real functions (see widgetBaseName's own id-derived fallback), so it's checked unconditionally.
+      // Indicator helper functions (<Screen>_set<Base>Value/<Screen>_animate<Base>[To]/
+      // <Screen>_start|stop<Base>Animation/<Screen>_reset<Base> — see lvglExport.ts's
+      // emitIndicatorHelperFunctions) land in the same flat function namespace too, keyed off
+      // indicatorFunctionBaseName (the tagId/id-derived default, or the Properties panel's
+      // "Function name" override) PLUS the owning screen's own prefix (indicatorScreenFunctionPrefix)
+      // — two indicators sharing a base name on the SAME screen still collide (checked here); two on
+      // DIFFERENT screens no longer do, since their generated names are no longer identical. A widget
+      // without a tagId still gets real functions (see widgetBaseName's own id-derived fallback), so
+      // it's checked unconditionally.
       if (isIndicatorWidget(w.type)) {
+        const prefix = indicatorScreenFunctionPrefix(screenNameByWidgetId.get(w.id) ?? '')
         const base = indicatorFunctionBaseName(w)
         const label = `indicator "${w.tagId ?? w.id}"`
-        record(`start${base}Animation`, label)
-        record(`stop${base}Animation`, label)
+        record(`${prefix}start${base}Animation`, label)
+        record(`${prefix}stop${base}Animation`, label)
         if (INDICATOR_VALUE_WIDGET_TYPES.has(w.type)) {
-          record(`set${base}Value`, label)
-          record(`animate${base}`, label)
-          record(`animate${base}To`, label)
-          record(`reset${base}`, label)
+          record(`${prefix}set${base}Value`, label)
+          record(`${prefix}animate${base}`, label)
+          record(`${prefix}animate${base}To`, label)
+          record(`${prefix}reset${base}`, label)
         }
       }
     }

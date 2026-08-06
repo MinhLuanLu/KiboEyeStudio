@@ -1156,6 +1156,23 @@ export function indicatorFunctionBaseName(w: UiWidget): string {
   return toPascalCase(override || widgetBaseName(w))
 }
 
+/** Prefix every generated indicator helper function name gets, screenIdentBase-derived exactly
+ * like the hardware-navigation namespace (Main/Settings/...) — e.g. "Main Screen" -> "Main_".
+ * Required because Complete Project mode declares every indicator's helper functions in ONE flat
+ * cross-screen loop inside a single ui.cpp (see generateKiboUIParts' "Widget objects" section),
+ * so two same-named indicators on different screens (e.g. two unnamed Progress Bars, both
+ * defaulting to base "Progress") would otherwise both emit `static void setProgressValue(...)`
+ * into the same translation unit — a real duplicate-symbol compile error, not just a naming
+ * nicety. The identical risk exists combining two separate "UI Screen Only" exports in one
+ * program: their per-widget functions are `inline` (see that mode's own file-top NOTE), so an
+ * unprefixed name collision there is an ODR violation instead. Applying this same prefix in every
+ * export mode (Screen Only, Complete Project, and the live-preview code panel) is what the spec
+ * calls "screen-specific names" — `Main_animateProgress`/`Settings_animateProgress` instead of one
+ * shared `animateProgress` — and is what actually prevents both failure classes. */
+export function indicatorScreenFunctionPrefix(screenName: string): string {
+  return `${screenIdentBase(screenName)}_`
+}
+
 /** Per-widget, beginner-friendly C++ helpers for a single indicator (see the spec's own example:
  * `setProgressBarValue`/`setSliderValue`/`setGaugeValue`/`setArcValue`/`setMeterValue`, here
  * generalized to any indicator via `indicatorFunctionBaseName`) —
@@ -1170,22 +1187,27 @@ export function indicatorFunctionBaseName(w: UiWidget): string {
  * matching the `stopIndicatorAnimation` script action's own cpp exactly), and `reset<Base>()`
  * (back to `<var>_default_value`, matching `resetValue`'s own action exactly — see
  * actionTable.ts). Spinner only gets Start/Stop (see INDICATOR_VALUE_WIDGET_TYPES). */
-function emitIndicatorHelperFunctions(w: UiWidget, v: string, linkage: 'inline' | 'static'): string[] {
+function emitIndicatorHelperFunctions(w: UiWidget, v: string, linkage: 'inline' | 'static', screenName: string): string[] {
   if (!isIndicatorWidget(w.type)) return []
   const base = indicatorFunctionBaseName(w)
+  // Every generated name below is screen-prefixed (see indicatorScreenFunctionPrefix's own doc
+  // comment for why) — `fn('setProgressValue')` -> "Main_setProgressValue", not
+  // "setMain_ProgressValue"; the prefix always comes first, before the verb.
+  const prefix = indicatorScreenFunctionPrefix(screenName)
+  const fn = (name: string) => `${prefix}${name}`
   const lines: string[] = []
 
   if (w.type === 'spinner') {
     const durationMs = Math.round(propNum(w, 'spinDurationMs', 1000))
     const angle = Math.round(propNum(w, 'spinAngle', 60))
-    lines.push(`${linkage} void start${base}Animation() { lv_spinner_set_anim_params(${v}, (uint32_t)${durationMs}, ${angle}); }`)
-    lines.push(`${linkage} void stop${base}Animation() { lv_anim_delete(${v}, NULL); }`)
+    lines.push(`${linkage} void ${fn(`start${base}Animation`)}() { lv_spinner_set_anim_params(${v}, (uint32_t)${durationMs}, ${angle}); }`)
+    lines.push(`${linkage} void ${fn(`stop${base}Animation`)}() { lv_anim_delete(${v}, NULL); }`)
     return lines
   }
   if (!INDICATOR_VALUE_WIDGET_TYPES.has(w.type)) return lines
   const widgetType = w.type as 'bar' | 'slider' | 'arc' | 'gauge'
 
-  lines.push(`${linkage} void set${base}Value(int32_t value, bool animated = true) {`)
+  lines.push(`${linkage} void ${fn(`set${base}Value`)}(int32_t value, bool animated = true) {`)
   if (widgetType === 'arc') {
     lines.push('  (void)animated;')
     lines.push(`  lv_arc_set_value(${v}, value);`)
@@ -1199,19 +1221,19 @@ function emitIndicatorHelperFunctions(w: UiWidget, v: string, linkage: 'inline' 
   }
   lines.push('}')
 
-  lines.push(`${linkage} void animate${base}(int32_t fromValue, int32_t toValue, uint32_t duration) {`)
+  lines.push(`${linkage} void ${fn(`animate${base}`)}(int32_t fromValue, int32_t toValue, uint32_t duration) {`)
   lines.push(...emitIndicatorAnimStart(v, widgetType, w, 'fromValue', 'toValue', '  ', 'duration'))
   lines.push('}')
-  lines.push(`${linkage} void animate${base}To(int32_t targetValue, uint32_t duration) { animate${base}(${currentValueExpr(v, widgetType)}, targetValue, duration); }`)
+  lines.push(`${linkage} void ${fn(`animate${base}To`)}(int32_t targetValue, uint32_t duration) { ${fn(`animate${base}`)}(${currentValueExpr(v, widgetType)}, targetValue, duration); }`)
 
   const minExpr = String(Math.round(propNum(w, 'min', 0)))
   const maxExpr = String(Math.round(propNum(w, 'max', 100)))
-  lines.push(`${linkage} void start${base}Animation() {`)
+  lines.push(`${linkage} void ${fn(`start${base}Animation`)}() {`)
   lines.push(...emitIndicatorAnimStart(v, widgetType, w, minExpr, maxExpr, '  '))
   lines.push('}')
-  lines.push(`${linkage} void stop${base}Animation() { lv_anim_delete(${v}, NULL); }`)
+  lines.push(`${linkage} void ${fn(`stop${base}Animation`)}() { lv_anim_delete(${v}, NULL); }`)
 
-  lines.push(`${linkage} void reset${base}() {`)
+  lines.push(`${linkage} void ${fn(`reset${base}`)}() {`)
   lines.push(...emitValueSetLines(v, widgetType, `${v}_default_value`, false).map((l) => `  ${l}`))
   lines.push('}')
 
@@ -1220,6 +1242,7 @@ function emitIndicatorHelperFunctions(w: UiWidget, v: string, linkage: 'inline' 
 
 interface IndicatorDispatchEntry {
   widgetId: string
+  prefix: string
   base: string
   hasValue: boolean
 }
@@ -1229,12 +1252,19 @@ interface IndicatorDispatchEntry {
  * literal examples (`setIndicatorValue("battery_bar", 75)`). An id-less indicator still gets its
  * own per-widget functions (see emitIndicatorHelperFunctions) but has no external name to reach
  * them by here — same "no id, no string-lookup access" rule FindWidget()/SetWidgetValue() already
- * apply. */
-function collectIndicatorDispatchEntries(widgets: UiWidget[]): IndicatorDispatchEntry[] {
+ * apply. `screenNameFor` resolves each widget's own owning screen so the dispatcher calls the
+ * correctly SCREEN-PREFIXED per-widget function (see indicatorScreenFunctionPrefix) — required
+ * since emitIndicatorHelperFunctions now emits e.g. `Main_setProgressValue`, not `setProgressValue`. */
+function collectIndicatorDispatchEntries(widgets: UiWidget[], screenNameFor: (w: UiWidget) => string): IndicatorDispatchEntry[] {
   const entries: IndicatorDispatchEntry[] = []
   for (const w of widgets) {
     if (!isIndicatorWidget(w.type) || !w.tagId) continue
-    entries.push({ widgetId: w.tagId, base: indicatorFunctionBaseName(w), hasValue: INDICATOR_VALUE_WIDGET_TYPES.has(w.type) })
+    entries.push({
+      widgetId: w.tagId,
+      prefix: indicatorScreenFunctionPrefix(screenNameFor(w)),
+      base: indicatorFunctionBaseName(w),
+      hasValue: INDICATOR_VALUE_WIDGET_TYPES.has(w.type)
+    })
   }
   return entries
 }
@@ -1255,37 +1285,38 @@ function collectIndicatorDispatchEntries(widgets: UiWidget[]): IndicatorDispatch
  * them. Must be emitted AFTER every screen's own widget declarations (which is where
  * emitIndicatorHelperFunctions' per-widget functions actually live) — see generateKiboUIParts'
  * own call site, right after the screens loop, not before it. */
-function emitGlobalIndicatorDispatch(widgets: UiWidget[]): string[] {
-  const entries = collectIndicatorDispatchEntries(widgets)
+function emitGlobalIndicatorDispatch(widgets: UiWidget[], screenNameFor: (w: UiWidget) => string): string[] {
+  const entries = collectIndicatorDispatchEntries(widgets, screenNameFor)
   if (entries.length === 0) return []
   const withValue = entries.filter((e) => e.hasValue)
   const lines: string[] = []
   lines.push('// ---- Indicator control API (Progress Bar/Slider/Gauge/Arc/Spinner/...) — dispatches by')
-  lines.push('// Properties-panel ID to each widget\'s own set<Name>Value/animate<Name>/start<Name>Animation/')
-  lines.push('// etc. functions declared above. Plain global functions, not namespaced — call these directly')
-  lines.push('// from anywhere, e.g. setIndicatorValue("battery_bar", 75). ----')
+  lines.push('// Properties-panel ID to each widget\'s own screen-prefixed <Screen>_set<Name>Value/')
+  lines.push('// <Screen>_animate<Name>/<Screen>_start<Name>Animation/etc. functions declared above. Plain')
+  lines.push('// global functions, not namespaced — call these directly from anywhere, e.g.')
+  lines.push('// setIndicatorValue("battery_bar", 75). ----')
   lines.push('void setIndicatorValue(const char* widgetId, int32_t value, bool animated = true) {')
-  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { set${e.base}Value(value, animated); return; }`)
+  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { ${e.prefix}set${e.base}Value(value, animated); return; }`)
   lines.push('}')
   lines.push('')
   lines.push('void animateIndicator(const char* widgetId, int32_t fromValue, int32_t toValue, uint32_t duration) {')
-  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { animate${e.base}(fromValue, toValue, duration); return; }`)
+  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { ${e.prefix}animate${e.base}(fromValue, toValue, duration); return; }`)
   lines.push('}')
   lines.push('')
   lines.push('void animateIndicatorTo(const char* widgetId, int32_t targetValue, uint32_t duration) {')
-  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { animate${e.base}To(targetValue, duration); return; }`)
+  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { ${e.prefix}animate${e.base}To(targetValue, duration); return; }`)
   lines.push('}')
   lines.push('')
   lines.push('void startIndicatorAnimation(const char* widgetId) {')
-  for (const e of entries) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { start${e.base}Animation(); return; }`)
+  for (const e of entries) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { ${e.prefix}start${e.base}Animation(); return; }`)
   lines.push('}')
   lines.push('')
   lines.push('void stopIndicatorAnimation(const char* widgetId) {')
-  for (const e of entries) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { stop${e.base}Animation(); return; }`)
+  for (const e of entries) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { ${e.prefix}stop${e.base}Animation(); return; }`)
   lines.push('}')
   lines.push('')
   lines.push('void resetIndicator(const char* widgetId) {')
-  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { reset${e.base}(); return; }`)
+  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { ${e.prefix}reset${e.base}(); return; }`)
   lines.push('}')
   return lines
 }
@@ -1301,7 +1332,12 @@ function emitGlobalIndicatorDispatch(widgets: UiWidget[]): string[] {
  * generateKiboUIParts' call site, same "after all screens" placement as
  * emitGlobalIndicatorDispatch and for the identical reason (calls into per-widget indicator
  * functions defined in each screen's own section). */
-function emitUpdateDataValueDispatcher(uiDesign: UiDesignProject, numericVariables: UiVariable[], ns: string): string[] {
+function emitUpdateDataValueDispatcher(
+  uiDesign: UiDesignProject,
+  numericVariables: UiVariable[],
+  ns: string,
+  screenNameFor: (w: UiWidget) => string
+): string[] {
   if (numericVariables.length === 0) return []
   const rows = parseVisualBindingRows(uiDesign.script, uiDesign.widgets).filter((r) => r.property === 'value')
   const boundIndicatorsByVariable = new Map<string, UiWidget[]>()
@@ -1320,12 +1356,115 @@ function emitUpdateDataValueDispatcher(uiDesign: UiDesignProject, numericVariabl
     lines.push(`  if (strcmp(name, ${JSON.stringify(v.name)}) == 0) {`)
     lines.push(`    ${ns}::${variableSetterName(v)}(value);`)
     for (const w of boundIndicatorsByVariable.get(v.name) ?? []) {
-      lines.push(`    set${indicatorFunctionBaseName(w)}Value(value, true);`)
+      lines.push(`    ${indicatorScreenFunctionPrefix(screenNameFor(w))}set${indicatorFunctionBaseName(w)}Value(value, true);`)
     }
     lines.push('    return;')
     lines.push('  }')
   }
   lines.push('}')
+  return lines
+}
+
+/** One documentation entry per indicator widget — built from the exact same
+ * (screenName, base, hasValue) triple emitIndicatorHelperFunctions itself derives its generated
+ * function names from, so this doc block can never drift out of sync with what's actually
+ * generated (the same "one shared source of truth" discipline this file uses everywhere else,
+ * e.g. optionsSource.ts's resolver). */
+interface IndicatorHelperDocEntry {
+  screenName: string
+  prefix: string
+  base: string
+  hasValue: boolean
+}
+
+function collectIndicatorHelperDocEntries(widgets: UiWidget[], screenNameFor: (w: UiWidget) => string): IndicatorHelperDocEntry[] {
+  const entries: IndicatorHelperDocEntry[] = []
+  for (const w of widgets) {
+    if (!isIndicatorWidget(w.type)) continue
+    const screenName = screenNameFor(w)
+    entries.push({ screenName, prefix: indicatorScreenFunctionPrefix(screenName), base: indicatorFunctionBaseName(w), hasValue: INDICATOR_VALUE_WIDGET_TYPES.has(w.type) })
+  }
+  return entries
+}
+
+/** One entry's worth of doc lines — name/params/description/example for every function
+ * emitIndicatorHelperFunctions generates for this one widget (Set/Animate/AnimateTo/Start/Stop/
+ * Reset for a value-capable indicator; Start/Stop only for a spinner, matching that function's own
+ * branching exactly). */
+function indicatorHelperDocEntryLines(e: IndicatorHelperDocEntry): string[] {
+  const fn = (name: string) => `${e.prefix}${name}`
+  const lines: string[] = []
+  if (e.hasValue) {
+    lines.push(` * ${fn(`set${e.base}Value`)}(value, animated = true)`)
+    lines.push(' *   Sets the indicator\'s value directly, optionally animated.')
+    lines.push(' *')
+    lines.push(' * Example:')
+    lines.push(` *   ${fn(`set${e.base}Value`)}(50, true);`)
+    lines.push(' *')
+    lines.push(` * ${fn(`animate${e.base}`)}(from, to, duration)`)
+    lines.push(' *   Animates the indicator from one value to another.')
+    lines.push(' *')
+    lines.push(' * Example:')
+    lines.push(` *   ${fn(`animate${e.base}`)}(0, 100, 1000);`)
+    lines.push(' *')
+    lines.push(` * ${fn(`animate${e.base}To`)}(target, duration)`)
+    lines.push(' *   Animates from the current value to the target value.')
+    lines.push(' *')
+    lines.push(' * Example:')
+    lines.push(` *   ${fn(`animate${e.base}To`)}(75, 500);`)
+    lines.push(' *')
+  }
+  lines.push(` * ${fn(`start${e.base}Animation`)}()`)
+  lines.push(e.hasValue ? ' *   Plays this indicator\'s own configured animation (its Min → Max sweep).' : ' *   Starts the spinner\'s spin animation.')
+  lines.push(' *')
+  lines.push(' * Example:')
+  lines.push(` *   ${fn(`start${e.base}Animation`)}();`)
+  lines.push(' *')
+  lines.push(` * ${fn(`stop${e.base}Animation`)}()`)
+  lines.push(' *   Stops the current animation immediately.')
+  lines.push(' *')
+  lines.push(' * Example:')
+  lines.push(` *   ${fn(`stop${e.base}Animation`)}();`)
+  if (e.hasValue) {
+    lines.push(' *')
+    lines.push(` * ${fn(`reset${e.base}`)}()`)
+    lines.push(' *   Resets the indicator to its default value.')
+    lines.push(' *')
+    lines.push(' * Example:')
+    lines.push(` *   ${fn(`reset${e.base}`)}();`)
+  }
+  return lines
+}
+
+/** The spec's own requested "documentation section describing every exported helper function and
+ * how to use it," generated at the top of every file that declares indicator helper functions
+ * (UI Screen Only's single header, the live-preview code panel, and Complete Project's ui.cpp —
+ * see each call site). Groups entries under a `---- Screen: "Name" ----` sub-banner whenever more
+ * than one screen is represented (Complete Project mode only — the other two modes only ever cover
+ * one screen, where a sub-banner would be redundant noise). Returns `[]` (nothing emitted) when
+ * there are no indicator widgets at all, so a project using none of this feature's widgets gets no
+ * unused doc block. */
+function emitIndicatorHelperDocBlock(entries: IndicatorHelperDocEntry[]): string[] {
+  if (entries.length === 0) return []
+  const screenNames = new Set(entries.map((e) => e.screenName))
+  const lines: string[] = []
+  lines.push('/*')
+  lines.push(' * ==========================================')
+  lines.push(' * Generated Indicator Helper Functions')
+  lines.push(' * ==========================================')
+  lines.push(' *')
+  let lastScreen: string | null = null
+  for (const e of entries) {
+    if (screenNames.size > 1 && e.screenName !== lastScreen) {
+      lines.push(` * ---- Screen: "${e.screenName}" ----`)
+      lines.push(' *')
+      lastScreen = e.screenName
+    }
+    lines.push(...indicatorHelperDocEntryLines(e))
+    lines.push(' *')
+  }
+  lines.pop() // drop the trailing ' *' left by the loop above so the block ends cleanly
+  lines.push(' */')
   return lines
 }
 
@@ -1344,7 +1483,7 @@ function emitUpdateDataValueDispatcher(uiDesign: UiDesignProject, numericVariabl
  * that mode's own item-8 fix) and 'static' for the other two (safe there since they're single
  * translation units). `baseCtx` is whichever CodegenContext that call site already built for its
  * own Data List/script codegen — only consulted by emitOptionsSourceRuntimeApi. */
-function extraWidgetDeclLines(w: UiWidget, v: string, linkage: 'inline' | 'static', uiDesign: UiDesignProject, baseCtx: CodegenContext): string[] {
+function extraWidgetDeclLines(w: UiWidget, v: string, linkage: 'inline' | 'static', uiDesign: UiDesignProject, baseCtx: CodegenContext, screenName: string): string[] {
   const lines: string[] = []
   if (isOptionsSourceWidget(w.type)) {
     lines.push(...emitOptionsWidgetFocusHelpers(w, v, linkage))
@@ -1414,7 +1553,7 @@ function extraWidgetDeclLines(w: UiWidget, v: string, linkage: 'inline' | 'stati
   // reset<Base>) — declared AFTER the companions above, since several of them (gauge's _needle/
   // _needle_len/_value, bar/slider/arc's _value_exec, every type's _default_value) are what these
   // functions actually call into.
-  lines.push(...emitIndicatorHelperFunctions(w, v, linkage))
+  lines.push(...emitIndicatorHelperFunctions(w, v, linkage, screenName))
   return lines
 }
 
@@ -3035,6 +3174,11 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
   ]
   if (identByAssetId.size > 0) c.push(`#include "${assetsHeaderFilename}"`)
   c.push('')
+  const indicatorDocEntries = collectIndicatorHelperDocEntries(widgets, () => trimmedScreenName)
+  if (indicatorDocEntries.length > 0) {
+    c.push(...emitIndicatorHelperDocBlock(indicatorDocEntries))
+    c.push('')
+  }
   c.push('// ---- Screen state — ScreenName/ACTIVE_SCREEN are NOT declared here; this file only USES')
   c.push(`// ${screenEnumName} (see the file-top NOTE) — they live in your project's own lv_conf.h,`)
   c.push('// which #include "lvgl.h" above already pulls in via LVGL\'s own auto-discovery. This mode')
@@ -3113,7 +3257,7 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
         declared.add(v)
         c.push(`inline lv_obj_t* ${v} = nullptr;`)
       }
-      c.push(...extraWidgetDeclLines(w, v, 'inline', uiDesign, dataListBaseCtx))
+      c.push(...extraWidgetDeclLines(w, v, 'inline', uiDesign, dataListBaseCtx, trimmedScreenName))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) c.push(`inline lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
@@ -3582,6 +3726,11 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
     out.push('// as real font data only in the actual export — see the Export dialog.')
     out.push('')
   }
+  const liveIndicatorDocEntries = collectIndicatorHelperDocEntries(widgets, () => screen.name)
+  if (liveIndicatorDocEntries.length > 0) {
+    out.push(...emitIndicatorHelperDocBlock(liveIndicatorDocEntries))
+    out.push('')
+  }
 
   // Shown inline here for readability (this is a single-file simplified view) — in the real
   // export this enum/global actually lives in lv_conf.h, not ui.h or the screen file, so every
@@ -3640,7 +3789,7 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
         declared.add(v)
         out.push(`static lv_obj_t* ${v} = nullptr;`)
       }
-      out.push(...extraWidgetDeclLines(w, v, 'static', uiDesign, baseCodegenCtx))
+      out.push(...extraWidgetDeclLines(w, v, 'static', uiDesign, baseCodegenCtx, screen.name))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) out.push(`static lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
@@ -4199,6 +4348,21 @@ function generateKiboUIParts(
   const hasBindings = codegen.updateBindingsFn.length > 0
   const updateBindingsCall = hasBindings ? `  ${ns}_UpdateBindings();` : null
 
+  // Indicator widgets — maps each one to its owning screen's own NAME (not id — this is
+  // consulted directly by indicatorScreenFunctionPrefix, which needs the human-readable name to
+  // derive e.g. "Main_"). Required because this mode declares every indicator's helper functions
+  // in ONE flat cross-screen loop below ("Widget objects"), not inside a per-screen file — see
+  // indicatorScreenFunctionPrefix's own doc comment for why the prefix is needed at all. Built up
+  // front (not just before the "Widget objects" section) since collectIndicatorDispatchEntries
+  // below (for ui.h's forward declarations) needs it too.
+  const indicatorScreenNameById = new Map<string, string>()
+  for (const { screen } of screenFns) {
+    for (const w of reachableWidgetsForScreen(uiDesign, screen)) {
+      if (isIndicatorWidget(w.type)) indicatorScreenNameById.set(w.id, screen.name)
+    }
+  }
+  const indicatorScreenNameFor = (w: UiWidget): string => indicatorScreenNameById.get(w.id) ?? ''
+
   // Custom fonts — see the file-top comment on collectCustomFontUsage/CustomFontUsage. Computed
   // up front (same discipline as list items/keyboards above) since both ui.h's LV_FONT_DECLARE
   // lines and every emitWidget() call site that applies one need to agree on the same font/varName.
@@ -4206,7 +4370,7 @@ function generateKiboUIParts(
   const usedCustomFonts = uniqueCustomFonts(customFontByWidgetId)
   // Indicator control API — see emitGlobalIndicatorDispatch's own doc comment for why this is
   // plain global functions dispatching on widget id, not a ${ns}::-namespaced method.
-  const indicatorDispatchEntries = collectIndicatorDispatchEntries(widgets)
+  const indicatorDispatchEntries = collectIndicatorDispatchEntries(widgets, indicatorScreenNameFor)
   // updateDataValue's own gate is independent of indicatorDispatchEntries above — it dispatches by
   // VARIABLE name (any numeric Variable Manager entry), not by widget id, and still makes sense
   // even for a project with no id-tagged indicators (it still updates the variable itself).
@@ -4396,10 +4560,15 @@ function generateKiboUIParts(
     '// =============================================================================================',
     '// Core — widget registry, script globals, event callbacks, public API implementation.',
     '// Do NOT hand-edit below (except inside `// TODO` callback bodies) — re-export instead.',
-    '// =============================================================================================',
-    '',
-    '// Forward declarations — implemented in the per-screen sections below.'
+    '// ============================================================================================='
   ]
+  const indicatorDocEntries = collectIndicatorHelperDocEntries(widgets, indicatorScreenNameFor)
+  if (indicatorDocEntries.length > 0) {
+    core.push('')
+    core.push(...emitIndicatorHelperDocBlock(indicatorDocEntries))
+  }
+  core.push('')
+  core.push('// Forward declarations — implemented in the per-screen sections below.')
   const macroPrefix = macroPrefixFor(ns)
 
   // See generateUiScreenExport's identical exclusion — a dataList's own template descendants are
@@ -4552,7 +4721,7 @@ function generateKiboUIParts(
         declared.add(v)
         core.push(`static lv_obj_t* ${v} = nullptr;`)
       }
-      core.push(...extraWidgetDeclLines(w, v, 'static', uiDesign, dataListBaseCtx))
+      core.push(...extraWidgetDeclLines(w, v, 'static', uiDesign, dataListBaseCtx, indicatorScreenNameFor(w)))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) core.push(`static lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
@@ -4935,11 +5104,11 @@ function generateKiboUIParts(
 
   if (indicatorDispatchEntries.length > 0) {
     core.push('')
-    core.push(...emitGlobalIndicatorDispatch(widgets))
+    core.push(...emitGlobalIndicatorDispatch(widgets, indicatorScreenNameFor))
   }
   if (numericVariablesForDataValue.length > 0) {
     core.push('')
-    core.push(...emitUpdateDataValueDispatcher(uiDesign, numericVariablesForDataValue, ns))
+    core.push(...emitUpdateDataValueDispatcher(uiDesign, numericVariablesForDataValue, ns, indicatorScreenNameFor))
   }
 
   return { publicHeader: h.join('\n'), cppBody: [s.join('\n'), core.join('\n')].join('\n\n'), customFonts: usedCustomFonts }

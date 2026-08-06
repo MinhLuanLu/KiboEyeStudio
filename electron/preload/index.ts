@@ -21,6 +21,10 @@ export interface ExtFilter {
   extensions: string[]
 }
 
+export interface AuthStatusResult {
+  sessionEmail: string | null
+}
+
 const kiboApi = {
   saveProjectAs: (json: string, suggestedName: string): Promise<SaveResult> =>
     ipcRenderer.invoke('project:save-as', json, suggestedName),
@@ -35,6 +39,11 @@ const kiboApi = {
   exportSaveBinaryFile: (defaultName: string, base64Contents: string, filters: ExtFilter[]): Promise<SaveResult> =>
     ipcRenderer.invoke('export:save-binary-file', defaultName, base64Contents, filters),
   importOpenJson: (): Promise<OpenResult> => ipcRenderer.invoke('import:open-json'),
+  // "Remember me" session bookkeeping only — see the comment block in electron/main/index.ts.
+  // Actual login/signup credential checks go straight from the renderer to the HTTP backend
+  // (src/lib/http/authApi.ts), not through IPC.
+  authStatus: (): Promise<AuthStatusResult> => ipcRenderer.invoke('auth:status'),
+  authSetSession: (email: string | null): Promise<{ ok: boolean }> => ipcRenderer.invoke('auth:set-session', email),
   // One-way notifications the main process uses to decide whether it's safe to close the
   // window without asking, and to know when a save it requested (via
   // 'menu:save-project-then-close') has actually completed.

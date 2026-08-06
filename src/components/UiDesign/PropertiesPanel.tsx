@@ -14,7 +14,16 @@ import { centerPanForRect, fitZoomToDisplay } from '@/lib/uiDesign/canvasZoom'
 import { isTopLevelUiWidget } from '@/lib/uiDesign/widgetGeometry'
 import { isOptionsSourceWidget, resolveOptionsSourceLines } from '@/lib/uiDesign/optionsSource'
 import { ACTION_TABLE, HARDWARE_ACTION_PRESETS } from '@/lib/uiDesign/scriptLang/actionTable'
-import { widgetVarName, widgetBaseName, toCIdentifier, EVENT_CAPABLE_WIDGET_TYPES, EVENT_CALLBACK_TRIGGER_OPTIONS, isIndicatorWidget, indicatorFunctionBaseName } from '@/lib/export/lvglExport'
+import {
+  widgetVarName,
+  widgetBaseName,
+  toCIdentifier,
+  EVENT_CAPABLE_WIDGET_TYPES,
+  EVENT_CALLBACK_TRIGGER_OPTIONS,
+  isIndicatorWidget,
+  indicatorFunctionBaseName,
+  indicatorScreenFunctionPrefix
+} from '@/lib/export/lvglExport'
 import { IconPicker } from './IconPicker'
 import { LVGL_SYMBOLS } from '@/lib/uiDesign/lvglSymbols'
 import {
@@ -1891,6 +1900,10 @@ function indicatorNumProp(widget: UiWidget, key: string, fallback: number): numb
 function IndicatorSection({ widget }: { widget: UiWidget }) {
   const updateUiWidgetProps = useStore((s) => s.updateUiWidgetProps)
   const checkpoint = useStore((s) => s.checkpoint)
+  // Screen-prefixed exactly like the real export (see lvglExport.ts's indicatorScreenFunctionPrefix)
+  // — the widget being edited is always on the active screen, so that's the one whose prefix this
+  // preview text shows; falls back to no prefix if somehow unresolved (e.g. mid-screen-delete).
+  const activeScreenName = useStore((s) => s.project.uiDesign.screens.find((sc) => sc.id === s.project.uiDesign.activeScreenId)?.name ?? '')
   if (!isIndicatorWidget(widget.type)) return null
   const isSpinner = widget.type === 'spinner'
 
@@ -1901,6 +1914,7 @@ function IndicatorSection({ widget }: { widget: UiWidget }) {
 
   const animEnabled = Boolean(widget.props.animEnabled)
   const defaultBase = indicatorFunctionBaseName({ ...widget, props: { ...widget.props, functionName: '' } })
+  const fnPrefix = activeScreenName ? indicatorScreenFunctionPrefix(activeScreenName) : ''
 
   return (
     <div className="border-t border-studio-border pt-2.5 flex flex-col gap-2">
@@ -1997,7 +2011,9 @@ function IndicatorSection({ widget }: { widget: UiWidget }) {
           onChange={(e) => set({ functionName: e.target.value })}
         />
         <span className="text-[10px] text-studio-muted">
-          {isSpinner ? `Exports as start${defaultBase}Animation()/stop${defaultBase}Animation()` : `Exports as set${defaultBase}Value()/animate${defaultBase}To()/etc.`}
+          {isSpinner
+            ? `Exports as ${fnPrefix}start${defaultBase}Animation()/${fnPrefix}stop${defaultBase}Animation()`
+            : `Exports as ${fnPrefix}set${defaultBase}Value()/${fnPrefix}animate${defaultBase}To()/etc.`}
         </span>
       </div>
     </div>

@@ -297,6 +297,14 @@ interface StoreState {
   filePath: string | null
   dirty: boolean
   workspace: Workspace
+  /** Local login gate shown before any workspace is reachable — see LoginScreen.tsx. Purely
+   * ephemeral session state, never part of `project`/EditorState: `authChecked` starts false
+   * so App.tsx can show nothing (not a flash of the login form) while it asks
+   * authPersistence.getAuthStatus() whether a remembered session exists; `authenticated` gates
+   * rendering AppShell vs LoginScreen. */
+  authChecked: boolean
+  authenticated: boolean
+  authUserEmail: string | null
   /** Purely a UI hint for the toolbar's saved-status readout — never persisted, and not
    * itself the source of truth for whether a save happened (`dirty`/`filePath` are). */
   saveStatus: SaveStatus
@@ -624,6 +632,10 @@ interface StoreState {
   saveExpression: (id: string) => void
   renameExpression: (id: string, name: string) => void
   deleteExpression: (id: string) => void
+
+  // auth
+  setAuthSession: (email: string | null) => void
+  setAuthChecked: (checked: boolean) => void
 
   // playback
   setMode: (mode: PlaybackMode) => void
@@ -1188,6 +1200,9 @@ export const useStore = create<StoreState>()(
     dirty: false,
     saveStatus: 'idle',
     workspace: 'home',
+    authChecked: false,
+    authenticated: false,
+    authUserEmail: null,
 
     activeAnimationId: '',
     selectedKeyframeId: null,
@@ -2859,6 +2874,14 @@ export const useStore = create<StoreState>()(
     setLeftTab: (tab) => set((s) => void (s.leftTab = tab)),
     setRightTab: (tab) => set((s) => void (s.rightTab = tab)),
     setWorkspace: (workspace) => set((s) => void (s.workspace = workspace)),
+
+    setAuthSession: (email) =>
+      set((s) => {
+        s.authenticated = email !== null
+        s.authUserEmail = email
+        s.authChecked = true
+      }),
+    setAuthChecked: (checked) => set((s) => void (s.authChecked = checked)),
 
     setStickerScope: (scope) => set((s) => void (s.stickerScope = scope)),
     selectSticker: (id) => set((s) => void (s.selectedStickerId = id)),
