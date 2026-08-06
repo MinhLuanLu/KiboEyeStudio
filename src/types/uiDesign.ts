@@ -469,6 +469,30 @@ export interface UiDataListConfig {
   includeSampleDataInExport: boolean
 }
 
+// Options Source — binds a Dropdown/Roller/Tabs widget's option/tab list to a UiDataSource,
+// generating one option/tab line per row via a `{{}}` item template (see scriptLang/templateExpr.ts
+// — the exact same template engine the Data List item template uses, so authors only ever learn
+// one `{{field}}` syntax). See WidgetRenderer.tsx's resolveOptionsSourceLines (preview) and
+// lvglExport.ts's Options Source codegen (export) — both read this same config so preview/export
+// can't disagree about which source/template is active. `dataSourceId === null` means "use the
+// widget's own static per-line list" (dropdown/roller: `props.options`, tabs: `props.tabNames`) —
+// today's original behavior, unchanged and still the default.
+export interface UiOptionsSourceConfig {
+  dataSourceId: string | null
+  /** A single-line `{{}}` template evaluated per row to produce one option/tab-name line, e.g.
+   * `{{name}}` or `{{name}} ({{value}})`. Defaults to `{{name}}` — matches the field name most
+   * data sources are expected to have for their primary label. */
+  itemTemplate: string
+  /** 0 = unlimited. */
+  maxItems: number
+  /** Off by default — see UiDataListConfig.includeSampleDataInExport's identical reasoning:
+   * production firmware shouldn't silently ship the Data Source Manager's design-time sample rows
+   * unless the author opts in. Only consulted for Dropdown/Roller (real runtime SetItems() API);
+   * Tabs always bakes its sample data at export time regardless, since LVGL's tabview has no cheap
+   * way to change tab count after creation — see lvglExport.ts's 'tabs' widgetCreateCalls case. */
+  includeSampleDataInExport: boolean
+}
+
 export interface UiWidget {
   id: string
   type: UiWidgetType
@@ -504,6 +528,9 @@ export interface UiWidget {
   keyboardConfig?: UiKeyboardConfig
   /** Only meaningful when `type === 'dataList'` — see UiDataListConfig. */
   dataListConfig?: UiDataListConfig
+  /** Only meaningful when `type` is `'dropdown' | 'roller' | 'tabs'` — see UiOptionsSourceConfig.
+   * undefined = static list only (same as an explicit `{ dataSourceId: null, ... }`). */
+  optionsSource?: UiOptionsSourceConfig
   /** Only meaningful on a descendant of a `dataList` widget's template subtree (see
    * lib/export/lvglExport.ts's dataListTemplateDescendants/isDataListTemplateDescendant) — a
    * boolean expression (`item.<field>` / `data.<name>`, see scriptLang/templateExpr.ts) that

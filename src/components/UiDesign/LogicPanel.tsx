@@ -8,7 +8,8 @@ import { useStore } from '@/state/store'
 import { useScriptSandbox, LOG_KIND_LEVEL, type SandboxLogEntry, type SandboxLogKind } from '@/lib/uiDesign/scriptLang/sandboxRuntime'
 import { parseScript } from '@/lib/uiDesign/scriptLang/parser'
 import { validateScript, type ScriptValidationResult } from '@/lib/uiDesign/scriptLang/validateScript'
-import { buildValidationCodegenContext, EVENT_CAPABLE_WIDGET_TYPES, reachableWidgetsForScreen } from '@/lib/export/lvglExport'
+import { buildValidationCodegenContext, EVENT_CAPABLE_WIDGET_TYPES, INDICATOR_VALUE_WIDGET_TYPES, isIndicatorWidget, reachableWidgetsForScreen } from '@/lib/export/lvglExport'
+import type { UiWidget } from '@/types'
 
 // Module-level, never-recreated CodeMirror config — see LvglCodePanel.tsx's own copy of this
 // exact note for why: passing fresh `extensions`/`basicSetup` literals on every render forces
@@ -123,6 +124,7 @@ export function LogicPanel() {
   const script = useStore((s) => s.project.uiDesign.script)
   const setUiScript = useStore((s) => s.setUiScript)
   const checkpoint = useStore((s) => s.checkpoint)
+  const updateUiWidgetProps = useStore((s) => s.updateUiWidgetProps)
   const simulatedFocusWidgetId = useStore((s) => s.simulatedFocusWidgetId)
   const simulatedFocusEditing = useStore((s) => s.simulatedFocusEditing)
   const simulateFocusNext = useStore((s) => s.simulateFocusNext)
@@ -153,6 +155,15 @@ export function LogicPanel() {
     const activeScreen = ud.screens.find((sc) => sc.id === ud.activeScreenId)
     if (!activeScreen) return false
     return reachableWidgetsForScreen(ud, activeScreen).some((w) => EVENT_CAPABLE_WIDGET_TYPES.has(w.type) || w.type === 'keyboard')
+  }, [project.uiDesign])
+
+  // Every Progress Bar/Slider/Gauge/Arc/Spinner on the active screen — drives the "Simulate
+  // Indicators" card below (manual value entry/drag, Play/Reset, Spinning toggle).
+  const indicatorWidgets = useMemo(() => {
+    const ud = project.uiDesign
+    const activeScreen = ud.screens.find((sc) => sc.id === ud.activeScreenId)
+    if (!activeScreen) return [] as UiWidget[]
+    return reachableWidgetsForScreen(ud, activeScreen).filter((w) => isIndicatorWidget(w.type))
   }, [project.uiDesign])
 
   const hasUnappliedChanges = draft !== script
@@ -332,6 +343,26 @@ export function LogicPanel() {
         </div>
       )}
 
+      {indicatorWidgets.length > 0 && (
+        <div className="studio-panel2 border border-studio-border rounded p-2 flex flex-col gap-1.5">
+          <span className="studio-label">Simulate Indicators</span>
+          <p className="text-[11px] text-studio-muted">
+            Drag or type a value to see it live on the canvas — the widget animates smoothly if it has Animation enabled. Works whether or not the
+            script is running.
+          </p>
+          {indicatorWidgets.map((w) => (
+            <IndicatorSimulateRow
+              key={w.id}
+              widget={w}
+              onSetProps={(partial) => {
+                checkpoint()
+                updateUiWidgetProps(w.id, partial)
+              }}
+            />
+          ))}
+        </div>
+      )}
+
       <div className="flex flex-col gap-1 min-w-0">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <span className="studio-label">Terminal</span>
@@ -430,6 +461,51 @@ function SensorSimulateRow({ name, disabled, onSend }: { name: string; disabled:
         className="flex-1"
       />
       <span className="text-[11px] text-studio-muted w-8 text-right">{value}</span>
+    </div>
+  )
+}
+
+/** One row of the "Simulate Indicators" card — a live value slider/number field (writes straight
+ * to `widget.props.value` via the same store action the Properties panel's own fields use, so the
+ * canvas preview updates identically either way, CSS-transition-animated when the widget's own
+ * Animation Controls are on), a Play button (sweeps to Max, letting the transition show), and a
+ * Reset button (back to `defaultValue`). Spinner has no `value` — just a Spinning toggle mirroring
+ * its own `animEnabled` prop (see IndicatorSection in PropertiesPanel.tsx, the same field). */
+function IndicatorSimulateRow({ widget, onSetProps }: { widget: UiWidget; onSetProps: (partial: Record<string, string | number | boolean>) => void }) {
+  const label = widget.tagId ?? `${widget.type} (${widget.id.slice(0, 6)})`
+  if (widget.type === 'spinner') {
+    return (
+      <label className="flex items-center gap-2 text-[11px] cursor-pointer">
+        <input type="checkbox" checked={Boolean(widget.props.animEnabled)} onChange={(e) => onSetProps({ animEnabled: e.target.checked })} />
+        <span className="text-studio-muted truncate">{label}</span>
+      </label>
+    )
+  }
+  if (!INDICATOR_VALUE_WIDGET_TYPES.has(widget.type)) return null
+  const min = typeof widget.props.min === 'number' ? widget.props.min : 0
+  const max = typeof widget.props.max === 'number' ? widget.props.max : 100
+  const value = typeof widget.props.value === 'number' ? widget.props.value : min
+  const defaultValue = typeof widget.props.defaultValue === 'number' ? widget.props.defaultValue : min
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[11px] text-studio-muted w-20 truncate" title={label}>
+        {label}
+      </span>
+      <input type="range" min={min} max={max} value={value} onChange={(e) => onSetProps({ value: Number(e.target.value) })} className="flex-1" />
+      <input
+        type="number"
+        min={min}
+        max={max}
+        value={Math.round(value)}
+        onChange={(e) => onSetProps({ value: Math.max(min, Math.min(max, Number(e.target.value) || 0)) })}
+        className="w-14 bg-studio-panel border border-studio-border rounded px-1 py-0.5 text-[11px]"
+      />
+      <button className="studio-btn text-[11px] px-1.5 py-0.5" title="Play (sweep to Max)" onClick={() => onSetProps({ value: max })}>
+        ▶
+      </button>
+      <button className="studio-btn text-[11px] px-1.5 py-0.5" title="Reset to default" onClick={() => onSetProps({ value: defaultValue })}>
+        ↺
+      </button>
     </div>
   )
 }

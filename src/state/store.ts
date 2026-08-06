@@ -32,6 +32,7 @@ import type {
   UiDisplaySettings,
   UiKeyboardConfig,
   UiKeyboardCustomKey,
+  UiOptionsSourceConfig,
   UiListItem,
   UiThemeableStyleField,
   UiThemeId,
@@ -867,6 +868,8 @@ interface StoreState {
   reorderUiKeyboardCustomKey: (widgetId: string, fromIndex: number, toIndex: number) => void
   // Data List widget config (only meaningful for widget.type === 'dataList' — see UiDataListConfig).
   updateUiDataListConfig: (widgetId: string, partial: Partial<UiDataListConfig>) => void
+  // Options Source binding (only meaningful for dropdown/roller/tabs — see UiOptionsSourceConfig).
+  updateUiWidgetOptionsSource: (widgetId: string, partial: Partial<UiOptionsSourceConfig>) => void
   // Custom LVGL fonts (project.uiDesign.customFonts — see UiCustomFont). declaredCodepoints is
   // parsed once here (see lib/uiDesign/fontImport.ts), not re-derived at render time.
   addUiCustomFont: (name: string, cSource: string) => string
@@ -3832,6 +3835,14 @@ export const useStore = create<StoreState>()(
         const w = s.project.uiDesign.widgets[widgetId]
         if (!w?.dataListConfig) return
         Object.assign(w.dataListConfig, partial)
+        s.dirty = true
+      }),
+
+    updateUiWidgetOptionsSource: (widgetId, partial) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[widgetId]
+        if (!w?.optionsSource) return
+        Object.assign(w.optionsSource, partial)
         s.dirty = true
       }),
 

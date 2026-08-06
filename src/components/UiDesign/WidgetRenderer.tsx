@@ -23,6 +23,8 @@ import { quantizeToRgb565 } from '@/lib/color'
 import { STATUS_INDICATOR_PRESETS } from '@/lib/uiDesign/statusIndicatorPresets'
 import { dataListTemplateBounds } from '@/lib/uiDesign/dataListLayout'
 import { evalBooleanExprPreview, evalTemplateTextPreview, hasTemplateExpr } from '@/lib/uiDesign/scriptLang/templateExpr'
+import { resolveOptionsSourceLines } from '@/lib/uiDesign/optionsSource'
+import { indicatorTransition } from '@/lib/uiDesign/indicatorEasing'
 
 const AFFECTED_HIGHLIGHT_MS = 400
 
@@ -413,6 +415,9 @@ function DataListRepeatedRows({ dataListWidget }: { dataListWidget: UiWidget }) 
  * already handles position/size/background/border for every kind uniformly. */
 export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; simFocusedKeyId?: string | null }) {
   const asset = useStore((s) => (widget.src ? s.project.uiDesign.assets.find((a) => a.id === widget.src) : undefined))
+  // Only meaningful for dropdown/roller/tabs — cheap to select unconditionally like `asset` above.
+  const optionsDataSources = useStore((s) => s.project.uiDesign.dataSources)
+  const runtimeOptionsItems = useStore((s) => s.runtimeDataListItems[widget.id])
 
   switch (widget.type) {
     case 'button': {
@@ -500,9 +505,14 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
       const max = numProp(widget, 'max', 100)
       const value = numProp(widget, 'value', min)
       const pct = max > min ? ((value - min) / (max - min)) * 100 : 0
+      // Animating `width`/`left` (plain lengths) rather than the conic-gradient/transform-angle
+      // fills below is what makes bar/slider's value-change transition reliably smooth across
+      // browsers — see indicatorEasing.ts's doc comment on why arc/gauge's gradient/rotate
+      // transitions are a looser approximation instead.
+      const transition = indicatorTransition(widget.props, ['width', 'left'])
       return (
         <>
-          <div style={{ position: 'absolute', inset: 0, width: `${pct}%`, borderRadius: 999, background: '#2196f3' }} />
+          <div style={{ position: 'absolute', inset: 0, width: `${pct}%`, borderRadius: 999, background: '#2196f3', transition }} />
           <div
             style={{
               position: 'absolute',
@@ -514,7 +524,8 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
               marginTop: -8,
               borderRadius: '50%',
               background: '#ffffff',
-              border: '2px solid #2196f3'
+              border: '2px solid #2196f3',
+              transition
             }}
           />
         </>
@@ -525,13 +536,19 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
       const max = numProp(widget, 'max', 100)
       const value = numProp(widget, 'value', min)
       const pct = max > min ? ((value - min) / (max - min)) * 100 : 0
-      return <div style={{ position: 'absolute', inset: 0, width: `${pct}%`, borderRadius: 4, background: '#2196f3' }} />
+      const transition = indicatorTransition(widget.props, ['width'])
+      return <div style={{ position: 'absolute', inset: 0, width: `${pct}%`, borderRadius: 4, background: '#2196f3', transition }} />
     }
     case 'arc': {
       const min = numProp(widget, 'min', 0)
       const max = numProp(widget, 'max', 100)
       const value = numProp(widget, 'value', min)
       const frac = max > min ? (value - min) / (max - min) : 0
+      // Animating a conic-gradient's own angle stop via a plain CSS `transition: background` is a
+      // real, Chromium-supported technique (this app's own Electron/dev-preview target) as long as
+      // the gradient's structure stays identical between renders — true here since only the angle
+      // number changes each render, never the color list/stop count. Documented as a preview
+      // approximation, not guaranteed pixel-smooth on every browser engine.
       return (
         <div
           style={{
@@ -540,7 +557,8 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
             borderRadius: '50%',
             background: `conic-gradient(#2196f3 ${frac * 360}deg, #e2e8f0 0deg)`,
             mask: 'radial-gradient(farthest-side, transparent calc(100% - 8px), #000 calc(100% - 8px))',
-            WebkitMask: 'radial-gradient(farthest-side, transparent calc(100% - 8px), #000 calc(100% - 8px))'
+            WebkitMask: 'radial-gradient(farthest-side, transparent calc(100% - 8px), #000 calc(100% - 8px))',
+            transition: indicatorTransition(widget.props, ['background'])
           }}
         />
       )
@@ -567,7 +585,8 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
               borderRadius: '50%',
               background: `conic-gradient(from ${rotation}deg, #2196f3 ${frac * angleRange}deg, #e2e8f0 ${frac * angleRange}deg ${angleRange}deg, transparent ${angleRange}deg)`,
               mask: 'radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 6px))',
-              WebkitMask: 'radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 6px))'
+              WebkitMask: 'radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 6px))',
+              transition: indicatorTransition(widget.props, ['background'])
             }}
           />
           <div
@@ -579,7 +598,8 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
               height: 2,
               background: '#ef4444',
               transformOrigin: '0% 50%',
-              transform: `rotate(${needleDeg}deg)`
+              transform: `rotate(${needleDeg}deg)`,
+              transition: indicatorTransition(widget.props, ['transform'])
             }}
           />
           <div style={{ position: 'absolute', top: '50%', left: '50%', width: 6, height: 6, marginTop: -3, marginLeft: -3, borderRadius: '50%', background: '#ef4444' }} />
@@ -667,7 +687,8 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
       )
     }
     case 'dropdown': {
-      const first = String(widget.props.options ?? '').split('\n')[0] ?? ''
+      const lines = resolveOptionsSourceLines(widget, optionsDataSources, runtimeOptionsItems)
+      const first = lines[0] ?? ''
       return (
         <>
           <span className="truncate">{first}</span>
@@ -676,7 +697,7 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
       )
     }
     case 'roller': {
-      const lines = String(widget.props.options ?? '').split('\n')
+      const lines = resolveOptionsSourceLines(widget, optionsDataSources, runtimeOptionsItems)
       return <span>{lines[Math.floor(lines.length / 2)] ?? ''}</span>
     }
     case 'textarea':
@@ -725,7 +746,7 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
       )
     }
     case 'tabs': {
-      const names = String(widget.props.tabNames ?? '').split('\n').filter(Boolean)
+      const names = resolveOptionsSourceLines(widget, optionsDataSources, runtimeOptionsItems).filter(Boolean)
       return (
         <div style={{ display: 'flex', flexDirection: 'row', borderBottom: '1px solid #cbd5e1' }}>
           {names.map((n, i) => (

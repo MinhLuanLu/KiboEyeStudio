@@ -2,6 +2,9 @@ import type { Project } from '@/types'
 import {
   allReachableWidgets,
   buildValidationCodegenContext,
+  indicatorFunctionBaseName,
+  INDICATOR_VALUE_WIDGET_TYPES,
+  isIndicatorWidget,
   reachableWidgetsForScreen,
   requiredLibraries,
   screenCreateFnName,
@@ -519,7 +522,33 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
         }
         record(`${widgetBaseName(w)}_item_event_cb`, `list "${w.tagId ?? w.id}"'s item click callback`)
       }
+      // Indicator helper functions (set<Base>Value/animate<Base>[To]/start|stop<Base>Animation/
+      // reset<Base> — see lvglExport.ts's emitIndicatorHelperFunctions) land in the same flat
+      // function namespace too, keyed off indicatorFunctionBaseName (the tagId/id-derived default,
+      // or the Properties panel's "Function name" override) — a widget without a tagId still gets
+      // real functions (see widgetBaseName's own id-derived fallback), so it's checked unconditionally.
+      if (isIndicatorWidget(w.type)) {
+        const base = indicatorFunctionBaseName(w)
+        const label = `indicator "${w.tagId ?? w.id}"`
+        record(`start${base}Animation`, label)
+        record(`stop${base}Animation`, label)
+        if (INDICATOR_VALUE_WIDGET_TYPES.has(w.type)) {
+          record(`set${base}Value`, label)
+          record(`animate${base}`, label)
+          record(`animate${base}To`, label)
+          record(`reset${base}`, label)
+        }
+      }
     }
+    if (widgets.some((w) => isIndicatorWidget(w.type) && w.tagId)) {
+      record('setIndicatorValue', 'the global Indicator control API')
+      record('animateIndicator', 'the global Indicator control API')
+      record('animateIndicatorTo', 'the global Indicator control API')
+      record('startIndicatorAnimation', 'the global Indicator control API')
+      record('stopIndicatorAnimation', 'the global Indicator control API')
+      record('resetIndicator', 'the global Indicator control API')
+    }
+    if (uiDesign.variables.some((v) => v.type === 'number')) record('updateDataValue', 'the global updateDataValue dispatcher')
     const collisions = [...fnNames.entries()].filter(([, labels]) => labels.length > 1)
     if (collisions.length > 0) {
       status = 'failed'
@@ -670,6 +699,63 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
       messages.push('No data bindings authored yet.')
     }
     results.push({ category: 'Data bindings', status, messages })
+  }
+
+  // ---- Indicators (Progress Bar/Slider/Gauge/Arc/Spinner) ----
+  {
+    const propNum = (w: (typeof widgets)[number], key: string, fallback: number): number => {
+      const v = w.props[key]
+      return typeof v === 'number' ? v : fallback
+    }
+    const messages: string[] = []
+    let status: LvglValidationStatus = 'passed'
+    const indicatorWidgets = widgets.filter((w) => isIndicatorWidget(w.type))
+    const badRange = indicatorWidgets.filter((w) => INDICATOR_VALUE_WIDGET_TYPES.has(w.type) && propNum(w, 'max', 100) <= propNum(w, 'min', 0))
+    if (badRange.length > 0) {
+      status = 'failed'
+      messages.push(`${badRange.length} indicator(s) have Max <= Min, so their fill/percentage can never compute correctly: ${badRange.map((w) => w.tagId ?? w.id).join(', ')}.`)
+    }
+    const badStep = indicatorWidgets.filter((w) => {
+      if (!INDICATOR_VALUE_WIDGET_TYPES.has(w.type)) return false
+      const step = propNum(w, 'step', 0)
+      if (step <= 0) return false
+      const span = propNum(w, 'max', 100) - propNum(w, 'min', 0)
+      return span > 0 && Math.abs(span % step) > 0.0001
+    })
+    if (badStep.length > 0) {
+      status = status === 'failed' ? status : 'warning'
+      messages.push(
+        `${badStep.length} indicator(s) have a Step that doesn't evenly divide (Max - Min) — the last step will be a partial increment: ${badStep.map((w) => w.tagId ?? w.id).join(', ')}.`
+      )
+    }
+    if (indicatorWidgets.length > 0) messages.push(`${indicatorWidgets.length} indicator widget(s) checked.`)
+    else messages.push('No Progress Bar/Slider/Gauge/Arc/Spinner widgets in this project yet.')
+    results.push({ category: 'Indicators', status, messages })
+  }
+
+  // ---- Options Source bindings (Dropdown/Roller/Tabs) ----
+  {
+    const messages: string[] = []
+    let status: LvglValidationStatus = 'passed'
+    const dataSourceIds = new Set(uiDesign.dataSources.map((d) => d.id))
+    const bound = widgets.filter((w) => (w.type === 'dropdown' || w.type === 'roller' || w.type === 'tabs') && !!w.optionsSource?.dataSourceId)
+    const dangling = bound.filter((w) => !dataSourceIds.has(w.optionsSource!.dataSourceId!))
+    if (dangling.length > 0) {
+      status = 'failed'
+      messages.push(
+        `${dangling.length} widget(s) reference a data source that no longer exists in the Data Sources tab: ${dangling.map((w) => w.tagId ?? w.id).join(', ')}.`
+      )
+    }
+    const boundTabs = bound.filter((w) => w.type === 'tabs' && dataSourceIds.has(w.optionsSource!.dataSourceId!))
+    if (boundTabs.length > 0) {
+      messages.push(
+        `${boundTabs.length} Tabs widget(s) are bound to a data source — tabs are baked from its sample data at export time and won't add/remove tabs at runtime (LVGL's tab view has no cheap way to change tab count after creation): ${boundTabs.map((w) => w.tagId ?? w.id).join(', ')}.`
+      )
+    }
+    if (bound.length > 0) {
+      messages.push(`${bound.length - dangling.length}/${bound.length} Options Source binding(s) resolve to a real Data Source.`)
+    }
+    results.push({ category: 'Options Source bindings', status, messages })
   }
 
   // ---- Logic tab script ----

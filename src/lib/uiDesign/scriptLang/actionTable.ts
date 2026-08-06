@@ -563,13 +563,15 @@ const EASING_TO_LVGL_PATH: Record<string, string> = {
 }
 
 /** The real lv_anim_exec_xcb_t-compatible setter for an indicator's own loop/reverse/delay
- * animation system — arc's native `lv_arc_set_value(obj, int32_t)` already fits the 2-arg
- * exec_cb signature directly; bar/slider/gauge each need a small generated trampoline function
- * (declared alongside the widget's other companions — see lvglExport.ts's extraWidgetDeclLines)
- * since their real setters take a 3rd argument (bar/slider's LV_ANIM_ON/OFF) or need extra
- * fixed arguments (gauge's needle/needle_len) that don't fit the plain (obj, int32_t) shape. */
+ * animation system — bar/slider/arc all route through a small generated `<var>_value_exec`
+ * trampoline (declared alongside the widget's other companions — see lvglExport.ts's
+ * extraWidgetDeclLines), gauge through `<var>_needle_exec`. Bar/slider need it because their real
+ * setters take a 3rd LV_ANIM_ON/OFF argument that doesn't fit the plain (obj, int32_t) exec_cb
+ * shape; gauge needs its needle/needle_len companions; arc's native `lv_arc_set_value(obj,
+ * int32_t)` would technically fit the exec_cb shape directly with no trampoline at all, but it
+ * still gets one so `OnAnimationUpdated(value)` (see extraWidgetDeclLines) has a real per-frame
+ * interception point for every indicator type uniformly, not just bar/slider/gauge. */
 function indicatorAnimSetterExpr(varName: string, widgetType: UiWidgetType): string {
-  if (widgetType === 'arc') return '(lv_anim_exec_xcb_t)lv_arc_set_value'
   if (widgetType === 'gauge') return `${varName}_needle_exec`
   return `${varName}_value_exec`
 }
@@ -585,27 +587,43 @@ function indicatorAnimSetterExpr(varName: string, widgetType: UiWidgetType): str
  * lvglExport.ts's extraWidgetDeclLines) so `OnAnimationStarted()`/`OnAnimationFinished()` from the
  * spec are real, not just documented — `lv_anim_set_completed_cb` only ever fires for a
  * non-infinitely-looping animation, which is the real LVGL semantics for "finished". */
-export function emitIndicatorAnimStart(varName: string, widgetType: 'bar' | 'slider' | 'arc' | 'gauge', widget: UiWidget, fromExpr: string, toExpr: string, indent = ''): string[] {
-  const durationMs = Math.max(1, Math.round(typeof widget.props.animDurationMs === 'number' ? widget.props.animDurationMs : 300))
+export function emitIndicatorAnimStart(
+  varName: string,
+  widgetType: 'bar' | 'slider' | 'arc' | 'gauge',
+  widget: UiWidget,
+  fromExpr: string,
+  toExpr: string,
+  indent = '',
+  // Overrides the widget's own configured `animDurationMs` for this one run — used by the
+  // per-widget `animate<Base>()`/`animate<Base>To()` C++ helpers (see lvglExport.ts), whose whole
+  // point is a CALLER-supplied duration (matching the spec's own `animateIndicator(id, from, to,
+  // duration)` example), while `start<Base>Animation()`/`animAutoStart`/`playIndicatorAnimation`
+  // keep using the widget's own configured duration by leaving this unset.
+  durationOverrideExpr?: string
+): string[] {
+  const durationMs =
+    durationOverrideExpr !== undefined
+      ? `(uint32_t)(${durationOverrideExpr})`
+      : `(uint32_t)${Math.max(1, Math.round(typeof widget.props.animDurationMs === 'number' ? widget.props.animDurationMs : 300))}`
   const delayMs = Math.max(0, Math.round(typeof widget.props.animDelayMs === 'number' ? widget.props.animDelayMs : 0))
   const loop = !!widget.props.animLoop
   const reverse = !!widget.props.animReverse
   const easing = typeof widget.props.animEasing === 'string' ? widget.props.animEasing : 'linear'
   const easingFn = EASING_TO_LVGL_PATH[easing] ?? 'lv_anim_path_linear'
   const setter = indicatorAnimSetterExpr(varName, widgetType)
+  const eventsEnabled = !!widget.props.animEventsEnabled
   return [
     `${indent}{`,
     `${indent}  static lv_anim_t a; lv_anim_init(&a);`,
     `${indent}  lv_anim_set_var(&a, ${varName});`,
     `${indent}  lv_anim_set_exec_cb(&a, ${setter});`,
     `${indent}  lv_anim_set_values(&a, (int32_t)(${fromExpr}), (int32_t)(${toExpr}));`,
-    `${indent}  lv_anim_set_duration(&a, (uint32_t)${durationMs});`,
+    `${indent}  lv_anim_set_duration(&a, ${durationMs});`,
     `${indent}  lv_anim_set_delay(&a, (uint32_t)${delayMs});`,
     `${indent}  lv_anim_set_path_cb(&a, ${easingFn});`,
     `${indent}  lv_anim_set_repeat_count(&a, ${loop ? 'LV_ANIM_REPEAT_INFINITE' : '1'});`,
-    `${indent}  lv_anim_set_playback_time(&a, ${reverse ? `(uint32_t)${durationMs}` : '0'});`,
-    `${indent}  lv_anim_set_completed_cb(&a, ${varName}_on_anim_finished);`,
-    `${indent}  ${varName}_on_anim_started();`,
+    `${indent}  lv_anim_set_playback_time(&a, ${reverse ? durationMs : '0'});`,
+    ...(eventsEnabled ? [`${indent}  lv_anim_set_completed_cb(&a, ${varName}_on_anim_finished);`, `${indent}  ${varName}_on_anim_started();`] : []),
     `${indent}  lv_anim_start(&a);`,
     `${indent}}`
   ]

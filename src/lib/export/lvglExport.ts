@@ -28,6 +28,8 @@ import { decodeDataUrlToRgba } from '@/lib/import/uiAssetImport'
 import { matchesSelector } from '@/lib/uiDesign/selectors'
 import { compileTemplateExpr, compileTemplateText, cppTypeFor, generateScriptCpp, type CodegenContext, type CodegenResult, type ExprType } from '@/lib/uiDesign/scriptLang/codegen'
 import { hasTemplateExpr } from '@/lib/uiDesign/scriptLang/templateExpr'
+import { isOptionsSourceWidget, resolveOptionsSourceLines } from '@/lib/uiDesign/optionsSource'
+import { parseVisualBindingRows } from '@/lib/uiDesign/scriptLang/visualBindings'
 import { parseScript } from '@/lib/uiDesign/scriptLang/parser'
 import type { ScriptError } from '@/lib/uiDesign/scriptLang/parser'
 import { LV_CONF_TEMPLATE_V9 } from './lvConfTemplate'
@@ -38,7 +40,7 @@ import { parseFontVariableName } from '@/lib/uiDesign/fontImport'
 import { lvglSymbolById } from '@/lib/uiDesign/lvglSymbols'
 import { boardIdFor, DISPLAY_MODEL_LABELS, type ExportTarget } from './exportTarget'
 import { resolveThemedStyle } from '@/lib/uiDesign/themes'
-import { emitIndicatorAnimStart, statusIndicatorApplyLines } from '@/lib/uiDesign/scriptLang/actionTable'
+import { currentValueExpr, emitIndicatorAnimStart, emitValueSetLines, statusIndicatorApplyLines } from '@/lib/uiDesign/scriptLang/actionTable'
 import { dataListTemplateBounds, dataListTemplateDescendants } from '@/lib/uiDesign/dataListLayout'
 
 const LVGL_VERSION = '9.x'
@@ -866,14 +868,22 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
       lines.push(`${indent}lv_checkbox_set_text(${varName}, ${widgetTextLiteralWithIcon(widget)});`)
       if (widget.props.checked) lines.push(`${indent}lv_obj_add_state(${varName}, LV_STATE_CHECKED);`)
       break
-    case 'dropdown':
+    case 'dropdown': {
+      // Bound to a Data Source: starts empty (see UiOptionsSourceConfig.includeSampleDataInExport's
+      // doc comment — same "production firmware shouldn't silently ship design-time sample rows"
+      // reasoning as Data List) — the real options string is populated by <var>_RebuildOptions() /
+      // <var>_SetItems(), declared in extraWidgetDeclLines. Unbound: today's original static list.
+      const optionsLiteral = widget.optionsSource?.dataSourceId ? '""' : widgetTextLiteral(String(widget.props.options ?? ''))
       lines.push(`${indent}${varName} = lv_dropdown_create(${parentVar});`)
-      lines.push(`${indent}lv_dropdown_set_options(${varName}, ${widgetTextLiteral(String(widget.props.options ?? ''))});`)
+      lines.push(`${indent}lv_dropdown_set_options(${varName}, ${optionsLiteral});`)
       break
-    case 'roller':
+    }
+    case 'roller': {
+      const optionsLiteral = widget.optionsSource?.dataSourceId ? '""' : widgetTextLiteral(String(widget.props.options ?? ''))
       lines.push(`${indent}${varName} = lv_roller_create(${parentVar});`)
-      lines.push(`${indent}lv_roller_set_options(${varName}, ${widgetTextLiteral(String(widget.props.options ?? ''))}, LV_ROLLER_MODE_NORMAL);`)
+      lines.push(`${indent}lv_roller_set_options(${varName}, ${optionsLiteral}, LV_ROLLER_MODE_NORMAL);`)
       break
+    }
     case 'textarea':
       lines.push(`${indent}${varName} = lv_textarea_create(${parentVar});`)
       if (widget.props.placeholder) lines.push(`${indent}lv_textarea_set_placeholder_text(${varName}, ${widgetTextLiteral(String(widget.props.placeholder))});`)
@@ -892,7 +902,14 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
     case 'tabs': {
       lines.push(`${indent}${varName} = lv_tabview_create(${parentVar});`)
       lines.push(`${indent}lv_tabview_set_tab_bar_position(${varName}, LV_DIR_TOP);`)
-      const names = String(widget.props.tabNames ?? '').split('\n').filter(Boolean)
+      // Options Source-bound tabs are baked HERE, at export time, from the data source's own
+      // design-time sample data (resolveOptionsSourceLines' fallback-to-static-list branch covers
+      // the unbound case identically to before) — unlike dropdown/roller, LVGL's real tabview has
+      // no cheap way to change tab COUNT after creation (confirmed against the real v9.5 header:
+      // lv_tabview_set_tab_text() can rename an existing tab, but there's no delete/insert), so a
+      // real runtime SetItems() API isn't attempted here — see the Properties panel's own note and
+      // validateLvglExport.ts's matching informational check.
+      const names = resolveOptionsSourceLines(widget, uiDesign.dataSources, undefined).filter(Boolean)
       for (const name of names) {
         lines.push(`${indent}lv_tabview_add_tab(${varName}, ${JSON.stringify(name)});`)
       }
@@ -1020,52 +1037,371 @@ function imageFullScreenNeedsRoundClipWrapper(w: UiWidget, uiDesign: UiDesignPro
   return w.type === 'image' && w.style.imageFit === 'fullScreen' && uiDesign.display.shape === 'round' && isTopLevelUiWidget(uiDesign.widgets, w)
 }
 
+/** Real LVGL v9.5 focus-navigation helpers for a single Dropdown/Roller/Tabs widget — generated
+ * unconditionally for every widget of these 3 kinds (bound to a Data Source or not), matching the
+ * unconditional-companion-var precedent already established just below (e.g. bar/slider's
+ * `_default_value`). `_FocusNext`/`_FocusPrevious` move that widget's own internal selection with
+ * modulo wrap-around (LVGL's `lv_roller_set_selected`/`lv_dropdown_set_selected`/
+ * `lv_tabview_set_active` have no built-in wrap, unlike `lv_group_t`'s real default — see
+ * screenFocusNextFnName's own doc comment — so it's done by hand here); `_SelectFocused` fires
+ * `LV_EVENT_VALUE_CHANGED` on the widget so any bound handler (script-authored or the auto
+ * event-callback system) reacts exactly as if the user had operated it directly. Reading the
+ * option/tab count live from the widget itself (not from `w.optionsSource`/`w.props` at export
+ * time) is what makes these correctly "work with dynamically generated items from a Data Source" —
+ * they see whatever `_SetItems()`/the Options Source rebuild put there, not a stale export-time
+ * snapshot. All 3 APIs confirmed against the real LVGL v9.5 headers (lv_roller.h/lv_dropdown.h/
+ * lv_tabview.h) before writing this, not guessed. */
+function emitOptionsWidgetFocusHelpers(w: UiWidget, v: string, linkage: 'inline' | 'static'): string[] {
+  const lines: string[] = []
+  if (w.type === 'roller') {
+    lines.push(`${linkage} void ${v}_FocusNext() {`)
+    lines.push(`  uint32_t count = lv_roller_get_option_count(${v});`)
+    lines.push('  if (count == 0) return;')
+    lines.push(`  lv_roller_set_selected(${v}, (lv_roller_get_selected(${v}) + 1) % count, LV_ANIM_ON);`)
+    lines.push('}')
+    lines.push(`${linkage} void ${v}_FocusPrevious() {`)
+    lines.push(`  uint32_t count = lv_roller_get_option_count(${v});`)
+    lines.push('  if (count == 0) return;')
+    lines.push(`  lv_roller_set_selected(${v}, (lv_roller_get_selected(${v}) + count - 1) % count, LV_ANIM_ON);`)
+    lines.push('}')
+    lines.push(`${linkage} void ${v}_SelectFocused() { lv_obj_send_event(${v}, LV_EVENT_VALUE_CHANGED, nullptr); }`)
+  } else if (w.type === 'dropdown') {
+    lines.push(`${linkage} void ${v}_FocusNext() {`)
+    lines.push(`  uint32_t count = lv_dropdown_get_option_count(${v});`)
+    lines.push('  if (count == 0) return;')
+    lines.push(`  lv_dropdown_set_selected(${v}, (lv_dropdown_get_selected(${v}) + 1) % count);`)
+    lines.push('}')
+    lines.push(`${linkage} void ${v}_FocusPrevious() {`)
+    lines.push(`  uint32_t count = lv_dropdown_get_option_count(${v});`)
+    lines.push('  if (count == 0) return;')
+    lines.push(`  lv_dropdown_set_selected(${v}, (lv_dropdown_get_selected(${v}) + count - 1) % count);`)
+    lines.push('}')
+    lines.push(`${linkage} void ${v}_SelectFocused() { lv_obj_send_event(${v}, LV_EVENT_VALUE_CHANGED, nullptr); }`)
+  } else if (w.type === 'tabs') {
+    lines.push(`${linkage} void ${v}_FocusNext() {`)
+    lines.push(`  uint32_t count = lv_tabview_get_tab_count(${v});`)
+    lines.push('  if (count == 0) return;')
+    lines.push(`  lv_tabview_set_active(${v}, (lv_tabview_get_tab_active(${v}) + 1) % count, LV_ANIM_ON);`)
+    lines.push('}')
+    lines.push(`${linkage} void ${v}_FocusPrevious() {`)
+    lines.push(`  uint32_t count = lv_tabview_get_tab_count(${v});`)
+    lines.push('  if (count == 0) return;')
+    lines.push(`  lv_tabview_set_active(${v}, (lv_tabview_get_tab_active(${v}) + count - 1) % count, LV_ANIM_ON);`)
+    lines.push('}')
+    lines.push(`${linkage} void ${v}_SelectFocused() { lv_obj_send_event(${v}, LV_EVENT_VALUE_CHANGED, nullptr); }`)
+  }
+  return lines
+}
+
+/** Real runtime Options Source API for a single Dropdown/Roller widget bound to a UiDataSource —
+ * `<var>_options_items` (a `std::vector<StructName>`) + `<var>_RebuildOptions()` (joins each row's
+ * compiled `itemTemplate` into one real `lv_dropdown_set_options`/`lv_roller_set_options` string,
+ * "\n"-separated exactly like the widget's own static list already was) + `<var>_SetItems()`. Not
+ * used for Tabs — see widgetCreateCalls' 'tabs' case's own doc comment for why tab COUNT can't be
+ * cheaply changed after creation in real LVGL, so Tabs bakes its data source at export time
+ * instead of getting this runtime API. `baseCtx` supplies `data.<name>` Variable Manager
+ * reachability inside the compiled `{{}}` template, mirroring buildDataListTemplateCodegenCtx's
+ * own Data List precedent exactly. */
+function emitOptionsSourceRuntimeApi(w: UiWidget, v: string, linkage: 'inline' | 'static', uiDesign: UiDesignProject, baseCtx: CodegenContext): string[] {
+  const cfg = w.optionsSource
+  if (!cfg?.dataSourceId || (w.type !== 'dropdown' && w.type !== 'roller')) return []
+  const ds = uiDesign.dataSources.find((d) => d.id === cfg.dataSourceId)
+  if (!ds) return []
+  const structName = dataSourceStructName(ds)
+  const templateCtx = buildDataListTemplateCodegenCtx(baseCtx, ds)
+  const compiled = compileTemplateText(cfg.itemTemplate || '{{name}}', templateCtx)
+  const lines: string[] = []
+  lines.push(`${linkage} std::vector<${structName}> ${v}_options_items;`)
+  lines.push(`${linkage} void ${v}_RebuildOptions() {`)
+  lines.push(`  size_t n = ${v}_options_items.size();`)
+  if (cfg.maxItems > 0) lines.push(`  if (n > (size_t)${Math.round(cfg.maxItems)}) n = (size_t)${Math.round(cfg.maxItems)};`)
+  lines.push('  String opts = "";')
+  lines.push('  for (size_t i = 0; i < n; i++) {')
+  lines.push(`    const ${structName}& item = ${v}_options_items[i];`)
+  lines.push('    (void)item;')
+  lines.push('    if (i > 0) opts += "\\n";')
+  lines.push(`    opts += ${compiled.cppExpr};`)
+  lines.push('  }')
+  if (w.type === 'dropdown') lines.push(`  lv_dropdown_set_options(${v}, opts.c_str());`)
+  else lines.push(`  lv_roller_set_options(${v}, opts.c_str(), LV_ROLLER_MODE_NORMAL);`)
+  lines.push('}')
+  lines.push(`${linkage} void ${v}_SetItems(const ${structName}* itemsIn, size_t itemCount) { ${v}_options_items.assign(itemsIn, itemsIn + itemCount); ${v}_RebuildOptions(); }`)
+  lines.push(`${linkage} void ${v}_SetItems(const std::vector<${structName}>& itemsIn) { ${v}_SetItems(itemsIn.data(), itemsIn.size()); }`)
+  return lines
+}
+
+/** Widget types this feature's indicator helper/dispatch codegen covers today — bar/slider/arc/
+ * gauge (real numeric value + real animated-path LVGL setters) plus spinner (animation-only, no
+ * `value` concept in real LVGL). Adding a future indicator widget type is meant to be exactly
+ * this: one more type added here plus one more per-type branch inside
+ * emitIndicatorHelperFunctions — the global dispatch/function-name derivation/validation all
+ * already generalize over this one set. */
+const INDICATOR_WIDGET_TYPES = new Set<UiWidgetType>(['bar', 'slider', 'arc', 'gauge', 'spinner'])
+/** The subset of INDICATOR_WIDGET_TYPES with a real numeric LVGL `value` — spinner is
+ * deliberately excluded (no native setter exists to call), matching this exporter's existing
+ * Start/Stop-only ACTION_TABLE treatment of spinner. */
+export const INDICATOR_VALUE_WIDGET_TYPES = new Set<UiWidgetType>(['bar', 'slider', 'arc', 'gauge'])
+
+export function isIndicatorWidget(type: UiWidgetType): boolean {
+  return INDICATOR_WIDGET_TYPES.has(type)
+}
+
+/** The `<Base>` in `set<Base>Value`/`animate<Base>To`/etc — the Properties panel's "Function
+ * name" override (`props.functionName`) when set, else derived from the widget's own tagId/id the
+ * same way every other generated identifier in this exporter is (see widgetBaseName/toPascalCase),
+ * so a nameless indicator still gets a real, valid, collision-checked (see
+ * validateLvglExport.ts's "Function name collisions" category) function set for free. */
+export function indicatorFunctionBaseName(w: UiWidget): string {
+  const override = typeof w.props.functionName === 'string' ? w.props.functionName.trim() : ''
+  return toPascalCase(override || widgetBaseName(w))
+}
+
+/** Per-widget, beginner-friendly C++ helpers for a single indicator (see the spec's own example:
+ * `setProgressBarValue`/`setSliderValue`/`setGaugeValue`/`setArcValue`/`setMeterValue`, here
+ * generalized to any indicator via `indicatorFunctionBaseName`) —
+ * `set<Base>Value(value, animated)` (the plain native-anim path, matching the spec's own literal
+ * `lv_bar_set_value(bar, value, LV_ANIM_ON)` example exactly — `animated` branches at RUNTIME,
+ * unlike emitValueSetLines' compile-time `animEnabled` flag, which is built for script actions
+ * that already know the answer at author time), `animate<Base>(from, to, duration)` /
+ * `animate<Base>To(target, duration)` (the fuller hand-rolled loop/reverse/delay/easing system via
+ * emitIndicatorAnimStart, with a CALLER-supplied duration overriding the widget's own configured
+ * one), `start<Base>Animation()` (the widget's own configured min->max sweep — the exact same
+ * semantics `animAutoStart` already uses) / `stop<Base>Animation()` (real `lv_anim_delete`,
+ * matching the `stopIndicatorAnimation` script action's own cpp exactly), and `reset<Base>()`
+ * (back to `<var>_default_value`, matching `resetValue`'s own action exactly — see
+ * actionTable.ts). Spinner only gets Start/Stop (see INDICATOR_VALUE_WIDGET_TYPES). */
+function emitIndicatorHelperFunctions(w: UiWidget, v: string, linkage: 'inline' | 'static'): string[] {
+  if (!isIndicatorWidget(w.type)) return []
+  const base = indicatorFunctionBaseName(w)
+  const lines: string[] = []
+
+  if (w.type === 'spinner') {
+    const durationMs = Math.round(propNum(w, 'spinDurationMs', 1000))
+    const angle = Math.round(propNum(w, 'spinAngle', 60))
+    lines.push(`${linkage} void start${base}Animation() { lv_spinner_set_anim_params(${v}, (uint32_t)${durationMs}, ${angle}); }`)
+    lines.push(`${linkage} void stop${base}Animation() { lv_anim_delete(${v}, NULL); }`)
+    return lines
+  }
+  if (!INDICATOR_VALUE_WIDGET_TYPES.has(w.type)) return lines
+  const widgetType = w.type as 'bar' | 'slider' | 'arc' | 'gauge'
+
+  lines.push(`${linkage} void set${base}Value(int32_t value, bool animated = true) {`)
+  if (widgetType === 'arc') {
+    lines.push('  (void)animated;')
+    lines.push(`  lv_arc_set_value(${v}, value);`)
+  } else if (widgetType === 'gauge') {
+    lines.push('  (void)animated;')
+    lines.push(`  ${v}_value = value;`)
+    lines.push(`  lv_scale_set_line_needle_value(${v}, ${v}_needle, ${v}_needle_len, value);`)
+  } else {
+    const setter = widgetType === 'slider' ? 'lv_slider_set_value' : 'lv_bar_set_value'
+    lines.push(`  ${setter}(${v}, value, animated ? LV_ANIM_ON : LV_ANIM_OFF);`)
+  }
+  lines.push('}')
+
+  lines.push(`${linkage} void animate${base}(int32_t fromValue, int32_t toValue, uint32_t duration) {`)
+  lines.push(...emitIndicatorAnimStart(v, widgetType, w, 'fromValue', 'toValue', '  ', 'duration'))
+  lines.push('}')
+  lines.push(`${linkage} void animate${base}To(int32_t targetValue, uint32_t duration) { animate${base}(${currentValueExpr(v, widgetType)}, targetValue, duration); }`)
+
+  const minExpr = String(Math.round(propNum(w, 'min', 0)))
+  const maxExpr = String(Math.round(propNum(w, 'max', 100)))
+  lines.push(`${linkage} void start${base}Animation() {`)
+  lines.push(...emitIndicatorAnimStart(v, widgetType, w, minExpr, maxExpr, '  '))
+  lines.push('}')
+  lines.push(`${linkage} void stop${base}Animation() { lv_anim_delete(${v}, NULL); }`)
+
+  lines.push(`${linkage} void reset${base}() {`)
+  lines.push(...emitValueSetLines(v, widgetType, `${v}_default_value`, false).map((l) => `  ${l}`))
+  lines.push('}')
+
+  return lines
+}
+
+interface IndicatorDispatchEntry {
+  widgetId: string
+  base: string
+  hasValue: boolean
+}
+
+/** Every indicator widget WITH a Properties-panel ID (tagId) — the string the global
+ * `setIndicatorValue`/etc. dispatch functions below compare against, matching the spec's own
+ * literal examples (`setIndicatorValue("battery_bar", 75)`). An id-less indicator still gets its
+ * own per-widget functions (see emitIndicatorHelperFunctions) but has no external name to reach
+ * them by here — same "no id, no string-lookup access" rule FindWidget()/SetWidgetValue() already
+ * apply. */
+function collectIndicatorDispatchEntries(widgets: UiWidget[]): IndicatorDispatchEntry[] {
+  const entries: IndicatorDispatchEntry[] = []
+  for (const w of widgets) {
+    if (!isIndicatorWidget(w.type) || !w.tagId) continue
+    entries.push({ widgetId: w.tagId, base: indicatorFunctionBaseName(w), hasValue: INDICATOR_VALUE_WIDGET_TYPES.has(w.type) })
+  }
+  return entries
+}
+
+/** The spec's own global, beginner-friendly widget-id-string API — setIndicatorValue/
+ * animateIndicator/animateIndicatorTo/startIndicatorAnimation/stopIndicatorAnimation/
+ * resetIndicator — generated as a plain `strcmp` if-chain dispatching to each indicator's own
+ * per-widget function (emitIndicatorHelperFunctions), deliberately NOT runtime
+ * `lv_obj_check_type` introspection the way the pre-existing `SetWidgetValue` works. That
+ * distinction matters: a `lv_obj_t*` alone can't reach a gauge's own needle/needle_len
+ * companions, so a type-introspecting dispatcher structurally can't support gauge correctly. Since
+ * these dispatch on the AUTHORED id string instead, every call routes straight to code that
+ * already knows its own concrete widget type at COMPILE time — gauge (and any future indicator
+ * type added to INDICATOR_WIDGET_TYPES) "just works" with no new runtime type-detection needed.
+ * Plain global (non-namespaced, non-static) functions — matching the spec's own call examples
+ * (`setIndicatorValue(...)`, no namespace prefix) and callable from any translation unit that
+ * `#include`s ui.h, same as the per-widget functions' own external callers are meant to reach
+ * them. Must be emitted AFTER every screen's own widget declarations (which is where
+ * emitIndicatorHelperFunctions' per-widget functions actually live) — see generateKiboUIParts'
+ * own call site, right after the screens loop, not before it. */
+function emitGlobalIndicatorDispatch(widgets: UiWidget[]): string[] {
+  const entries = collectIndicatorDispatchEntries(widgets)
+  if (entries.length === 0) return []
+  const withValue = entries.filter((e) => e.hasValue)
+  const lines: string[] = []
+  lines.push('// ---- Indicator control API (Progress Bar/Slider/Gauge/Arc/Spinner/...) — dispatches by')
+  lines.push('// Properties-panel ID to each widget\'s own set<Name>Value/animate<Name>/start<Name>Animation/')
+  lines.push('// etc. functions declared above. Plain global functions, not namespaced — call these directly')
+  lines.push('// from anywhere, e.g. setIndicatorValue("battery_bar", 75). ----')
+  lines.push('void setIndicatorValue(const char* widgetId, int32_t value, bool animated = true) {')
+  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { set${e.base}Value(value, animated); return; }`)
+  lines.push('}')
+  lines.push('')
+  lines.push('void animateIndicator(const char* widgetId, int32_t fromValue, int32_t toValue, uint32_t duration) {')
+  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { animate${e.base}(fromValue, toValue, duration); return; }`)
+  lines.push('}')
+  lines.push('')
+  lines.push('void animateIndicatorTo(const char* widgetId, int32_t targetValue, uint32_t duration) {')
+  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { animate${e.base}To(targetValue, duration); return; }`)
+  lines.push('}')
+  lines.push('')
+  lines.push('void startIndicatorAnimation(const char* widgetId) {')
+  for (const e of entries) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { start${e.base}Animation(); return; }`)
+  lines.push('}')
+  lines.push('')
+  lines.push('void stopIndicatorAnimation(const char* widgetId) {')
+  for (const e of entries) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { stop${e.base}Animation(); return; }`)
+  lines.push('}')
+  lines.push('')
+  lines.push('void resetIndicator(const char* widgetId) {')
+  for (const e of withValue) lines.push(`  if (strcmp(widgetId, ${JSON.stringify(e.widgetId)}) == 0) { reset${e.base}(); return; }`)
+  lines.push('}')
+  return lines
+}
+
+/** The spec's `updateDataValue(name, value)` — the single entry point for pushing external/live
+ * data (a sensor reading, an API response, a runtime value) into a Variable Manager entry AND
+ * every indicator whose Data Binding (`.bindValue(data.<name>)`, see visualBindings.ts/
+ * codegen.ts's now-fixed per-type dispatch) is bound to it, in one call. Only numeric variables are
+ * eligible (the dispatcher's `value` is a plain `int32_t`, matching the spec's own
+ * `updateDataValue("batteryLevel", 83)` example). Plain global function, not namespaced — the
+ * variable's own setter it calls into IS namespaced (`${ns}::Set<Name>`), reached here via a fully
+ * qualified call. Must be emitted after every screen's own widget/binding-consuming code — see
+ * generateKiboUIParts' call site, same "after all screens" placement as
+ * emitGlobalIndicatorDispatch and for the identical reason (calls into per-widget indicator
+ * functions defined in each screen's own section). */
+function emitUpdateDataValueDispatcher(uiDesign: UiDesignProject, numericVariables: UiVariable[], ns: string): string[] {
+  if (numericVariables.length === 0) return []
+  const rows = parseVisualBindingRows(uiDesign.script, uiDesign.widgets).filter((r) => r.property === 'value')
+  const boundIndicatorsByVariable = new Map<string, UiWidget[]>()
+  for (const row of rows) {
+    const w = uiDesign.widgets[row.targetWidgetId]
+    if (!w || !INDICATOR_VALUE_WIDGET_TYPES.has(w.type)) continue
+    const list = boundIndicatorsByVariable.get(row.variableName) ?? []
+    list.push(w)
+    boundIndicatorsByVariable.set(row.variableName, list)
+  }
+  const lines: string[] = []
+  lines.push('// ---- updateDataValue — pushes a named value into its Variable Manager entry AND every')
+  lines.push('// indicator bound to it via Data Binding, e.g. updateDataValue("batteryLevel", 83). ----')
+  lines.push('void updateDataValue(const char* name, int32_t value) {')
+  for (const v of numericVariables) {
+    lines.push(`  if (strcmp(name, ${JSON.stringify(v.name)}) == 0) {`)
+    lines.push(`    ${ns}::${variableSetterName(v)}(value);`)
+    for (const w of boundIndicatorsByVariable.get(v.name) ?? []) {
+      lines.push(`    set${indicatorFunctionBaseName(w)}Value(value, true);`)
+    }
+    lines.push('    return;')
+    lines.push('  }')
+  }
+  lines.push('}')
+  return lines
+}
+
 /** Companion `lv_obj_t*`/tracker-variable declarations beyond a widget's own `${varName}` —
  * button's `_label` child was the sole existing case; extended here for bar/slider/arc/gauge's
  * `_default_value` (what the `resetValue` action resets to) and `_value_exec` trampoline (what
  * `emitIndicatorAnimStart`'s hand-rolled lv_anim_t targets — see actionTable.ts's
  * indicatorAnimSetterExpr), gauge's `_needle`/`_needle_len`/`_value` companions + `_needle_exec`
  * trampoline (lv_scale has no anim-friendly 2-arg needle setter, see emitValueSetLines' doc
- * comment in actionTable.ts), statusIndicator's `_dot`/`_label` children, and a Full-Screen
- * round-display image's `_clip` wrapper container (see imageFullScreenNeedsRoundClipWrapper).
- * Called identically from all 3 duplicated widget-declaration loops (UI Screen Only /
- * live-preview / Complete Project) — `linkage` is 'inline' for the header-only mode (C++17
- * inline vars/functions, see that mode's own item-8 fix) and 'static' for the other two (safe
- * there since they're single translation units). */
-function extraWidgetDeclLines(w: UiWidget, v: string, linkage: 'inline' | 'static', uiDesign: UiDesignProject): string[] {
+ * comment in actionTable.ts), statusIndicator's `_dot`/`_label` children, a Full-Screen
+ * round-display image's `_clip` wrapper container (see imageFullScreenNeedsRoundClipWrapper), and
+ * dropdown/roller/tabs' focus-navigation helpers + (dropdown/roller only) their Options Source
+ * runtime API (see emitOptionsWidgetFocusHelpers/emitOptionsSourceRuntimeApi). Called identically
+ * from all 3 duplicated widget-declaration loops (UI Screen Only / live-preview / Complete
+ * Project) — `linkage` is 'inline' for the header-only mode (C++17 inline vars/functions, see
+ * that mode's own item-8 fix) and 'static' for the other two (safe there since they're single
+ * translation units). `baseCtx` is whichever CodegenContext that call site already built for its
+ * own Data List/script codegen — only consulted by emitOptionsSourceRuntimeApi. */
+function extraWidgetDeclLines(w: UiWidget, v: string, linkage: 'inline' | 'static', uiDesign: UiDesignProject, baseCtx: CodegenContext): string[] {
   const lines: string[] = []
+  if (isOptionsSourceWidget(w.type)) {
+    lines.push(...emitOptionsWidgetFocusHelpers(w, v, linkage))
+    lines.push(...emitOptionsSourceRuntimeApi(w, v, linkage, uiDesign, baseCtx))
+  }
   if (w.type === 'button') lines.push(`${linkage} lv_obj_t* ${v}_label = nullptr;`)
   if (w.type === 'bar' || w.type === 'slider' || w.type === 'arc' || w.type === 'gauge') {
     const dflt = Math.round(propNum(w, 'defaultValue', propNum(w, 'value', 0)))
     lines.push(`${linkage} int32_t ${v}_default_value = ${dflt};`)
-    // Real event stubs for the spec's OnAnimationStarted()/OnAnimationFinished() — called by
-    // emitIndicatorAnimStart (see actionTable.ts) around every playIndicatorAnimation/
-    // animAutoStart run. Declared unconditionally (like every other companion here) rather than
-    // only when animation is actually used, so a script/Properties-panel action added later never
-    // needs new declarations threaded in — same tradeoff as _default_value's own always-on cost.
-    lines.push(`${linkage} void ${v}_on_anim_started() {`)
-    lines.push(`  // USER CODE BEGIN ${v}_on_anim_started`)
-    lines.push(`  // TODO: called when this indicator's animation starts`)
-    lines.push(`  // USER CODE END ${v}_on_anim_started`)
-    lines.push('}')
-    lines.push(`${linkage} void ${v}_on_anim_finished(lv_anim_t* a) {`)
-    lines.push('  (void)a;')
-    lines.push(`  // USER CODE BEGIN ${v}_on_anim_finished`)
-    lines.push(`  // TODO: called when this indicator's animation finishes (non-looping only)`)
-    lines.push(`  // USER CODE END ${v}_on_anim_finished`)
-    lines.push('}')
+    // Real event stubs for the spec's OnAnimationStarted()/OnAnimationUpdated(value)/
+    // OnAnimationFinished() — called by emitIndicatorAnimStart (see actionTable.ts) around every
+    // playIndicatorAnimation/animAutoStart run, and (Updated only) from the value/needle
+    // trampolines below on every animation frame. Optional — only declared when the Properties
+    // panel's "Animation events" checkbox (props.animEventsEnabled) is on for this widget, per the
+    // spec's own "generated only when enabled" requirement; emitIndicatorAnimStart checks the same
+    // flag before emitting calls into them, so the two can never disagree about whether these
+    // exist.
+    if (w.props.animEventsEnabled) {
+      lines.push(`${linkage} void ${v}_on_anim_started() {`)
+      lines.push(`  // USER CODE BEGIN ${v}_on_anim_started`)
+      lines.push(`  // TODO: called when this indicator's animation starts`)
+      lines.push(`  // USER CODE END ${v}_on_anim_started`)
+      lines.push('}')
+      lines.push(`${linkage} void ${v}_on_anim_updated(int32_t value) {`)
+      lines.push('  (void)value;')
+      lines.push(`  // USER CODE BEGIN ${v}_on_anim_updated`)
+      lines.push(`  // TODO: called on every frame of this indicator's animation with its current value`)
+      lines.push(`  // USER CODE END ${v}_on_anim_updated`)
+      lines.push('}')
+      lines.push(`${linkage} void ${v}_on_anim_finished(lv_anim_t* a) {`)
+      lines.push('  (void)a;')
+      lines.push(`  // USER CODE BEGIN ${v}_on_anim_finished`)
+      lines.push(`  // TODO: called when this indicator's animation finishes (non-looping only)`)
+      lines.push(`  // USER CODE END ${v}_on_anim_finished`)
+      lines.push('}')
+    }
   }
   if (w.type === 'bar') {
-    lines.push(`${linkage} void ${v}_value_exec(void* obj, int32_t val) { lv_bar_set_value((lv_obj_t*)obj, val, LV_ANIM_OFF); }`)
+    lines.push(`${linkage} void ${v}_value_exec(void* obj, int32_t val) { lv_bar_set_value((lv_obj_t*)obj, val, LV_ANIM_OFF);${w.props.animEventsEnabled ? ` ${v}_on_anim_updated(val);` : ''} }`)
   }
   if (w.type === 'slider') {
-    lines.push(`${linkage} void ${v}_value_exec(void* obj, int32_t val) { lv_slider_set_value((lv_obj_t*)obj, val, LV_ANIM_OFF); }`)
+    lines.push(`${linkage} void ${v}_value_exec(void* obj, int32_t val) { lv_slider_set_value((lv_obj_t*)obj, val, LV_ANIM_OFF);${w.props.animEventsEnabled ? ` ${v}_on_anim_updated(val);` : ''} }`)
+  }
+  // Arc's real native lv_arc_set_value(obj, int32_t) already fits lv_anim_exec_xcb_t's own 2-arg
+  // shape directly (no LV_ANIM_ON/OFF 3rd param to wrap, unlike bar/slider) — it still gets this
+  // small trampoline, rather than pointing lv_anim_set_exec_cb straight at lv_arc_set_value, purely
+  // so OnAnimationUpdated(value) has a real interception point to fire from on every frame.
+  if (w.type === 'arc') {
+    lines.push(`${linkage} void ${v}_value_exec(void* obj, int32_t val) { lv_arc_set_value((lv_obj_t*)obj, val);${w.props.animEventsEnabled ? ` ${v}_on_anim_updated(val);` : ''} }`)
   }
   if (w.type === 'gauge') {
     lines.push(`${linkage} lv_obj_t* ${v}_needle = nullptr;`)
     lines.push(`${linkage} int32_t ${v}_needle_len = 0;`)
     lines.push(`${linkage} int32_t ${v}_value = ${Math.round(propNum(w, 'value', 0))};`)
-    lines.push(`${linkage} void ${v}_needle_exec(void* obj, int32_t val) { ${v}_value = val; lv_scale_set_line_needle_value((lv_obj_t*)obj, ${v}_needle, ${v}_needle_len, val); }`)
+    lines.push(
+      `${linkage} void ${v}_needle_exec(void* obj, int32_t val) { ${v}_value = val; lv_scale_set_line_needle_value((lv_obj_t*)obj, ${v}_needle, ${v}_needle_len, val);${w.props.animEventsEnabled ? ` ${v}_on_anim_updated(val);` : ''} }`
+    )
   }
   if (w.type === 'statusIndicator') {
     lines.push(`${linkage} lv_obj_t* ${v}_dot = nullptr;`)
@@ -1074,6 +1410,11 @@ function extraWidgetDeclLines(w: UiWidget, v: string, linkage: 'inline' | 'stati
   if (imageFullScreenNeedsRoundClipWrapper(w, uiDesign)) {
     lines.push(`${linkage} lv_obj_t* ${v}_clip = nullptr;`)
   }
+  // Per-widget indicator helper functions (set<Base>Value/animate<Base>[To]/start|stop<Base>Animation/
+  // reset<Base>) — declared AFTER the companions above, since several of them (gauge's _needle/
+  // _needle_len/_value, bar/slider/arc's _value_exec, every type's _default_value) are what these
+  // functions actually call into.
+  lines.push(...emitIndicatorHelperFunctions(w, v, linkage))
   return lines
 }
 
@@ -1762,9 +2103,31 @@ function computeDataListInfo(
   baseCtx: CodegenContext,
   linkage: 'static' | 'inline',
   useUserCodeMarkers: boolean
-): { usedDataSourcesById: Map<string, UiDataSource>; infoByWidgetId: Map<string, DataListInfo> } {
+): {
+  usedDataSourcesById: Map<string, UiDataSource>
+  infoByWidgetId: Map<string, DataListInfo>
+  optionsSourceSampleSetupByWidgetId: Map<string, string[]>
+} {
   const usedDataSourcesById = new Map<string, UiDataSource>()
   const infoByWidgetId = new Map<string, DataListInfo>()
+  const optionsSourceSampleSetupByWidgetId = new Map<string, string[]>()
+  // Dropdown/Roller widgets bound via optionsSource (see emitOptionsSourceRuntimeApi) share this
+  // same struct-dedup set, so a data source used by both a Data List AND a Dropdown only ever gets
+  // one `struct <StructName> {...}` declared, not two conflicting copies — they contribute no
+  // DataListInfo entry (their own rebuild function is emitted by extraWidgetDeclLines, not here),
+  // just an optional initial-population block when "Include sample data in export" is on.
+  for (const w of widgets) {
+    if (w.type === 'dropdown' || w.type === 'roller') {
+      const ds = w.optionsSource?.dataSourceId ? uiDesign.dataSources.find((d) => d.id === w.optionsSource!.dataSourceId) : undefined
+      if (!ds) continue
+      usedDataSourcesById.set(ds.id, ds)
+      if (w.optionsSource!.includeSampleDataInExport) {
+        const varName = widgetVarName(w)
+        const lines = buildSampleItemsSetupLines(ds, dataSourceStructName(ds), `${varName}_SetItems`)
+        if (lines.length > 0) optionsSourceSampleSetupByWidgetId.set(w.id, lines)
+      }
+    }
+  }
   for (const w of widgets) {
     if (w.type !== 'dataList' || !w.dataListConfig?.dataSourceId) continue
     const ds = uiDesign.dataSources.find((d) => d.id === w.dataListConfig!.dataSourceId)
@@ -1780,34 +2143,41 @@ function computeDataListInfo(
     const apiLines = emitDataListRuntimeApi(varName, listObjExpr, structName, createFnName, clickCb?.handlerName ?? null, w.dataListConfig, linkage)
     const declLines = [...createLines, '', ...(clickCb ? clickCb.lines : []), ...(clickCb ? [''] : []), ...apiLines]
 
-    const sampleSetupLines: string[] = []
-    if (w.dataListConfig.includeSampleDataInExport) {
-      try {
-        const rows = JSON.parse(ds.sampleData || '[]')
-        if (Array.isArray(rows) && rows.length > 0) {
-          sampleSetupLines.push(`  { std::vector<${structName}> sample;`)
-          for (const row of rows) {
-            const fieldInits = ds.fields.map((f) => {
-              const ident = dataSourceFieldIdent(f)
-              const raw = row && typeof row === 'object' ? (row as Record<string, unknown>)[f.name] : undefined
-              if (f.type === 'bool') return `.${ident} = ${raw ? 'true' : 'false'}`
-              if (f.type === 'int') return `.${ident} = ${Math.round(typeof raw === 'number' ? raw : 0)}`
-              if (f.type === 'double') return `.${ident} = ${typeof raw === 'number' ? raw : 0}`
-              return `.${ident} = ${JSON.stringify(String(raw ?? ''))}`
-            })
-            sampleSetupLines.push(`    sample.push_back(${structName}{ ${fieldInits.join(', ')} });`)
-          }
-          sampleSetupLines.push(`    ${varName}_SetItems(sample); }`)
-        }
-      } catch {
-        // Invalid sample JSON — validateLvglExport.ts's "Data Sources" category surfaces this;
-        // silently skip emitting a bogus initial-population call here rather than breaking the build.
-      }
-    }
+    const sampleSetupLines = w.dataListConfig.includeSampleDataInExport ? buildSampleItemsSetupLines(ds, structName, `${varName}_SetItems`) : []
 
     infoByWidgetId.set(w.id, { ds, structName, declLines, errors, sampleSetupLines })
   }
-  return { usedDataSourcesById, infoByWidgetId }
+  return { usedDataSourcesById, infoByWidgetId, optionsSourceSampleSetupByWidgetId }
+}
+
+/** `{ std::vector<StructName> sample; sample.push_back(StructName{...}); ...; <setItemsCall>(sample); }`
+ * — a one-time initial-population block from a bound data source's own design-time sample rows,
+ * shared by Data List's `includeSampleDataInExport` (its original use) and Dropdown/Roller's
+ * identical Options Source flag (see emitOptionsSourceRuntimeApi) so the two can't drift apart.
+ * Empty array (no block emitted) for invalid/empty sample JSON — validateLvglExport.ts's "Options
+ * Source bindings"/Data Source checks surface that separately, this just skips silently rather
+ * than emitting broken C++. */
+function buildSampleItemsSetupLines(ds: UiDataSource, structName: string, setItemsCall: string): string[] {
+  try {
+    const rows = JSON.parse(ds.sampleData || '[]')
+    if (!Array.isArray(rows) || rows.length === 0) return []
+    const lines = [`  { std::vector<${structName}> sample;`]
+    for (const row of rows) {
+      const fieldInits = ds.fields.map((f) => {
+        const ident = dataSourceFieldIdent(f)
+        const raw = row && typeof row === 'object' ? (row as Record<string, unknown>)[f.name] : undefined
+        if (f.type === 'bool') return `.${ident} = ${raw ? 'true' : 'false'}`
+        if (f.type === 'int') return `.${ident} = ${Math.round(typeof raw === 'number' ? raw : 0)}`
+        if (f.type === 'double') return `.${ident} = ${typeof raw === 'number' ? raw : 0}`
+        return `.${ident} = ${JSON.stringify(String(raw ?? ''))}`
+      })
+      lines.push(`    sample.push_back(${structName}{ ${fieldInits.join(', ')} });`)
+    }
+    lines.push(`    ${setItemsCall}(sample); }`)
+    return lines
+  } catch {
+    return []
+  }
 }
 
 /** Every widget id that's a template descendant of ANY dataList widget in `widgets` — must be
@@ -2535,7 +2905,11 @@ export async function generateUiScreenExport(project: Project, screenId: string,
     screenFnNameByName: () => undefined,
     identForVariableName: () => undefined
   }
-  const { usedDataSourcesById, infoByWidgetId: dataListInfoByWidgetId } = computeDataListInfo(uiDesign, widgets, identByAssetId, rules, dataListBaseCtx, 'inline', true)
+  const {
+    usedDataSourcesById,
+    infoByWidgetId: dataListInfoByWidgetId,
+    optionsSourceSampleSetupByWidgetId
+  } = computeDataListInfo(uiDesign, widgets, identByAssetId, rules, dataListBaseCtx, 'inline', true)
 
   // List items — computed once up front (not inside emitWidget) so the same item vars/click
   // callback can be reused for the "Widget objects" declarations, the "Event Callbacks" section,
@@ -2739,7 +3113,7 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
         declared.add(v)
         c.push(`inline lv_obj_t* ${v} = nullptr;`)
       }
-      c.push(...extraWidgetDeclLines(w, v, 'inline', uiDesign))
+      c.push(...extraWidgetDeclLines(w, v, 'inline', uiDesign, dataListBaseCtx))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) c.push(`inline lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
@@ -2961,6 +3335,11 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
     c.push('  // call so the screen shows real rows immediately; remove this block once real data exists.')
     c.push(...info.sampleSetupLines)
   }
+  for (const lines of optionsSourceSampleSetupByWidgetId.values()) {
+    c.push('  // "Include sample data in export" was enabled for this Options Source binding —')
+    c.push('  // one-time SetItems() call so it shows real options immediately.')
+    c.push(...lines)
+  }
   if (firstFocusableVar) {
     c.push('  // Gives the first focusable widget on this screen a visible focused border the moment')
     c.push('  // the screen loads, instead of waiting for the first real encoder/keyboard input.')
@@ -3175,7 +3554,11 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
   // the "Data List codegen" section. Reuses the same CodegenContext the Logic tab's script codegen
   // already built above, so `data.<name>` (Variable Manager) stays reachable inside a `{{}}`
   // binding here, unlike the standalone "UI Screen Only" mode which has no script context.
-  const { usedDataSourcesById, infoByWidgetId: dataListInfoByWidgetId } = computeDataListInfo(uiDesign, widgets, identByAssetId, rules, baseCodegenCtx, 'static', false)
+  const {
+    usedDataSourcesById,
+    infoByWidgetId: dataListInfoByWidgetId,
+    optionsSourceSampleSetupByWidgetId
+  } = computeDataListInfo(uiDesign, widgets, identByAssetId, rules, baseCodegenCtx, 'static', false)
 
   const out: string[] = [
     `// ${screen.name} — live LVGL ${LVGL_VERSION} preview, regenerated automatically as you design.`,
@@ -3257,7 +3640,7 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
         declared.add(v)
         out.push(`static lv_obj_t* ${v} = nullptr;`)
       }
-      out.push(...extraWidgetDeclLines(w, v, 'static', uiDesign))
+      out.push(...extraWidgetDeclLines(w, v, 'static', uiDesign, baseCodegenCtx))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) out.push(`static lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
@@ -3414,6 +3797,10 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
     if (info.sampleSetupLines.length === 0) continue
     out.push('  // "Include sample data in export" was enabled for this Data List.')
     out.push(...info.sampleSetupLines)
+  }
+  for (const lines of optionsSourceSampleSetupByWidgetId.values()) {
+    out.push('  // "Include sample data in export" was enabled for this Options Source binding.')
+    out.push(...lines)
   }
   if (firstFocusableVar) out.push(`  if (${focusGroupVarName}) { lv_group_focus_obj(${firstFocusableVar}); }`)
   out.push(`  lv_group_focus_freeze(${focusGroupVarName}, false);`)
@@ -3817,6 +4204,13 @@ function generateKiboUIParts(
   // lines and every emitWidget() call site that applies one need to agree on the same font/varName.
   const customFontByWidgetId = collectCustomFontUsage(uiDesign, widgets)
   const usedCustomFonts = uniqueCustomFonts(customFontByWidgetId)
+  // Indicator control API — see emitGlobalIndicatorDispatch's own doc comment for why this is
+  // plain global functions dispatching on widget id, not a ${ns}::-namespaced method.
+  const indicatorDispatchEntries = collectIndicatorDispatchEntries(widgets)
+  // updateDataValue's own gate is independent of indicatorDispatchEntries above — it dispatches by
+  // VARIABLE name (any numeric Variable Manager entry), not by widget id, and still makes sense
+  // even for a project with no id-tagged indicators (it still updates the variable itself).
+  const numericVariablesForDataValue = uiDesign.variables.filter((v) => uiVariableExprType(v.type) === 'number')
 
   // ---- src/ui.h (public API) ----
   const h: string[] = [fileHeaderComment('ui.h', 'Public API for the generated UI — the only file your own code should #include.', false, mainShowFnName)]
@@ -3836,6 +4230,25 @@ function generateKiboUIParts(
   h.push('// ui.cpp) — read it any time you need to know which screen is currently on-display, e.g.')
   h.push('// to dispatch encoder input. ----')
   h.push('')
+  if (indicatorDispatchEntries.length > 0 || numericVariablesForDataValue.length > 0) {
+    h.push('// ---- Indicator control API — plain global functions (not namespaced), so any translation')
+    h.push('// unit that #includes this header can call them directly, e.g. setIndicatorValue("battery_bar", 75).')
+    h.push('// Defined in ui.cpp, dispatching by Properties-panel ID to the matching indicator widget. ----')
+    if (indicatorDispatchEntries.length > 0) {
+      h.push('void setIndicatorValue(const char* widgetId, int32_t value, bool animated = true);')
+      h.push('void animateIndicator(const char* widgetId, int32_t fromValue, int32_t toValue, uint32_t duration);')
+      h.push('void animateIndicatorTo(const char* widgetId, int32_t targetValue, uint32_t duration);')
+      h.push('void startIndicatorAnimation(const char* widgetId);')
+      h.push('void stopIndicatorAnimation(const char* widgetId);')
+      h.push('void resetIndicator(const char* widgetId);')
+    }
+    if (numericVariablesForDataValue.length > 0) {
+      h.push('// Pushes a named value (e.g. from the Variable Manager) into g_<name> and refreshes every')
+      h.push('// indicator whose Data Binding is bound to it, e.g. updateDataValue("batteryLevel", 83).')
+      h.push('void updateDataValue(const char* name, int32_t value);')
+    }
+    h.push('')
+  }
   h.push(`namespace ${ns} {`)
   h.push('')
   h.push('// Call once, after InitializeDisplay()/InitializeLVGL() — builds every screen and widget.')
@@ -4002,11 +4415,16 @@ function generateKiboUIParts(
   // screen (mirrors the keyboard-widget map just below) so a per-list "Include sample data in
   // export" SetItems() call lands inside the right screen's own create function, not every screen.
   const dataListBaseCtx = buildCodegenContext(uiDesign, rules, identByAssetId, ns)
-  const { usedDataSourcesById, infoByWidgetId: dataListInfoByWidgetId } = computeDataListInfo(uiDesign, widgets, identByAssetId, rules, dataListBaseCtx, 'static', true)
+  const {
+    usedDataSourcesById,
+    infoByWidgetId: dataListInfoByWidgetId,
+    optionsSourceSampleSetupByWidgetId
+  } = computeDataListInfo(uiDesign, widgets, identByAssetId, rules, dataListBaseCtx, 'static', true)
   const dataListOwnerScreenId = new Map<string, string>()
   for (const { screen } of screenFns) {
     for (const w of reachableWidgetsForScreen(uiDesign, screen)) {
       if (w.type === 'dataList' && dataListInfoByWidgetId.has(w.id)) dataListOwnerScreenId.set(w.id, screen.id)
+      if ((w.type === 'dropdown' || w.type === 'roller') && optionsSourceSampleSetupByWidgetId.has(w.id)) dataListOwnerScreenId.set(w.id, screen.id)
     }
   }
 
@@ -4134,7 +4552,7 @@ function generateKiboUIParts(
         declared.add(v)
         core.push(`static lv_obj_t* ${v} = nullptr;`)
       }
-      core.push(...extraWidgetDeclLines(w, v, 'static', uiDesign))
+      core.push(...extraWidgetDeclLines(w, v, 'static', uiDesign, dataListBaseCtx))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) core.push(`static lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
@@ -4465,6 +4883,11 @@ function generateKiboUIParts(
       core.push('  // "Include sample data in export" was enabled for this Data List.')
       core.push(...info.sampleSetupLines)
     }
+    for (const [widgetId, lines] of optionsSourceSampleSetupByWidgetId) {
+      if (dataListOwnerScreenId.get(widgetId) !== screen.id) continue
+      core.push('  // "Include sample data in export" was enabled for this Options Source binding.')
+      core.push(...lines)
+    }
     if (firstFocusableVar) {
       core.push('  // Gives the first focusable widget on this screen a visible focused border the moment')
       core.push('  // this screen is first created, instead of waiting for the first real encoder input.')
@@ -4508,6 +4931,15 @@ function generateKiboUIParts(
       core.push('  lv_obj_send_event(focused, LV_EVENT_CLICKED, nullptr);')
       core.push('}')
     }
+  }
+
+  if (indicatorDispatchEntries.length > 0) {
+    core.push('')
+    core.push(...emitGlobalIndicatorDispatch(widgets))
+  }
+  if (numericVariablesForDataValue.length > 0) {
+    core.push('')
+    core.push(...emitUpdateDataValueDispatcher(uiDesign, numericVariablesForDataValue, ns))
   }
 
   return { publicHeader: h.join('\n'), cppBody: [s.join('\n'), core.join('\n')].join('\n\n'), customFonts: usedCustomFonts }

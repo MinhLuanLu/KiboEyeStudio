@@ -35,7 +35,8 @@ import {
   defaultEditorState
 } from '@/types'
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
-import { createDefaultUiDesign, defaultKeyboardConfig } from '@/lib/uiDesign/widgetDefaults'
+import { createDefaultUiDesign, defaultKeyboardConfig, defaultOptionsSourceConfig } from '@/lib/uiDesign/widgetDefaults'
+import { isOptionsSourceWidget } from '@/lib/uiDesign/optionsSource'
 import { DEFAULT_UI_DISPLAY } from '@/types'
 import type {
   UiAsset,
@@ -55,6 +56,7 @@ import type {
   UiKeyboardCustomLayout,
   UiKeyboardEdgePadding,
   UiListItem,
+  UiOptionsSourceConfig,
   UiPositionInfoField,
   UiScreen,
   UiThemeId,
@@ -505,6 +507,17 @@ function normalizeDataListConfig(raw: unknown): UiDataListConfig | undefined {
   }
 }
 
+function normalizeOptionsSourceConfig(raw: unknown): UiOptionsSourceConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Partial<UiOptionsSourceConfig> & Record<string, unknown>
+  return {
+    dataSourceId: typeof r.dataSourceId === 'string' ? r.dataSourceId : null,
+    itemTemplate: typeof r.itemTemplate === 'string' ? r.itemTemplate : '{{name}}',
+    maxItems: typeof r.maxItems === 'number' ? r.maxItems : 0,
+    includeSampleDataInExport: Boolean(r.includeSampleDataInExport)
+  }
+}
+
 function normalizeUiDesign(raw: unknown): UiDesignProject {
   if (!raw || typeof raw !== 'object') return createDefaultUiDesign()
   const r = raw as Partial<UiDesignProject> & Record<string, unknown>
@@ -539,6 +552,11 @@ function normalizeUiDesign(raw: unknown): UiDesignProject {
         listItems: normalizeListItems(wr.listItems),
         keyboardConfig: normalizeKeyboardConfig(wr.keyboardConfig),
         dataListConfig: normalizeDataListConfig(wr.dataListConfig),
+        // Backfilled for dropdown/roller/tabs even on a project saved before this field existed —
+        // otherwise updateUiWidgetOptionsSource (which only mutates an already-present config,
+        // matching this file's own established dataListConfig/keyboardConfig convention) would
+        // silently no-op on every pre-existing widget of these 3 kinds.
+        optionsSource: normalizeOptionsSourceConfig(wr.optionsSource) ?? (isOptionsSourceWidget(wr.type as UiWidget['type']) ? defaultOptionsSourceConfig() : undefined),
         visibleWhenExpr: typeof wr.visibleWhenExpr === 'string' ? wr.visibleWhenExpr : undefined,
         themeTokens: wr.themeTokens && typeof wr.themeTokens === 'object' ? (wr.themeTokens as UiWidget['themeTokens']) : undefined
       }

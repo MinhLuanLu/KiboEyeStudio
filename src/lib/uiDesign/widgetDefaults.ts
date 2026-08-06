@@ -1,6 +1,37 @@
 import { nanoid } from 'nanoid'
 import { DEFAULT_UI_DISPLAY } from '@/types'
-import type { UiDataListConfig, UiDesignProject, UiKeyboardConfig, UiListItem, UiScreen, UiWidget, UiWidgetStyle, UiWidgetType } from '@/types'
+import type { UiDataListConfig, UiDesignProject, UiKeyboardConfig, UiListItem, UiOptionsSourceConfig, UiScreen, UiWidget, UiWidgetStyle, UiWidgetType } from '@/types'
+
+/** A fresh `UiOptionsSourceConfig` for a newly-dropped Dropdown/Roller/Tabs widget — no data
+ * source assigned yet, so the widget's own static `props.options`/`props.tabNames` list (still
+ * seeded below, unchanged) is what actually shows until the user picks one in the Properties
+ * panel's Options Source section. */
+export function defaultOptionsSourceConfig(): UiOptionsSourceConfig {
+  return { dataSourceId: null, itemTemplate: '{{name}}', maxItems: 0, includeSampleDataInExport: false }
+}
+
+/** Shared animation-config `props` fields for bar/slider/arc/gauge — previously read by codegen
+ * (`emitIndicatorAnimStart`, `actionTable.ts`) with hardcoded fallbacks but never actually seeded
+ * here, so a freshly-dropped indicator had no real authoring surface for them (the Properties
+ * panel's new IndicatorSection is what finally exposes these). `animEnabled` off by default so a
+ * plain bar/slider/arc/gauge keeps behaving exactly like today's "jump to value" widgets until the
+ * author opts in. `functionName: ''` = auto-derive from the widget's own tagId/id (see
+ * lvglExport.ts's indicatorFunctionBaseName). `animEventsEnabled` off by default — the
+ * OnAnimationStarted/Updated/Completed stubs are only generated when explicitly turned on. */
+function defaultIndicatorAnimProps(): Record<string, string | number | boolean> {
+  return {
+    step: 0,
+    animEnabled: false,
+    animDurationMs: 300,
+    animEasing: 'easeOut',
+    animLoop: false,
+    animReverse: false,
+    animDelayMs: 0,
+    animAutoStart: false,
+    animEventsEnabled: false,
+    functionName: ''
+  }
+}
 
 /** A fresh `UiDataListConfig` for a newly-dropped Data List widget — no data source assigned yet
  * (the user picks one in the Properties panel's Data section); the template subtree is built
@@ -70,6 +101,7 @@ const WIDGET_DEFAULTS: Record<
     listItems?: Omit<UiListItem, 'id'>[]
     keyboardConfig?: UiKeyboardConfig
     dataListConfig?: UiDataListConfig
+    optionsSource?: UiOptionsSourceConfig
   }
 > = {
   screen: { width: 240, height: 240 },
@@ -83,12 +115,12 @@ const WIDGET_DEFAULTS: Record<
   // `defaultValue` is captured once at creation time from the authored `value` — the "Reset"
   // action (see actionTable.ts) sets the widget back to this, not to `min`, so resetting a bar
   // someone deliberately authored at 40% doesn't silently jump to 0.
-  slider: { width: 120, height: 12, props: { min: 0, max: 100, value: 50, defaultValue: 50 } },
-  bar: { width: 120, height: 12, props: { min: 0, max: 100, value: 40, defaultValue: 40 } },
-  arc: { width: 80, height: 80, props: { min: 0, max: 100, value: 25, defaultValue: 25 } },
+  slider: { width: 120, height: 12, props: { min: 0, max: 100, value: 50, defaultValue: 50, ...defaultIndicatorAnimProps() } },
+  bar: { width: 120, height: 12, props: { min: 0, max: 100, value: 40, defaultValue: 40, ...defaultIndicatorAnimProps() } },
+  arc: { width: 80, height: 80, props: { min: 0, max: 100, value: 25, defaultValue: 25, ...defaultIndicatorAnimProps() } },
   checkbox: { width: 100, height: 20, text: 'Checkbox', props: { checked: false } },
-  dropdown: { width: 100, height: 32, props: { options: 'Option 1\nOption 2\nOption 3' } },
-  roller: { width: 100, height: 60, props: { options: 'Option 1\nOption 2\nOption 3' } },
+  dropdown: { width: 100, height: 32, props: { options: 'Option 1\nOption 2\nOption 3' }, optionsSource: defaultOptionsSourceConfig() },
+  roller: { width: 100, height: 60, props: { options: 'Option 1\nOption 2\nOption 3' }, optionsSource: defaultOptionsSourceConfig() },
   textarea: { width: 140, height: 60, props: { placeholder: 'Enter text...' } },
   list: {
     width: 140,
@@ -98,12 +130,20 @@ const WIDGET_DEFAULTS: Record<
       { widgetId: 'sound_item', text: 'Sound', iconSymbol: 'LV_SYMBOL_VOLUME_MAX', clickEventEnabled: true, encoderFocusEnabled: true }
     ]
   },
-  tabs: { width: 200, height: 120, props: { tabNames: 'Tab 1\nTab 2' } },
-  spinner: { width: 32, height: 32 },
+  tabs: { width: 200, height: 120, props: { tabNames: 'Tab 1\nTab 2' }, optionsSource: defaultOptionsSourceConfig() },
+  // Real LVGL spinner has no `value`/min/max concept — only duration/angle + start/stop, so it
+  // deliberately doesn't get defaultIndicatorAnimProps()'s value-animation fields (see
+  // lvglExport.ts's per-widget indicator helper codegen, which skips value-based functions for
+  // this type entirely — an established scope decision, not an oversight).
+  spinner: { width: 32, height: 32, props: { functionName: '' } },
   keyboard: { width: 220, height: 120, keyboardConfig: defaultKeyboardConfig() },
   // Real lv_scale + a built-in-positioned needle line (see lvglExport.ts's 'gauge' create case) —
   // angleRange/rotation 270/135 is the classic "opens at the bottom" automotive-gauge look.
-  gauge: { width: 90, height: 90, props: { min: 0, max: 100, value: 50, defaultValue: 50, totalTicks: 21, majorTickEvery: 5, angleRange: 270, rotation: 135 } },
+  gauge: {
+    width: 90,
+    height: 90,
+    props: { min: 0, max: 100, value: 50, defaultValue: 50, totalTicks: 21, majorTickEvery: 5, angleRange: 270, rotation: 135, ...defaultIndicatorAnimProps() }
+  },
   // Real lv_led widget — color/brightness map directly to lv_led_set_color/set_brightness.
   led: { width: 20, height: 20, props: { ledColor: '#22C55E', brightness: 100, state: 'off' } },
   // status drives color/icon/glow/animation entirely via statusIndicatorPresets.ts's shared table
@@ -139,7 +179,8 @@ export function createWidget(type: UiWidgetType): UiWidget {
     // Cloned (not the shared module-level default object) so two keyboard widgets never mutate
     // each other's config — same reasoning as listItems' fresh-id-per-item above.
     keyboardConfig: d.keyboardConfig ? { ...d.keyboardConfig } : undefined,
-    dataListConfig: d.dataListConfig ? { ...d.dataListConfig } : undefined
+    dataListConfig: d.dataListConfig ? { ...d.dataListConfig } : undefined,
+    optionsSource: d.optionsSource ? { ...d.optionsSource } : undefined
   }
 }
 

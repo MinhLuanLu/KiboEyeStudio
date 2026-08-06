@@ -4,7 +4,7 @@ import type { Node } from 'acorn'
 import { useStore } from '@/state/store'
 import { UI_BACKGROUND_IMAGE_WIDGETS, UI_ICON_TEXT_WIDGETS, UI_SRC_IMAGE_WIDGETS, UI_WIDGET_LABELS } from '@/types'
 import { checkExpressionSubset } from '@/lib/uiDesign/scriptLang/restrictedSubset'
-import type { UiImageFit, UiKeyboardCustomKey, UiLengthValue, UiListItem, UiThemeTokens, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
+import type { UiImageFit, UiIndicatorEasing, UiKeyboardCustomKey, UiLengthValue, UiListItem, UiThemeTokens, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
 import { MATERIAL_PRESET_LABELS } from '@/lib/uiDesign/materialPresets'
 import type { MaterialPresetId } from '@/lib/uiDesign/materialPresets'
 import { DEFAULT_ALT_CHARS } from '@/lib/uiDesign/keyboardLayouts'
@@ -12,8 +12,9 @@ import { missingDanishCodepoints } from '@/lib/uiDesign/fontImport'
 import { rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
 import { centerPanForRect, fitZoomToDisplay } from '@/lib/uiDesign/canvasZoom'
 import { isTopLevelUiWidget } from '@/lib/uiDesign/widgetGeometry'
+import { isOptionsSourceWidget, resolveOptionsSourceLines } from '@/lib/uiDesign/optionsSource'
 import { ACTION_TABLE, HARDWARE_ACTION_PRESETS } from '@/lib/uiDesign/scriptLang/actionTable'
-import { widgetVarName, widgetBaseName, toCIdentifier, EVENT_CAPABLE_WIDGET_TYPES, EVENT_CALLBACK_TRIGGER_OPTIONS } from '@/lib/export/lvglExport'
+import { widgetVarName, widgetBaseName, toCIdentifier, EVENT_CAPABLE_WIDGET_TYPES, EVENT_CALLBACK_TRIGGER_OPTIONS, isIndicatorWidget, indicatorFunctionBaseName } from '@/lib/export/lvglExport'
 import { IconPicker } from './IconPicker'
 import { LVGL_SYMBOLS } from '@/lib/uiDesign/lvglSymbols'
 import {
@@ -1864,6 +1865,263 @@ function TemplateTextField({ widget, allWidgets }: { widget: UiWidget; allWidget
  * many-to-many, so the binding lives here, on the widget that consumes it, not on the source
  * itself). See WidgetRenderer.tsx's DataListRepeatedRows for how this immediately drives the live
  * preview once picked, and lib/export/lvglExport.ts's Data List codegen for how it drives export. */
+const INDICATOR_EASING_OPTIONS: { value: UiIndicatorEasing; label: string }[] = [
+  { value: 'linear', label: 'Linear' },
+  { value: 'easeIn', label: 'Ease In' },
+  { value: 'easeOut', label: 'Ease Out' },
+  { value: 'easeInOut', label: 'Ease In/Out' },
+  { value: 'bounce', label: 'Bounce' },
+  { value: 'overshoot', label: 'Overshoot' }
+]
+
+function indicatorNumProp(widget: UiWidget, key: string, fallback: number): number {
+  const v = widget.props[key]
+  return typeof v === 'number' ? v : fallback
+}
+
+/** Progress Bar/Slider/Gauge/Arc/Spinner config — Min/Max/Value/Step + the Animation Controls
+ * (enable/duration/easing/loop/reverse/delay/auto-play) that drive both the live canvas preview's
+ * CSS transition (see indicatorEasing.ts) and the exported C++'s hand-rolled lv_anim_t (see
+ * lvglExport.ts's emitIndicatorAnimStart) — the same fields, read by both, so preview and export
+ * can never disagree about how a value change animates. The "Function name" field is the
+ * `set<Base>Value`/`animate<Base>`/etc. base name exported functions use (see
+ * indicatorFunctionBaseName) — left blank, it auto-derives from this widget's own ID, shown live
+ * as the input's placeholder so the field is never a mystery. Spinner has no real LVGL `value`
+ * concept (see INDICATOR_VALUE_WIDGET_TYPES in lvglExport.ts) so it only gets Duration/Angle. */
+function IndicatorSection({ widget }: { widget: UiWidget }) {
+  const updateUiWidgetProps = useStore((s) => s.updateUiWidgetProps)
+  const checkpoint = useStore((s) => s.checkpoint)
+  if (!isIndicatorWidget(widget.type)) return null
+  const isSpinner = widget.type === 'spinner'
+
+  const set = (partial: Record<string, string | number | boolean>) => {
+    checkpoint()
+    updateUiWidgetProps(widget.id, partial)
+  }
+
+  const animEnabled = Boolean(widget.props.animEnabled)
+  const defaultBase = indicatorFunctionBaseName({ ...widget, props: { ...widget.props, functionName: '' } })
+
+  return (
+    <div className="border-t border-studio-border pt-2.5 flex flex-col gap-2">
+      <span className="studio-label">Indicator</span>
+
+      {!isSpinner && (
+        <>
+          <div className="grid grid-cols-2 gap-2">
+            <NumberField label="Min" value={indicatorNumProp(widget, 'min', 0)} onChange={(v) => set({ min: v })} />
+            <NumberField label="Max" value={indicatorNumProp(widget, 'max', 100)} onChange={(v) => set({ max: v })} />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <NumberField label="Value" value={indicatorNumProp(widget, 'value', 0)} onChange={(v) => set({ value: v })} />
+            <div className="flex flex-col gap-1">
+              <span className="studio-label" title="0 = continuous (no snapping)">
+                Step
+              </span>
+              <input
+                type="number"
+                min={0}
+                className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-full"
+                value={Math.round(indicatorNumProp(widget, 'step', 0))}
+                onChange={(e) => set({ step: Math.max(0, Number(e.target.value) || 0) })}
+              />
+            </div>
+          </div>
+        </>
+      )}
+
+      <label className="flex items-center gap-2 text-xs">
+        <input type="checkbox" checked={animEnabled} onChange={(e) => set({ animEnabled: e.target.checked })} />
+        {isSpinner ? 'Spinning' : 'Animate value changes'}
+      </label>
+
+      {isSpinner ? (
+        animEnabled && (
+          <div className="grid grid-cols-2 gap-2">
+            <NumberField label="Duration (ms)" value={indicatorNumProp(widget, 'spinDurationMs', 1000)} onChange={(v) => set({ spinDurationMs: Math.max(1, v) })} />
+            <NumberField label="Angle" value={indicatorNumProp(widget, 'spinAngle', 60)} onChange={(v) => set({ spinAngle: Math.max(1, v) })} />
+          </div>
+        )
+      ) : (
+        <>
+          {animEnabled && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <NumberField label="Duration (ms)" value={indicatorNumProp(widget, 'animDurationMs', 300)} onChange={(v) => set({ animDurationMs: Math.max(1, v) })} />
+                <div className="flex flex-col gap-1">
+                  <span className="studio-label">Easing</span>
+                  <select
+                    className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+                    value={typeof widget.props.animEasing === 'string' ? widget.props.animEasing : 'easeOut'}
+                    onChange={(e) => set({ animEasing: e.target.value })}
+                  >
+                    {INDICATOR_EASING_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex items-center gap-2 text-xs">
+                  <input type="checkbox" checked={Boolean(widget.props.animLoop)} onChange={(e) => set({ animLoop: e.target.checked })} />
+                  Loop
+                </label>
+                <label className="flex items-center gap-2 text-xs">
+                  <input type="checkbox" checked={Boolean(widget.props.animReverse)} onChange={(e) => set({ animReverse: e.target.checked })} />
+                  Reverse
+                </label>
+              </div>
+              <NumberField label="Delay (ms)" value={indicatorNumProp(widget, 'animDelayMs', 0)} onChange={(v) => set({ animDelayMs: Math.max(0, v) })} />
+            </>
+          )}
+          <label className="flex items-center gap-2 text-xs">
+            <input type="checkbox" checked={Boolean(widget.props.animAutoStart)} onChange={(e) => set({ animAutoStart: e.target.checked })} />
+            Play automatically when the screen opens (sweeps Min → Max)
+          </label>
+        </>
+      )}
+
+      <label className="flex items-center gap-2 text-xs">
+        <input type="checkbox" checked={Boolean(widget.props.animEventsEnabled)} onChange={(e) => set({ animEventsEnabled: e.target.checked })} />
+        Animation events (OnAnimationStarted/Updated/Completed stubs in the export)
+      </label>
+
+      <div className="flex flex-col gap-1">
+        <span className="studio-label">Function name</span>
+        <input
+          className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm font-mono"
+          placeholder={defaultBase}
+          value={typeof widget.props.functionName === 'string' ? widget.props.functionName : ''}
+          onChange={(e) => set({ functionName: e.target.value })}
+        />
+        <span className="text-[10px] text-studio-muted">
+          {isSpinner ? `Exports as start${defaultBase}Animation()/stop${defaultBase}Animation()` : `Exports as set${defaultBase}Value()/animate${defaultBase}To()/etc.`}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+/** Options Source binding for Dropdown/Roller/Tabs — mirrors DataListSection's Data Source picker
+ * below, but produces one option/tab-name LINE per row (via a single-line `{{}}` template) instead
+ * of repeating a whole widget subtree. When no source is bound, the widget's own static per-line
+ * list (props.options / props.tabNames) is directly editable here too — this is the only editor
+ * for that static list anywhere in the app, so it needs to exist regardless of Data Source use. */
+function OptionsSourceSection({ widget }: { widget: UiWidget }) {
+  const dataSources = useStore((s) => s.project.uiDesign.dataSources)
+  const updateUiWidgetOptionsSource = useStore((s) => s.updateUiWidgetOptionsSource)
+  const updateUiWidgetProps = useStore((s) => s.updateUiWidgetProps)
+  const checkpoint = useStore((s) => s.checkpoint)
+  const config = widget.optionsSource
+  if (!config) return null
+
+  const set = (partial: Partial<typeof config>) => {
+    checkpoint()
+    updateUiWidgetOptionsSource(widget.id, partial)
+  }
+  const boundSource = dataSources.find((d) => d.id === config.dataSourceId)
+  const staticPropKey = widget.type === 'tabs' ? 'tabNames' : 'options'
+  const staticValue = String(widget.props[staticPropKey] ?? '')
+  const previewLines = resolveOptionsSourceLines(widget, dataSources, undefined).slice(0, 5)
+  const isTabs = widget.type === 'tabs'
+
+  return (
+    <div className="border-t border-studio-border pt-2.5 flex flex-col gap-2">
+      <span className="studio-label">Options Source</span>
+
+      <div className="flex flex-col gap-1">
+        <span className="text-[10px] text-studio-muted">Data source</span>
+        <select
+          className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+          value={config.dataSourceId ?? ''}
+          onChange={(e) => set({ dataSourceId: e.target.value || null })}
+        >
+          <option value="">(none — use the static list below)</option>
+          {dataSources.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+        {config.dataSourceId && !boundSource && <span className="text-[10px] text-red-400">This data source no longer exists.</span>}
+      </div>
+
+      {!config.dataSourceId && (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-studio-muted">{isTabs ? 'Tab names (one per line)' : 'Options (one per line)'}</span>
+          <textarea
+            rows={3}
+            className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm font-mono"
+            value={staticValue}
+            onChange={(e) => {
+              checkpoint()
+              updateUiWidgetProps(widget.id, { [staticPropKey]: e.target.value })
+            }}
+          />
+        </div>
+      )}
+
+      {config.dataSourceId && (
+        <>
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] text-studio-muted">Item template ({'{{field}}'} per row)</span>
+            <input
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm font-mono"
+              value={config.itemTemplate}
+              onChange={(e) => set({ itemTemplate: e.target.value })}
+              placeholder="{{name}}"
+            />
+            {boundSource && boundSource.fields.length > 0 && (
+              <span className="text-[10px] text-studio-muted">Fields: {boundSource.fields.map((f) => f.name).join(', ')}</span>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] text-studio-muted">Max items</span>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="number"
+                min={1}
+                disabled={config.maxItems === 0}
+                className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm flex-1 min-w-0 disabled:opacity-40"
+                value={config.maxItems === 0 ? '' : config.maxItems}
+                placeholder="Unlimited"
+                onChange={(e) => set({ maxItems: Math.max(1, Number(e.target.value) || 1) })}
+              />
+              <label className="flex items-center gap-1 text-[10px] text-studio-muted shrink-0 cursor-pointer" title="0 = unlimited">
+                <input type="checkbox" checked={config.maxItems === 0} onChange={(e) => set({ maxItems: e.target.checked ? 0 : 10 })} />∞
+              </label>
+            </div>
+          </div>
+
+          {isTabs ? (
+            <span className="text-[10px] text-studio-muted">
+              Tabs are baked from this data source's sample data at export time — LVGL's tab view has no cheap way to change tab count after
+              creation, so tabs won't update live once flashed. Use Dropdown, Roller, or a Data List for content that must update at runtime.
+            </span>
+          ) : (
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={config.includeSampleDataInExport} onChange={(e) => set({ includeSampleDataInExport: e.target.checked })} />
+              Include sample data in export (otherwise starts empty until app code calls SetItems)
+            </label>
+          )}
+
+          {previewLines.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] text-studio-muted">Preview</span>
+              <div className="text-xs text-studio-muted px-2 py-1 bg-studio-panel2 border border-studio-border rounded truncate">
+                {previewLines.join(isTabs ? ' | ' : ', ')}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 function DataListSection({ widget }: { widget: UiWidget }) {
   const dataSources = useStore((s) => s.project.uiDesign.dataSources)
   const updateUiDataListConfig = useStore((s) => s.updateUiDataListConfig)
@@ -2229,6 +2487,8 @@ export function PropertiesPanel() {
       {widget.type === 'textarea' && <TextareaOutputSection widget={widget} />}
       {widget.type === 'keyboard' && <KeyboardSection widget={widget} />}
       {widget.type === 'dataList' && <DataListSection widget={widget} />}
+      {isOptionsSourceWidget(widget.type) && <OptionsSourceSection widget={widget} />}
+      {isIndicatorWidget(widget.type) && <IndicatorSection widget={widget} />}
       {isDataListTemplateDescendant(allWidgets, widget.id) && <VisibleWhenField widget={widget} />}
 
       <div className="border-t border-studio-border pt-2.5 flex flex-col gap-2.5">

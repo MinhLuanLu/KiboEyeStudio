@@ -1,9 +1,9 @@
 import * as acorn from 'acorn'
 import type { Node, Program } from 'acorn'
-import type { UiWidget } from '@/types'
+import type { UiWidget, UiWidgetType } from '@/types'
 import { selectFirst } from '@/lib/uiDesign/selectors'
 import type { ScriptError } from './parser'
-import { ACTION_TABLE, CODEGEN_SPECIAL_METHODS, currentValueExpr, emitIndicatorAnimStart, statusIndicatorApplyLines, valueGetCall } from './actionTable'
+import { ACTION_TABLE, CODEGEN_SPECIAL_METHODS, currentValueExpr, emitIndicatorAnimStart, emitValueSetLines, statusIndicatorApplyLines, valueGetCall } from './actionTable'
 import { walkAllNodes } from './astWalk'
 import { checkExpressionSubset } from './restrictedSubset'
 import { parseTemplateText } from './templateExpr'
@@ -134,6 +134,10 @@ interface BindingEntry {
    * A5's PropertiesPanel BindingsSection / visualBindings.ts. `fallback` is intentionally not
    * read at codegen time (see parseBindingOptions' own comment) — min/max/format/unit only. */
   optionsNode?: Node
+  /** The bound target's own widget type — only meaningful for `method === 'bindValue'`, which
+   * needs it to call the real per-type LVGL setter (see emitValueSetLines in actionTable.ts)
+   * instead of assuming every bound widget is a bar. */
+  widgetType: UiWidgetType
 }
 
 interface BindingOptions {
@@ -561,7 +565,7 @@ class Emitter {
     }
     if (method === 'bindText' || method === 'bindValue' || method === 'bindVisible') {
       const optionsNode = argNodes[1] && argNodes[1].type === 'ObjectExpression' ? argNodes[1] : undefined
-      this.bindings.push({ receiverText: varName, varName, method, argNode: argNodes[0], optionsNode })
+      this.bindings.push({ receiverText: varName, varName, method, argNode: argNodes[0], optionsNode, widgetType: widget.type })
       return { text: '', type: 'unknown' }
     }
     if (method === 'animate') {
@@ -930,7 +934,7 @@ class Emitter {
         const value = this.renderExpr(b.argNode)
         const opts = this.parseBindingOptions(b.optionsNode)
         if (b.method === 'bindText') lines.push(`lv_label_set_text(${b.varName}, (${this.renderBindTextExpr(value, opts)}).c_str());`)
-        else if (b.method === 'bindValue') lines.push(`lv_bar_set_value(${b.varName}, (int32_t)(${this.renderBindValueExpr(value, opts)}), LV_ANIM_OFF);`)
+        else if (b.method === 'bindValue') lines.push(...emitValueSetLines(b.varName, b.widgetType, this.renderBindValueExpr(value, opts), false))
         else lines.push(`if (${this.asBoolCondition(b.argNode)}) { lv_obj_remove_flag(${b.varName}, LV_OBJ_FLAG_HIDDEN); } else { lv_obj_add_flag(${b.varName}, LV_OBJ_FLAG_HIDDEN); }`)
       }
       this.updateBindingsFnLines = lines
