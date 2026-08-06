@@ -176,7 +176,26 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
       status = status === 'warning' ? status : 'warning'
       messages.push(`${bevelApproximations.length} widget(s) use the "Bevel" surface style — approximated with a single border color (LVGL has no true per-edge border color/highlight): ${bevelApproximations.join(', ')}.`)
     }
-    if (shadowConflicts.length === 0 && bevelApproximations.length === 0) {
+    // "Fit Width"/"Fit Height" compute a real lv_image_set_scale() zoom factor from the widget's
+    // own literal pixel width/height vs. the assigned asset's natural size (see lvglExport.ts's
+    // widgetCreateCalls 'image' case) — a percentage/auto size or a widget with no image assigned
+    // yet has no fixed pixel box to compute that factor from at export time, so it falls back to
+    // Contain instead of guessing. Flagged here so that fallback isn't mistaken for a bug.
+    const imageFitFallbacks: string[] = []
+    for (const w of widgets) {
+      if (w.type !== 'image') continue
+      if (w.style.imageFit !== 'fitWidth' && w.style.imageFit !== 'fitHeight') continue
+      const hasLiteralPxBox = typeof w.style.width === 'number' && typeof w.style.height === 'number'
+      const hasAsset = !!w.src && uiDesign.assets.some((a) => a.id === w.src)
+      if (!hasLiteralPxBox || !hasAsset) imageFitFallbacks.push(w.tagId ?? w.id)
+    }
+    if (imageFitFallbacks.length > 0) {
+      status = status === 'warning' ? status : 'warning'
+      messages.push(
+        `${imageFitFallbacks.length} widget(s) use "Fit Width"/"Fit Height" but don't have both a literal pixel Width+Height and an assigned image — falls back to Contain in the export: ${imageFitFallbacks.join(', ')}.`
+      )
+    }
+    if (shadowConflicts.length === 0 && bevelApproximations.length === 0 && imageFitFallbacks.length === 0) {
       messages.push('No approximated advanced-style effects in this scope.')
     }
     results.push({ category: 'Advanced style fidelity', status, messages })
@@ -230,6 +249,18 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
       }
     }
     messages.push(`${usedAssetIds.size} asset(s) will be included.`)
+    // GIFs animate live in the design canvas (M6 fix — the asset's dataUrl now keeps the real
+    // GIF bytes instead of a rasterized single frame), but LVGL export has no GIF-playback path
+    // (same "no bitmap animation on this target" limitation stickers already document) — bakes
+    // whichever frame the browser's <img> decoder has current at export time. Flagged so this
+    // isn't mistaken for a bug once the exported firmware shows a static image.
+    const usedGifAssets = uiDesign.assets.filter((a) => usedAssetIds.has(a.id) && a.sourceFormat === 'GIF')
+    if (usedGifAssets.length > 0) {
+      status = status === 'failed' ? status : 'warning'
+      messages.push(
+        `${usedGifAssets.length} animated GIF asset(s) will export as a single static frame — LVGL export has no GIF-playback path: ${usedGifAssets.map((a) => a.name).join(', ')}.`
+      )
+    }
     results.push({ category: 'UI assets', status, messages })
   }
 

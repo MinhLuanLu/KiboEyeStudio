@@ -77,7 +77,7 @@ const WIDGET_DEFAULTS: Record<
   flex: { width: 200, height: 80, style: { flexDirection: 'row', gap: 6, alignItems: 'center' } },
   button: { width: 100, height: 40, text: 'Button' },
   label: { width: 80, height: 20, text: 'Label' },
-  image: { width: 64, height: 64 },
+  image: { width: 64, height: 64, style: { imageFit: 'contain' } },
   icon: { width: 24, height: 24, text: '', style: { fontSize: 24 } },
   switch: { width: 40, height: 20 },
   // `defaultValue` is captured once at creation time from the authored `value` — the "Reset"

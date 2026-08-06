@@ -20,7 +20,9 @@
 // `sanitizeIdentifier`/`sanitizeFilename` (see naming.ts) — nothing here hardcodes this app's own
 // name into exported files, classes, functions, folders, comments, or namespaces.
 
-import type { Project, UiAsset, UiCssRule, UiCustomFont, UiDataListConfig, UiDataSource, UiDataSourceField, UiDesignProject, UiDisplaySettings, UiKeyboardConfig, UiListItem, UiScreen, UiVariable, UiWidget, UiWidgetStateName, UiWidgetStyle, UiWidgetType } from '@/types'
+import type { Project, UiAsset, UiCssRule, UiCustomFont, UiDataListConfig, UiDataSource, UiDataSourceField, UiDesignProject, UiDisplaySettings, UiImageFit, UiKeyboardConfig, UiListItem, UiScreen, UiVariable, UiWidget, UiWidgetStateName, UiWidgetStyle, UiWidgetType } from '@/types'
+import { computeFitWidthOrHeightScale } from '@/lib/uiDesign/imageFit'
+import { isTopLevelUiWidget } from '@/lib/uiDesign/widgetGeometry'
 import { UI_WIDGET_LABELS } from '@/types'
 import { decodeDataUrlToRgba } from '@/lib/import/uiAssetImport'
 import { matchesSelector } from '@/lib/uiDesign/selectors'
@@ -706,12 +708,16 @@ export function lengthToLvglSize(v: UiWidget['style']['width']): string {
   return 'LV_SIZE_CONTENT'
 }
 
-function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string, identByAssetId: Map<string, string>, indent: string): string[] {
+function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string, identByAssetId: Map<string, string>, uiDesign: UiDesignProject, indent: string): string[] {
   const lines: string[] = []
-  const x = typeof widget.style.x === 'number' ? Math.round(widget.style.x) : 0
-  const y = typeof widget.style.y === 'number' ? Math.round(widget.style.y) : 0
-  const width = lengthToLvglSize(widget.style.width)
-  const height = lengthToLvglSize(widget.style.height)
+  // `let` (not `const`) — the 'image' case's Full Screen fit mode overrides these to match the
+  // display (or `lv_pct(100)` of the parent, for a nested widget — see UiImageFit's own doc
+  // comment) instead of the widget's own authored x/y/width/height, so the trailing
+  // lv_obj_set_pos/set_size calls below emit the resolved values, not stale authored ones.
+  let x = typeof widget.style.x === 'number' ? Math.round(widget.style.x) : 0
+  let y = typeof widget.style.y === 'number' ? Math.round(widget.style.y) : 0
+  let width = lengthToLvglSize(widget.style.width)
+  let height = lengthToLvglSize(widget.style.height)
 
   switch (widget.type) {
     case 'container':
@@ -734,12 +740,84 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
       lines.push(`${indent}lv_label_set_text(${varName}, ${widgetTextLiteralWithIcon(widget)});`)
       break
     case 'image': {
-      lines.push(`${indent}${varName} = lv_image_create(${parentVar});`)
+      const fit: UiImageFit = widget.style.imageFit ?? 'contain'
+      let imageParentVar = parentVar
+
+      if (fit === 'fullScreen') {
+        // "Full Screen" overrides this widget's own position/size — top-level widgets match the
+        // display exactly; a nested widget (inside a container/Data-List-row/etc, where "the
+        // display" has no unambiguous meaning) falls back to filling its own immediate parent
+        // instead. The exact same documented scope decision as the live preview's
+        // fullScreenBoxCss in WidgetRenderer.tsx — see UiImageFit's own doc comment.
+        if (isTopLevelUiWidget(uiDesign.widgets, widget)) {
+          x = 0
+          y = 0
+          width = String(Math.round(uiDesign.display.width))
+          height = String(Math.round(uiDesign.display.height))
+          if (imageFullScreenNeedsRoundClipWrapper(widget, uiDesign)) {
+            // Real LVGL v9 can't reliably clip an lv_image object's own drawn content directly
+            // via lv_obj_set_style_clip_corner (a known issue — see
+            // imageFullScreenNeedsRoundClipWrapper's own doc comment for the source); the
+            // confirmed-working technique is a plain lv_obj_t wrapper, clipped to a circle, with
+            // the image as its only child, sized to fill it exactly.
+            const wrapVar = `${varName}_clip`
+            lines.push(`${indent}${wrapVar} = lv_obj_create(${parentVar});`)
+            lines.push(`${indent}lv_obj_remove_style_all(${wrapVar});`)
+            lines.push(`${indent}lv_obj_set_pos(${wrapVar}, 0, 0);`)
+            lines.push(`${indent}lv_obj_set_size(${wrapVar}, ${width}, ${height});`)
+            lines.push(`${indent}lv_obj_set_style_radius(${wrapVar}, LV_RADIUS_CIRCLE, 0);`)
+            lines.push(`${indent}lv_obj_set_style_clip_corner(${wrapVar}, true, 0);`)
+            imageParentVar = wrapVar
+          }
+        } else {
+          x = 0
+          y = 0
+          width = 'lv_pct(100)'
+          height = 'lv_pct(100)'
+        }
+      }
+
+      lines.push(`${indent}${varName} = lv_image_create(${imageParentVar});`)
       const ident = widget.src ? identByAssetId.get(widget.src) : undefined
       if (ident) lines.push(`${indent}lv_image_set_src(${varName}, &${ident});`)
       else lines.push(`${indent}// No image asset assigned in the Asset Manager for this image yet.`)
       if (widget.style.rotation) {
         lines.push(`${indent}lv_image_set_rotation(${varName}, ${Math.round(widget.style.rotation * 10)}); // 0.1-degree units`)
+      }
+
+      // Image Fit — real LVGL v9 lv_image_set_inner_align()/LV_IMAGE_ALIGN_* covers 4 of the 7
+      // modes directly (it only takes effect once the object has an explicit, non-
+      // LV_SIZE_CONTENT size, which the trailing lv_obj_set_size() call below always gives it —
+      // confirmed against the real LVGL docs, not guessed). 'fitWidth'/'fitHeight' have no
+      // matching enum value, so those compute a real lv_image_set_scale() zoom factor by hand
+      // (see imageFit.ts's computeFitWidthOrHeightScale — the same math the live preview uses)
+      // and center the result the same way CENTER alignment already does.
+      if (fit === 'fitWidth' || fit === 'fitHeight') {
+        const asset = widget.src ? uiDesign.assets.find((a) => a.id === widget.src) : undefined
+        const isLiteralPxBox = typeof widget.style.width === 'number' && typeof widget.style.height === 'number'
+        if (asset && isLiteralPxBox) {
+          const boxW = widget.style.width as number
+          const boxH = widget.style.height as number
+          const scale = computeFitWidthOrHeightScale(asset.naturalWidth, asset.naturalHeight, boxW, boxH, fit)
+          lines.push(`${indent}lv_image_set_scale(${varName}, ${Math.round(scale * 256)});`)
+          lines.push(`${indent}lv_image_set_inner_align(${varName}, LV_IMAGE_ALIGN_CENTER);`)
+        } else {
+          // No literal pixel size and/or no assigned image asset to compute an exact zoom factor
+          // from — falls back to Contain rather than emitting a wrong/guessed scale. Flagged by
+          // validateLvglExport.ts so this isn't mistaken for a bug once seen in the export.
+          lines.push(`${indent}// "${fit}" needs a literal pixel width+height and a known image asset to compute an exact`)
+          lines.push(`${indent}// LVGL zoom factor — falling back to Contain (see the export validation panel's warning).`)
+          lines.push(`${indent}lv_image_set_inner_align(${varName}, LV_IMAGE_ALIGN_CONTAIN);`)
+        }
+      } else {
+        const alignByFit: Record<Exclude<UiImageFit, 'fitWidth' | 'fitHeight'>, string> = {
+          fill: 'LV_IMAGE_ALIGN_STRETCH',
+          contain: 'LV_IMAGE_ALIGN_CONTAIN',
+          cover: 'LV_IMAGE_ALIGN_COVER',
+          none: 'LV_IMAGE_ALIGN_CENTER',
+          fullScreen: 'LV_IMAGE_ALIGN_COVER'
+        }
+        lines.push(`${indent}lv_image_set_inner_align(${varName}, ${alignByFit[fit]});`)
       }
       break
     }
@@ -930,18 +1008,31 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
   return lines
 }
 
+/** True only for a top-level (see isTopLevelUiWidget) Image widget in Full Screen fit mode on a
+ * round display — the one case that needs an extra circular-clip wrapper container, since real
+ * LVGL v9 can't reliably clip an `lv_image_t` object's own drawn content directly via
+ * `lv_obj_set_style_clip_corner` (a known issue — https://github.com/lvgl/lvgl/issues/5987); the
+ * confirmed-working technique is wrapping the image in a plain `lv_obj_t` and clipping that
+ * instead (see widgetCreateCalls' 'image' case). Shared by that function and
+ * extraWidgetDeclLines (which needs to know whether to declare the wrapper's own `${v}_clip`
+ * variable) so the two conditions can never drift apart. */
+function imageFullScreenNeedsRoundClipWrapper(w: UiWidget, uiDesign: UiDesignProject): boolean {
+  return w.type === 'image' && w.style.imageFit === 'fullScreen' && uiDesign.display.shape === 'round' && isTopLevelUiWidget(uiDesign.widgets, w)
+}
+
 /** Companion `lv_obj_t*`/tracker-variable declarations beyond a widget's own `${varName}` —
  * button's `_label` child was the sole existing case; extended here for bar/slider/arc/gauge's
  * `_default_value` (what the `resetValue` action resets to) and `_value_exec` trampoline (what
  * `emitIndicatorAnimStart`'s hand-rolled lv_anim_t targets — see actionTable.ts's
  * indicatorAnimSetterExpr), gauge's `_needle`/`_needle_len`/`_value` companions + `_needle_exec`
  * trampoline (lv_scale has no anim-friendly 2-arg needle setter, see emitValueSetLines' doc
- * comment in actionTable.ts), and statusIndicator's `_dot`/`_label` children. Called identically
- * from all 3 duplicated widget-declaration loops (UI Screen Only / live-preview / Complete
- * Project) — `linkage` is 'inline' for the header-only mode (C++17 inline vars/functions, see
- * that mode's own item-8 fix) and 'static' for the other two (safe there since they're single
- * translation units). */
-function extraWidgetDeclLines(w: UiWidget, v: string, linkage: 'inline' | 'static'): string[] {
+ * comment in actionTable.ts), statusIndicator's `_dot`/`_label` children, and a Full-Screen
+ * round-display image's `_clip` wrapper container (see imageFullScreenNeedsRoundClipWrapper).
+ * Called identically from all 3 duplicated widget-declaration loops (UI Screen Only /
+ * live-preview / Complete Project) — `linkage` is 'inline' for the header-only mode (C++17
+ * inline vars/functions, see that mode's own item-8 fix) and 'static' for the other two (safe
+ * there since they're single translation units). */
+function extraWidgetDeclLines(w: UiWidget, v: string, linkage: 'inline' | 'static', uiDesign: UiDesignProject): string[] {
   const lines: string[] = []
   if (w.type === 'button') lines.push(`${linkage} lv_obj_t* ${v}_label = nullptr;`)
   if (w.type === 'bar' || w.type === 'slider' || w.type === 'arc' || w.type === 'gauge') {
@@ -979,6 +1070,9 @@ function extraWidgetDeclLines(w: UiWidget, v: string, linkage: 'inline' | 'stati
   if (w.type === 'statusIndicator') {
     lines.push(`${linkage} lv_obj_t* ${v}_dot = nullptr;`)
     lines.push(`${linkage} lv_obj_t* ${v}_label = nullptr;`)
+  }
+  if (imageFullScreenNeedsRoundClipWrapper(w, uiDesign)) {
+    lines.push(`${linkage} lv_obj_t* ${v}_clip = nullptr;`)
   }
   return lines
 }
@@ -1515,7 +1609,7 @@ function emitDataListItemCreateFn(
       lines.push(`  lv_obj_t* ${node.varName}_dot;`)
       lines.push(`  lv_obj_t* ${node.varName}_label;`)
     }
-    lines.push(...widgetCreateCalls(node.widget, node.varName, node.parentVarName, identByAssetId, '  '))
+    lines.push(...widgetCreateCalls(node.widget, node.varName, node.parentVarName, identByAssetId, uiDesign, '  '))
     lines.push(...styleApplyCalls(node.widget, rules, node.varName, '  '))
     if (hasTemplateExpr(node.widget.text)) {
       const compiled = compileTemplateText(node.widget.text ?? '', templateCtx)
@@ -2645,7 +2739,7 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
         declared.add(v)
         c.push(`inline lv_obj_t* ${v} = nullptr;`)
       }
-      c.push(...extraWidgetDeclLines(w, v, 'inline'))
+      c.push(...extraWidgetDeclLines(w, v, 'inline', uiDesign))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) c.push(`inline lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
@@ -2734,7 +2828,7 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
     if (widget.tagId) {
       const fnName = uniqueFnName(widgetCreateFnName(widget))
       const fnBuffer: string[] = []
-      fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, '  '))
+      fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, uiDesign, '  '))
       if (kbVars) fnBuffer.push(...keyboardConfigureLines(widget, varName, kbVars, '  '))
       fnBuffer.push(...customFontStyleLine(widget, varName, customFontByWidgetId, '  '))
       if (isFocusable) fnBuffer.push(`  lv_obj_add_style(${varName}, &${focusedStyleVarName}, LV_PART_MAIN | LV_STATE_FOCUSED);`)
@@ -2752,7 +2846,7 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
       namedFnBuffers.push([`inline lv_obj_t* ${fnName}(lv_obj_t* parent) {`, ...fnBuffer, '}'])
       buffer.push(`${indent}${fnName}(${parentVar});`)
     } else {
-      buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, indent))
+      buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, uiDesign, indent))
       if (kbVars) buffer.push(...keyboardConfigureLines(widget, varName, kbVars, indent))
       buffer.push(...customFontStyleLine(widget, varName, customFontByWidgetId, indent))
       if (isFocusable) buffer.push(`${indent}lv_obj_add_style(${varName}, &${focusedStyleVarName}, LV_PART_MAIN | LV_STATE_FOCUSED);`)
@@ -3163,7 +3257,7 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
         declared.add(v)
         out.push(`static lv_obj_t* ${v} = nullptr;`)
       }
-      out.push(...extraWidgetDeclLines(w, v, 'static'))
+      out.push(...extraWidgetDeclLines(w, v, 'static', uiDesign))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) out.push(`static lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
@@ -3257,7 +3351,7 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
     if (widget.tagId) {
       const fnName = uniqueFnName(widgetCreateFnName(widget))
       const fnBuffer: string[] = []
-      fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, '  '))
+      fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, uiDesign, '  '))
       if (kbVars) fnBuffer.push(...keyboardConfigureLines(widget, varName, kbVars, '  '))
       fnBuffer.push(...customFontStyleLine(widget, varName, customFontByWidgetId, '  '))
       if (isFocusable) fnBuffer.push(`  lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
@@ -3274,7 +3368,7 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
       namedFnBuffers.push([`static lv_obj_t* ${fnName}(lv_obj_t* parent) {`, ...fnBuffer, '}'])
       buffer.push(`${indent}${fnName}(${parentVar});`)
     } else {
-      buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, indent))
+      buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, uiDesign, indent))
       if (kbVars) buffer.push(...keyboardConfigureLines(widget, varName, kbVars, indent))
       buffer.push(...customFontStyleLine(widget, varName, customFontByWidgetId, indent))
       if (isFocusable) buffer.push(`${indent}lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
@@ -4040,7 +4134,7 @@ function generateKiboUIParts(
         declared.add(v)
         core.push(`static lv_obj_t* ${v} = nullptr;`)
       }
-      core.push(...extraWidgetDeclLines(w, v, 'static'))
+      core.push(...extraWidgetDeclLines(w, v, 'static', uiDesign))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) core.push(`static lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
@@ -4301,7 +4395,7 @@ function generateKiboUIParts(
     if (widget.tagId) {
       const fnName = uniqueFnName(widgetCreateFnName(widget))
       const fnBuffer: string[] = []
-      fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, '  '))
+      fnBuffer.push(...widgetCreateCalls(widget, varName, 'parent', identByAssetId, uiDesign, '  '))
       if (kbVars) fnBuffer.push(...keyboardConfigureLines(widget, varName, kbVars, '  '))
       fnBuffer.push(...customFontStyleLine(widget, varName, customFontByWidgetId, '  '))
       if (isFocusable) fnBuffer.push(`  lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)
@@ -4319,7 +4413,7 @@ function generateKiboUIParts(
       screenNamedBuffers.push([`static lv_obj_t* ${fnName}(lv_obj_t* parent) {`, ...fnBuffer, '}'])
       buffer.push(`${indent}${fnName}(${parentVar});`)
     } else {
-      buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, indent))
+      buffer.push(...widgetCreateCalls(widget, varName, parentVar, identByAssetId, uiDesign, indent))
       if (kbVars) buffer.push(...keyboardConfigureLines(widget, varName, kbVars, indent))
       buffer.push(...customFontStyleLine(widget, varName, customFontByWidgetId, indent))
       if (isFocusable) buffer.push(`${indent}lv_obj_add_style(${varName}, &s_focusedStyle, LV_PART_MAIN | LV_STATE_FOCUSED);`)

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '@/state/store'
 import type { UiSnapGuide } from '@/state/store'
-import type { UiAsset, UiDesignProject, UiWidget, UiWidgetType, UiWorkspaceViewSettings } from '@/types'
+import type { UiAsset, UiDesignProject, UiImageFit, UiWidget, UiWidgetType, UiWorkspaceViewSettings } from '@/types'
+import { computeFitWidthOrHeightRect } from '@/lib/uiDesign/imageFit'
 import { applySnap, computeSpacingIndicators, type SnapContext, type SnapRect } from '@/lib/uiDesign/snapEngine'
 import { computeEffectiveStyle } from '@/lib/uiDesign/cssCascade'
 import { clampRectToDisplayShape, classifyWidgetVisibility, rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
@@ -141,10 +142,12 @@ export function styleToCss(style: UiWidget['style'], esp32Preview = false): Reac
           : style.justifyContent,
     alignItems: style.alignItems === 'start' ? 'flex-start' : style.alignItems === 'end' ? 'flex-end' : style.alignItems,
     gap: style.gap,
-    overflow: style.overflow,
-    // CSS object-fit has no 'stretch' keyword — LVGL/UiWidgetStyle's 'stretch' (ignore aspect
-    // ratio, fill the box) is CSS's 'fill'.
-    objectFit: style.imageFit === 'stretch' ? 'fill' : style.imageFit
+    overflow: style.overflow
+    // No `objectFit` here — this function builds the OUTER positioned <div>'s style, and
+    // `object-fit` only has any effect on a replaced element (<img>/<video>), never a plain
+    // <div>. The Image widget's actual fit mode is applied directly to its own <img> element in
+    // WidgetInner's 'image' case below (see computeImageFitCss), which is the element it can
+    // actually affect.
   }
   return css
 }
@@ -442,18 +445,38 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
         <>{widget.text || '●'}</>
       )
     }
-    case 'image':
-      return asset ? (
-        <img
-          src={asset.dataUrl}
-          alt=""
-          className="w-full h-full"
-          style={{ objectFit: widget.style.imageFit === 'stretch' ? 'fill' : (widget.style.imageFit ?? 'contain') }}
-          draggable={false}
-        />
-      ) : (
-        <>IMAGE</>
-      )
+    case 'image': {
+      if (!asset) return <>IMAGE</>
+      const fit: UiImageFit = widget.style.imageFit ?? 'contain'
+      // 'fitWidth'/'fitHeight' have no CSS object-fit keyword (object-fit can only make BOTH axes
+      // agree with contain/cover — there's no "match exactly one axis" mode), so these two are
+      // computed by hand via the shared imageFit.ts math (the same function the LVGL exporter
+      // uses for its zoom factor, so preview and export can't disagree) and rendered as an
+      // explicitly-sized+positioned <img> inside an overflow:hidden box that crops it exactly
+      // like object-fit's other modes already crop themselves.
+      if (fit === 'fitWidth' || fit === 'fitHeight') {
+        const boxW = typeof widget.style.width === 'number' ? widget.style.width : asset.naturalWidth
+        const boxH = typeof widget.style.height === 'number' ? widget.style.height : asset.naturalHeight
+        const rect = computeFitWidthOrHeightRect(asset.naturalWidth, asset.naturalHeight, boxW, boxH, fit)
+        return (
+          <div className="w-full h-full relative overflow-hidden">
+            <img
+              src={asset.dataUrl}
+              alt=""
+              draggable={false}
+              style={{ position: 'absolute', left: rect.offsetX, top: rect.offsetY, width: rect.renderWidth, height: rect.renderHeight }}
+            />
+          </div>
+        )
+      }
+      // fill/contain/cover/none map directly onto real CSS object-fit keywords. 'fullScreen'
+      // scales its own picture exactly like 'cover' does ("scale and clip the image to fit the
+      // display shape") — the widget's own box being resized to match the display is handled
+      // separately, in WidgetRenderer's outer commonProps.style below, since that's a
+      // position/size concern, not a picture-fit concern.
+      const objectFit = fit === 'fullScreen' ? 'cover' : fit
+      return <img src={asset.dataUrl} alt="" className="w-full h-full" style={{ objectFit }} draggable={false} />
+    }
     case 'switch': {
       const on = Boolean(widget.props.checked)
       return (
@@ -1435,6 +1458,23 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     transform: transformParts.length > 0 ? transformParts.join(' ') : undefined
   })
 
+  // "Full Screen" (Image Fit) — overrides this widget's own position/size to match the display
+  // exactly (top-level widgets) or fill its immediate parent (nested widgets, where "the
+  // display" has no unambiguous meaning inside an arbitrary ancestor chain — a documented scope
+  // decision, see UiImageFit's own doc comment). Computed fresh at every render from the CURRENT
+  // display size, never written back into widget.style — toggling Full Screen off instantly
+  // restores whatever size/position was authored before, and the box stays correct live if the
+  // display is resized/reshaped later, with no extra effect/subscription needed. The round-shape
+  // clip this produces "for free" comes from Canvas.tsx's own display box, which every widget
+  // already renders inside (`overflow: hidden` + `border-radius: 50%` — see that file) — no
+  // separate clip-path is needed here.
+  const isFullScreenImage = widget.type === 'image' && effectiveStyle.imageFit === 'fullScreen'
+  const fullScreenBoxCss: React.CSSProperties = isFullScreenImage
+    ? isTopLevelWidget
+      ? { left: 0, top: 0, width: display.width, height: display.height }
+      : { left: 0, top: 0, width: '100%', height: '100%' }
+    : {}
+
   // Runtime-only "disabled" state, set by the script API's widget.setEnabled(false)/.disable()
   // (see scriptLang/actionTable.ts) via widget.props.disabled — a live.props mutation, not a
   // persisted design property, matching how props.value already drives bar/slider/arc live.
@@ -1472,6 +1512,7 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     className: `kibo-ui-widget kibo-ui-widget--${widget.type}`,
     style: {
       ...css,
+      ...fullScreenBoxCss,
       position: 'absolute' as const,
       outline: affected || revealed
         ? '2px solid #22c55e'

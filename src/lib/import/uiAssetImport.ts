@@ -45,12 +45,10 @@ function guessSourceFormat(file: File): string {
   return ext ? ext.toUpperCase() : 'IMAGE'
 }
 
-/** Decodes any raster format the browser's own <img> can display — PNG/JPG/BMP/WebP, and for
- * GIF just its first frame (drawing an <img> pointed at an animated GIF captures whatever frame
- * is current at draw time, which is frame 0 immediately after `onload`; UiAsset has no multi-
- * frame/animation fields, unlike StickerAsset, since a placed UI image is normally static —
- * logos/icons/backgrounds, not animated effects). No format-specific decode path needed for any
- * of these — the browser handles all of them identically via the same <img>+canvas route. */
+/** Decodes any static raster format the browser's own <img> can display — PNG/JPG/BMP/WebP —
+ * via the same <img>+canvas route for all of them. GIF is routed to `decodeGifAsset` instead
+ * (see its own comment): drawing an animated GIF into a canvas only ever captures whichever
+ * single frame happened to be current at draw time, which would silently strip the animation. */
 export async function decodeUiImageAsset(file: File): Promise<DecodedUiAsset> {
   const objectUrl = URL.createObjectURL(file)
   try {
@@ -59,6 +57,36 @@ export async function decodeUiImageAsset(file: File): Promise<DecodedUiAsset> {
   } finally {
     URL.revokeObjectURL(objectUrl)
   }
+}
+
+function isGifFile(file: File): boolean {
+  return file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif')
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(new UiAssetImportError('Could not read that image file.'))
+    reader.readAsDataURL(file)
+  })
+}
+
+/** GIF files keep their real, unmodified bytes as the asset's `dataUrl` instead of going through
+ * `drawToCanvas()` like every other format — `ctx.drawImage()` + `toDataURL()` only ever captures
+ * one frame (whichever was current at draw time), which would silently rasterize an animated GIF
+ * into a static PNG. Preserving the original GIF bytes means `<img src=...>`/CSS
+ * `background-image` (both already used by WidgetRenderer.tsx to render asset references) play
+ * it back natively — no new rendering code needed, exactly like any other <img>-hosted GIF on the
+ * web. Also not resized to `MAX_ASSET_DIM` like other formats: resizing an animated GIF through a
+ * canvas would flatten it to a single frame for the same reason drawToCanvas can't be used at
+ * all — an oversized GIF is a save-file-size tradeoff surfaced via the Asset Manager's byte-size
+ * readout, matching this project's existing "large assets bloat the save file, noted in the UI,
+ * not silently resolved" precedent already established for custom sticker imports. */
+async function decodeGifAsset(file: File): Promise<DecodedUiAsset> {
+  const dataUrl = await readFileAsDataUrl(file)
+  const img = await loadImage(dataUrl)
+  return { dataUrl, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight, sourceFormat: 'GIF' }
 }
 
 /** Rasterizes an SVG file to a bitmap — genuinely new code, not a reuse of the existing SVG
@@ -89,6 +117,7 @@ export async function decodeSvgAsset(file: File): Promise<DecodedUiAsset> {
 
 export async function decodeUiAssetFile(file: File): Promise<DecodedUiAsset> {
   if (file.type === 'image/svg+xml' || file.name.toLowerCase().endsWith('.svg')) return decodeSvgAsset(file)
+  if (isGifFile(file)) return decodeGifAsset(file)
   return decodeUiImageAsset(file)
 }
 

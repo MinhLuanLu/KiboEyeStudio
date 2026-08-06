@@ -153,6 +153,17 @@ export const UI_TOOLBOX_WIDGETS: UiWidgetType[] = [
 
 export type UiLengthValue = number | 'auto' | `${number}%`
 
+/** How an Image widget's picture fills its own widget box — mirrors CSS `object-fit` for the
+ * first four (fill=CSS 'fill', contain/cover/none map 1:1) plus three CSS has no keyword for:
+ * 'fitWidth'/'fitHeight' (scale so exactly one axis matches the box, aspect preserved, the other
+ * axis may overflow/be cropped — see lib/uiDesign/imageFit.ts's computeFitWidthOrHeightRect for
+ * the shared math both the live preview and the LVGL exporter use so they can't disagree), and
+ * 'fullScreen' (the widget's own position/size is overridden to match the display exactly —
+ * top-level widgets only, see WidgetRenderer.tsx/lvglExport.ts's isTopLevelUiWidget — with the
+ * picture itself scaled 'cover'-style and clipped to the display's shape). Exported to real LVGL
+ * v9 `lv_image_set_inner_align()`/`LV_IMAGE_ALIGN_*` at export time — see lvglExport.ts. */
+export type UiImageFit = 'fill' | 'contain' | 'cover' | 'fitWidth' | 'fitHeight' | 'fullScreen' | 'none'
+
 /** Flat bag of every CSS-mapped style property this pass supports — all optional, unset means
  * "use the LVGL default for this widget kind". Mirrors the property list from the feature spec;
  * see lib/uiDesign/cssSync.ts CSS_TO_STYLE_MAP for the exact CSS-property <-> field mapping. */
@@ -193,7 +204,11 @@ export interface UiWidgetStyle {
   alignItems?: 'start' | 'center' | 'end'
   gap?: number
   overflow?: 'visible' | 'hidden' | 'scroll'
-  imageFit?: 'contain' | 'cover' | 'stretch'
+  /** How the Image widget's own picture fills its widget box — the 7 modes match CSS
+   * `object-fit` (fill/contain/cover/none) plus 3 that CSS has no keyword for (fitWidth/
+   * fitHeight/fullScreen — see UiImageFit's own doc comment). Only meaningful on `image`-typed
+   * widgets (UI_SRC_IMAGE_WIDGETS); unset defaults to 'contain' at render/export time. */
+  imageFit?: UiImageFit
   /** Asset id (see UiAsset) used as a background image — available on any widget kind (screen,
    * container/flex/list/tabs, button, ...), not just the dedicated Image widget. Reuses the
    * existing per-state style system (UiWidgetStateStyles) for free, so "different image per

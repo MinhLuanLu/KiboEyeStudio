@@ -4,13 +4,14 @@ import type { Node } from 'acorn'
 import { useStore } from '@/state/store'
 import { UI_BACKGROUND_IMAGE_WIDGETS, UI_ICON_TEXT_WIDGETS, UI_SRC_IMAGE_WIDGETS, UI_WIDGET_LABELS } from '@/types'
 import { checkExpressionSubset } from '@/lib/uiDesign/scriptLang/restrictedSubset'
-import type { UiKeyboardCustomKey, UiLengthValue, UiListItem, UiThemeTokens, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
+import type { UiImageFit, UiKeyboardCustomKey, UiLengthValue, UiListItem, UiThemeTokens, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
 import { MATERIAL_PRESET_LABELS } from '@/lib/uiDesign/materialPresets'
 import type { MaterialPresetId } from '@/lib/uiDesign/materialPresets'
 import { DEFAULT_ALT_CHARS } from '@/lib/uiDesign/keyboardLayouts'
 import { missingDanishCodepoints } from '@/lib/uiDesign/fontImport'
 import { rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
 import { centerPanForRect, fitZoomToDisplay } from '@/lib/uiDesign/canvasZoom'
+import { isTopLevelUiWidget } from '@/lib/uiDesign/widgetGeometry'
 import { ACTION_TABLE, HARDWARE_ACTION_PRESETS } from '@/lib/uiDesign/scriptLang/actionTable'
 import { widgetVarName, widgetBaseName, toCIdentifier, EVENT_CAPABLE_WIDGET_TYPES, EVENT_CALLBACK_TRIGGER_OPTIONS } from '@/lib/export/lvglExport'
 import { IconPicker } from './IconPicker'
@@ -92,15 +93,26 @@ const BACKGROUND_SIZE_OPTIONS: { value: NonNullable<UiWidgetStyle['backgroundSiz
   { value: 'tile', label: 'Tile' }
 ]
 
-function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
+const IMAGE_FIT_OPTIONS: { value: UiImageFit; label: string }[] = [
+  { value: 'fill', label: 'Fill' },
+  { value: 'contain', label: 'Contain' },
+  { value: 'cover', label: 'Cover' },
+  { value: 'fitWidth', label: 'Fit Width' },
+  { value: 'fitHeight', label: 'Fit Height' },
+  { value: 'fullScreen', label: 'Full Screen' },
+  { value: 'none', label: 'None' }
+]
+
+function NumberField({ label, value, onChange, disabled }: { label: string; value: number; onChange: (v: number) => void; disabled?: boolean }) {
   return (
     <div className="flex flex-col gap-1">
       <span className="studio-label">{label}</span>
       <input
         type="number"
-        className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-full"
+        className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-full disabled:opacity-50"
         value={Math.round(value)}
         onChange={(e) => onChange(Number(e.target.value))}
+        disabled={disabled}
       />
     </div>
   )
@@ -126,15 +138,26 @@ function lengthToInputText(v: UiLengthValue | undefined): string {
  * lvglExport.ts maps a percentage to LVGL's lv_pct()) so a widget sized this way keeps its
  * proportion automatically when the display size changes, instead of needing the rescale
  * store.ts applies to plain-px widgets on a display resize. */
-function LengthField({ label, value, onChange }: { label: string; value: UiLengthValue | undefined; onChange: (v: UiLengthValue) => void }) {
+function LengthField({
+  label,
+  value,
+  onChange,
+  disabled
+}: {
+  label: string
+  value: UiLengthValue | undefined
+  onChange: (v: UiLengthValue) => void
+  disabled?: boolean
+}) {
   return (
     <div className="flex flex-col gap-1">
       <span className="studio-label">{label}</span>
       <input
-        className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-full font-mono"
+        className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-full font-mono disabled:opacity-50"
         defaultValue={lengthToInputText(value)}
         key={lengthToInputText(value)}
         placeholder="px, %, or auto"
+        disabled={disabled}
         onBlur={(e) => {
           const parsed = parseLengthInput(e.target.value)
           if (parsed !== undefined) onChange(parsed)
@@ -2067,6 +2090,13 @@ export function PropertiesPanel() {
   const setAppearance = (partial: Partial<UiWidgetStyle>) =>
     stateTab === 'default' ? updateUiWidgetStyle(widget.id, partial) : updateUiWidgetState(widget.id, stateTab, partial)
 
+  // "Full Screen" Image Fit takes over the widget's own position/size at render/export time (see
+  // WidgetRenderer.tsx's fullScreenBoxCss / lvglExport.ts's image codegen) without touching the
+  // stored style — so the X/Y/Width/Height fields below are disabled and show the live resolved
+  // values instead of stale numbers that no longer match what's actually rendered.
+  const isFullScreenImage = widget.type === 'image' && appearance.imageFit === 'fullScreen'
+  const isTopLevel = isTopLevelUiWidget(allWidgets, widget)
+
   return (
     <div className="p-3 flex flex-col gap-3">
       <div className="flex items-center justify-between">
@@ -2127,13 +2157,31 @@ export function PropertiesPanel() {
       )}
 
       <div className="grid grid-cols-2 gap-2">
-        <NumberField label="X" value={x} onChange={(v) => updateUiWidgetStyle(widget.id, { x: v })} />
-        <NumberField label="Y" value={y} onChange={(v) => updateUiWidgetStyle(widget.id, { y: v })} />
-        <LengthField label="Width" value={style.width} onChange={(v) => updateUiWidgetStyle(widget.id, { width: v })} />
-        <LengthField label="Height" value={style.height} onChange={(v) => updateUiWidgetStyle(widget.id, { height: v })} />
+        <NumberField label="X" value={isFullScreenImage ? 0 : x} onChange={(v) => updateUiWidgetStyle(widget.id, { x: v })} disabled={isFullScreenImage} />
+        <NumberField label="Y" value={isFullScreenImage ? 0 : y} onChange={(v) => updateUiWidgetStyle(widget.id, { y: v })} disabled={isFullScreenImage} />
+        <LengthField
+          label="Width"
+          value={isFullScreenImage ? (isTopLevel ? display.width : '100%') : style.width}
+          onChange={(v) => updateUiWidgetStyle(widget.id, { width: v })}
+          disabled={isFullScreenImage}
+        />
+        <LengthField
+          label="Height"
+          value={isFullScreenImage ? (isTopLevel ? display.height : '100%') : style.height}
+          onChange={(v) => updateUiWidgetStyle(widget.id, { height: v })}
+          disabled={isFullScreenImage}
+        />
       </div>
 
-      {widget.type !== 'screen' && !rectFitsDisplayShape(display, { x, y, width, height }) && (
+      {isFullScreenImage && (
+        <div className="text-[11px] text-studio-muted bg-studio-panel2 border border-studio-border rounded px-2 py-1.5">
+          {isTopLevel
+            ? `Full Screen: automatically sized to match the display (${Math.round(display.width)} × ${Math.round(display.height)}).`
+            : 'Full Screen: this widget is nested, so it fills its parent container instead of the whole display.'}
+        </div>
+      )}
+
+      {widget.type !== 'screen' && !isFullScreenImage && !rectFitsDisplayShape(display, { x, y, width, height }) && (
         <div className="flex items-center justify-between gap-2 bg-studio-danger/10 border border-studio-danger/40 rounded px-2 py-1.5 text-[11px] text-studio-danger">
           <span>⚠ Outside the visible display area{widget.allowOutsideBounds ? ' (allowed)' : ' — snaps back on next move/resize'}</span>
           <label className="flex items-center gap-1 shrink-0 cursor-pointer">
@@ -2316,6 +2364,28 @@ export function PropertiesPanel() {
 
         {UI_SRC_IMAGE_WIDGETS.has(widget.type) && (
           <NumberField label="Rotation °" value={appearance.rotation ?? 0} onChange={(v) => setAppearance({ rotation: v })} />
+        )}
+
+        {widget.type === 'image' && (
+          <div className="flex flex-col gap-1">
+            <span className="studio-label">Image Fit</span>
+            <select
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+              value={appearance.imageFit ?? 'contain'}
+              onChange={(e) => setAppearance({ imageFit: e.target.value as UiImageFit })}
+            >
+              {IMAGE_FIT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            {appearance.imageFit === 'fullScreen' && (
+              <span className="text-[11px] text-studio-muted">
+                Resizes this widget to the display and clips it to the display's shape (round displays get a circular clip).
+              </span>
+            )}
+          </div>
         )}
 
         <div className="grid grid-cols-3 gap-2">
