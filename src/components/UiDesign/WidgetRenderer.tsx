@@ -5,6 +5,16 @@ import { computeEffectiveStyle } from '@/lib/uiDesign/cssCascade'
 import { clampRectToDisplayShape, rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
 import { dispatchWidgetEvent, isSandboxRunning, subscribeAffectedWidget } from '@/lib/uiDesign/scriptLang/sandboxRuntime'
 import { lvglSymbolById } from '@/lib/uiDesign/lvglSymbols'
+import {
+  applyKeyboardKeyPress,
+  DEFAULT_ALT_CHARS,
+  defaultKeyboardRuntimeState,
+  formatKeyboardDebugText,
+  KB_CONTROL,
+  resolveKeyboardMap,
+  type UiResolvedKeyboardKey
+} from '@/lib/uiDesign/keyboardLayouts'
+import { computeAdaptiveKeyboardRowLayout, findClippedKeys, type UiKeyboardRowLayout } from '@/lib/uiDesign/keyboardAdaptiveLayout'
 
 const AFFECTED_HIGHLIGHT_MS = 400
 
@@ -133,13 +143,14 @@ export const DEFAULT_VISUAL_CSS: Partial<Record<UiWidgetType, React.CSSPropertie
   textarea: { background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: 4, padding: 6, color: '#94a3b8' },
   list: { background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: 4, display: 'flex', flexDirection: 'column', overflow: 'auto' },
   tabs: { background: 'transparent', display: 'flex', flexDirection: 'column' },
-  spinner: { background: 'transparent' }
+  spinner: { background: 'transparent' },
+  keyboard: { background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: 4, display: 'flex', flexDirection: 'column', gap: 2, padding: 3 }
 }
 
 // 'button' is included so an Icon widget (or anything else) can be placed inside a button
 // alongside its text label — reuses the existing generic child-widget system for "icon
 // buttons" instead of adding a dedicated buttonIcon property.
-export const CONTAINER_LIKE: ReadonlySet<UiWidgetType> = new Set(['screen', 'container', 'flex', 'list', 'tabs', 'button'])
+export const CONTAINER_LIKE: ReadonlySet<UiWidgetType> = new Set(['screen', 'container', 'flex', 'tabs', 'button'])
 
 function numProp(widget: UiWidget, key: string, fallback: number): number {
   const v = widget.props[key]
@@ -149,12 +160,11 @@ function numProp(widget: UiWidget, key: string, fallback: number): number {
 /** Kind-specific inner content — thumbs/fills/ticks/etc — rendered inside the outer positioned
  * div. Purely presentational; the outer div (styled from widget.style, see WidgetRenderer)
  * already handles position/size/background/border for every kind uniformly. */
-export function WidgetInner({ widget }: { widget: UiWidget }) {
+export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; simFocusedKeyId?: string | null }) {
   const asset = useStore((s) => (widget.src ? s.project.uiDesign.assets.find((a) => a.id === widget.src) : undefined))
 
   switch (widget.type) {
-    case 'button':
-    case 'label': {
+    case 'button': {
       const symbol = lvglSymbolById(widget.iconSymbol)
       return (
         <>
@@ -162,6 +172,12 @@ export function WidgetInner({ widget }: { widget: UiWidget }) {
           {widget.text}
         </>
       )
+    }
+    case 'label': {
+      // A label linked as some keyboard's debug/event-info panel (keyboardConfig.debugLabelId)
+      // shows that keyboard's live formatted debug text instead of its own static `text` — see
+      // KeyboardLinkedLabelText below.
+      return <KeyboardLinkedLabelText widget={widget} />
     }
     case 'icon': {
       // An LVGL built-in symbol (see the Icon Picker) takes priority over a custom image — same
@@ -291,7 +307,10 @@ export function WidgetInner({ widget }: { widget: UiWidget }) {
       return <span>{lines[Math.floor(lines.length / 2)] ?? ''}</span>
     }
     case 'textarea':
-      return <>{String(widget.props.placeholder ?? '')}</>
+      // A textarea linked as some keyboard's output (keyboardConfig.targetTextareaId) shows that
+      // keyboard's live typed text (with a cursor caret and password/multiline handling) instead
+      // of its own static placeholder — see KeyboardLinkedTextareaText below.
+      return <KeyboardLinkedTextareaText widget={widget} />
     case 'spinner':
       return (
         <div
@@ -305,6 +324,33 @@ export function WidgetInner({ widget }: { widget: UiWidget }) {
           }}
         />
       )
+    case 'list': {
+      const items = widget.listItems ?? []
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', overflow: 'hidden' }}>
+          {items.map((item) => {
+            const symbol = lvglSymbolById(item.iconSymbol)
+            return (
+              <div
+                key={item.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '6px 8px',
+                  borderBottom: '1px solid rgba(148,163,184,0.35)',
+                  fontSize: 12,
+                  flexShrink: 0
+                }}
+              >
+                {symbol && <span style={{ flexShrink: 0 }}>{symbol.glyph}</span>}
+                <span className="truncate">{item.text}</span>
+              </div>
+            )
+          })}
+        </div>
+      )
+    }
     case 'tabs': {
       const names = String(widget.props.tabNames ?? '').split('\n').filter(Boolean)
       return (
@@ -325,9 +371,287 @@ export function WidgetInner({ widget }: { widget: UiWidget }) {
         </div>
       )
     }
+    case 'keyboard':
+      return <KeyboardWidgetInner widget={widget} simFocusedKeyId={simFocusedKeyId ?? null} />
     default:
       return null
   }
+}
+
+/** A label whose parent keyboard has linked it as `debugLabelId` shows that keyboard's live
+ * formatted debug text (see formatKeyboardDebugText) instead of its own static `widget.text` —
+ * a narrow, self-contained subscription (only searches for the owning keyboard, only re-renders
+ * this one label) rather than widening WidgetInner's own subscriptions for every widget kind. */
+function KeyboardLinkedLabelText({ widget }: { widget: UiWidget }) {
+  const owner = useStore((s) => Object.values(s.project.uiDesign.widgets).find((w) => w.type === 'keyboard' && w.keyboardConfig?.debugLabelId === widget.id))
+  const runtime = useStore((s) => (owner ? s.keyboardRuntime[owner.id] : undefined))
+  if (!owner?.keyboardConfig) {
+    const symbol = lvglSymbolById(widget.iconSymbol)
+    return (
+      <>
+        {symbol && <span style={{ marginRight: widget.text ? 4 : 0 }}>{symbol.glyph}</span>}
+        {widget.text}
+      </>
+    )
+  }
+  if (!owner.keyboardConfig.showEventInfo) return null
+  const rt = runtime ?? defaultKeyboardRuntimeState(owner.keyboardConfig)
+  return <span style={{ whiteSpace: 'pre-line' }}>{formatKeyboardDebugText(owner.keyboardConfig, rt)}</span>
+}
+
+/** A textarea linked as some keyboard's `targetTextareaId` shows that keyboard's live typed text
+ * (password-masked/cursor-blinked as configured) instead of its own static placeholder — same
+ * narrow-subscription shape as KeyboardLinkedLabelText above. */
+function KeyboardLinkedTextareaText({ widget }: { widget: UiWidget }) {
+  const owner = useStore((s) => Object.values(s.project.uiDesign.widgets).find((w) => w.type === 'keyboard' && w.keyboardConfig?.targetTextareaId === widget.id))
+  const runtime = useStore((s) => (owner ? s.keyboardRuntime[owner.id] : undefined))
+  if (!owner?.keyboardConfig) return <>{String(widget.props.placeholder ?? '')}</>
+  const rt = runtime ?? defaultKeyboardRuntimeState(owner.keyboardConfig)
+  if (rt.text.length === 0) return <span style={{ opacity: 0.6 }}>{String(widget.props.placeholder ?? '')}</span>
+  const display = widget.props.passwordMode ? '•'.repeat(rt.text.length) : rt.text
+  const before = display.slice(0, rt.cursorPos)
+  const after = display.slice(rt.cursorPos)
+  return (
+    <>
+      {before}
+      <span style={{ borderLeft: '1px solid currentColor', marginLeft: -1 }} />
+      {after}
+    </>
+  )
+}
+
+/** Interactive keyboard grid — real typing/backspace/delete/case/page/language state while a
+ * script preview is running (see isSandboxRunning()), matching this file's existing convention
+ * that canvas widgets are only interactive during a live-preview run, not idle design-time
+ * clicking (see handlePointerUp's own `if (!isSandboxRunning()) return` a few dozen lines down).
+ * "Shift" and "Caps Lock" are deliberately collapsed onto the same case-toggle for this pass
+ * (both flip `runtime.case`) — a real momentary-vs-locked distinction is a refinement, not a
+ * functional gap, since both keys are present and both do toggle case correctly.
+ *
+ * Long-pressing a base English letter with alt-char variants (see DEFAULT_ALT_CHARS) opens a
+ * small floating popover of variants near the key — tap one to insert it, tap elsewhere to
+ * dismiss without inserting. Positioned from the pointer event's own coordinates relative to the
+ * keyboard's own box (a preview approximation, not pixel-exact — matches this file's established
+ * "the export is the source of truth for real appearance" precedent for every other widget). */
+function KeyboardWidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; simFocusedKeyId?: string | null }) {
+  const setKeyboardRuntimeState = useStore((s) => s.setKeyboardRuntimeState)
+  const runtime = useStore((s) => s.keyboardRuntime[widget.id])
+  const targetTextarea = useStore((s) => (widget.keyboardConfig?.targetTextareaId ? s.project.uiDesign.widgets[widget.keyboardConfig.targetTextareaId] : undefined))
+  const uiDisplay = useStore((s) => s.uiPreviewDisplayOverride ?? s.project.uiDesign.display)
+  const config = widget.keyboardConfig
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [altPopover, setAltPopover] = useState<{ variants: string[]; x: number; y: number } | null>(null)
+
+  useEffect(() => {
+    if (!altPopover) return
+    const dismiss = () => setAltPopover(null)
+    window.addEventListener('pointerdown', dismiss)
+    return () => window.removeEventListener('pointerdown', dismiss)
+  }, [altPopover])
+
+  if (!config) return null
+
+  const rt = runtime ?? defaultKeyboardRuntimeState(config)
+  const rows = resolveKeyboardMap(config, rt.case, rt.page)
+  const readOnly = Boolean(targetTextarea?.props.readOnly)
+  // Cheap to compute inline every render (worst case a handful of settle passes over a handful of
+  // rows) — matches this file's established "not memoized" convention for other per-render
+  // derived values (see e.g. the widget-level `outOfBounds` check in the main WidgetRenderer
+  // function below).
+  const widgetRect = {
+    x: typeof widget.style.x === 'number' ? widget.style.x : 0,
+    y: typeof widget.style.y === 'number' ? widget.style.y : 0,
+    width: typeof widget.style.width === 'number' ? widget.style.width : 0,
+    height: typeof widget.style.height === 'number' ? widget.style.height : 0
+  }
+  const rowLayouts = computeAdaptiveKeyboardRowLayout(uiDisplay, widgetRect, rows, config.shape, config.edgePadding)
+  // The clipped-key diagnostic only ever fires for shapes that skip the automatic curving math —
+  // Adaptive/Round never has a hit by construction, so there's nothing to compute or show there.
+  const clippedKeyIds =
+    (config.shape === 'rectangular' || config.shape === 'custom') && uiDisplay.shape === 'round'
+      ? new Set(findClippedKeys(uiDisplay, widgetRect, rowLayouts).map((h) => h.keyId))
+      : undefined
+  const maxLength = typeof targetTextarea?.props.maxLength === 'number' ? targetTextarea.props.maxLength : 0
+
+  const handleShortPress = (key: UiResolvedKeyboardKey, e: React.PointerEvent) => {
+    e.stopPropagation()
+    if (!isSandboxRunning() || readOnly) return
+    applyKeyboardKeyPress(widget.id, config, rt, key, maxLength, setKeyboardRuntimeState, dispatchWidgetEvent)
+  }
+
+  const handleLongPress = (key: UiResolvedKeyboardKey, e: React.PointerEvent): boolean => {
+    e.stopPropagation()
+    if (!isSandboxRunning() || readOnly || !config.altCharsEnabled || key.control) return false
+    const table = config.customAltChars ?? DEFAULT_ALT_CHARS
+    const entry = table.find((a) => a.base === key.insertText.toLowerCase())
+    if (!entry || entry.variants.length === 0) return false
+    const rect = containerRef.current?.getBoundingClientRect()
+    setAltPopover({ variants: entry.variants, x: rect ? e.clientX - rect.left : 0, y: rect ? e.clientY - rect.top : 0 })
+    return true
+  }
+
+  const insertVariant = (variant: string, e: React.PointerEvent) => {
+    e.stopPropagation()
+    setAltPopover(null)
+    applyKeyboardKeyPress(widget.id, config, rt, { keyId: variant, display: variant, insertText: variant, control: null }, maxLength, setKeyboardRuntimeState, dispatchWidgetEvent)
+  }
+
+  return (
+    <div ref={containerRef} style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <KeyboardKeyGrid rows={rows} onShortPress={handleShortPress} onLongPress={handleLongPress} pressedKeyId={simFocusedKeyId} rowLayouts={rowLayouts} clippedKeyIds={clippedKeyIds} />
+      {altPopover && (
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            left: altPopover.x,
+            top: Math.max(0, altPopover.y - 34),
+            transform: 'translateX(-50%)',
+            display: 'flex',
+            gap: 2,
+            background: '#1e293b',
+            border: '1px solid #475569',
+            borderRadius: 4,
+            padding: 3,
+            zIndex: 50,
+            boxShadow: '0 2px 8px rgba(0,0,0,0.4)'
+          }}
+        >
+          {altPopover.variants.map((v) => (
+            <div
+              key={v}
+              onPointerDown={(e) => insertVariant(v, e)}
+              style={{
+                width: 22,
+                height: 22,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: '#334155',
+                borderRadius: 3,
+                color: '#ffffff',
+                fontSize: 13,
+                cursor: 'pointer'
+              }}
+            >
+              {v}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+/** Renders resolved keyboard rows as a plain flexbox grid of key `<div>`s — shared by the design-
+ * canvas static view (WidgetInner's `'keyboard'` case, M2) and the interactive live-preview
+ * (M4 wraps this same layout with real click handling). Wide keys (space) get more flex-grow;
+ * everything else is equal-width within its row, matching a real keyboard's proportions closely
+ * enough to judge layout at a glance — not pixel-accurate to any specific LVGL theme, same
+ * "approximate, the export is the source of truth for real appearance" precedent as every other
+ * widget's preview in this file. */
+function keyFlexWeight(key: UiResolvedKeyboardKey): number {
+  return key.control === KB_CONTROL.space ? 3 : key.control ? 1.4 : 1
+}
+
+export function KeyboardKeyGrid({
+  rows,
+  onShortPress,
+  onLongPress,
+  pressedKeyId,
+  rowLayouts,
+  clippedKeyIds
+}: {
+  rows: UiResolvedKeyboardKey[][]
+  /** Fired on pointer-up for a press that didn't trigger a long-press. */
+  onShortPress?: (key: UiResolvedKeyboardKey, e: React.PointerEvent) => void
+  /** Fired after holding a key for LONG_PRESS_MS — return true if it did something (suppresses
+   * the short-press action that would otherwise fire on release), false to fall through to a
+   * normal short press (e.g. a key with no alt-char variants). */
+  onLongPress?: (key: UiResolvedKeyboardKey, e: React.PointerEvent) => boolean
+  pressedKeyId?: string | null
+  /** Per-row leading/trailing spacer fractions from keyboardAdaptiveLayout.ts's
+   * computeAdaptiveKeyboardRowLayout() — when present, THIS drives both row count (may exceed
+   * `rows.length` after an overflow-wrap split) and each row's real keys; `rows` itself is only
+   * used to derive the un-adapted static preview when this prop is absent. Absent = today's exact
+   * plain full-width-row rendering (the 'rectangular' shape's own identity path already returns
+   * this same all-zero-spacer shape, so passing it through unconditionally would render
+   * identically anyway — the prop stays optional mainly so a future caller with no display/widget
+   * geometry handy isn't forced to compute one just to render). */
+  rowLayouts?: UiKeyboardRowLayout[]
+  /** Key ids findClippedKeys() flagged as extending outside a round display's safe area — drawn
+   * with the same red outline the widget-level out-of-bounds indicator elsewhere in this file
+   * already uses (visual-language reuse, no new color). */
+  clippedKeyIds?: ReadonlySet<string>
+}) {
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const longPressHandled = useRef(false)
+
+  const handlePointerDown = (key: UiResolvedKeyboardKey, e: React.PointerEvent) => {
+    if (!onShortPress && !onLongPress) return
+    longPressHandled.current = false
+    if (onLongPress) {
+      pressTimer.current = setTimeout(() => {
+        longPressHandled.current = onLongPress(key, e)
+      }, LONG_PRESS_MS)
+    }
+  }
+  const handlePointerUp = (key: UiResolvedKeyboardKey, e: React.PointerEvent) => {
+    if (pressTimer.current) {
+      clearTimeout(pressTimer.current)
+      pressTimer.current = null
+    }
+    if (!longPressHandled.current) onShortPress?.(key, e)
+  }
+
+  const interactive = Boolean(onShortPress || onLongPress)
+  const effectiveRows: { keys: UiResolvedKeyboardKey[]; leadingSpacerFraction: number; trailingSpacerFraction: number }[] =
+    rowLayouts ?? rows.map((keys) => ({ keys, leadingSpacerFraction: 0, trailingSpacerFraction: 0 }))
+
+  const renderKey = (key: UiResolvedKeyboardKey) => (
+    <div
+      key={key.keyId}
+      data-keyboard-key-id={key.keyId}
+      onPointerDown={interactive ? (e) => handlePointerDown(key, e) : undefined}
+      onPointerUp={interactive ? (e) => handlePointerUp(key, e) : undefined}
+      style={{
+        flex: keyFlexWeight(key),
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: pressedKeyId === key.keyId ? '#93c5fd' : '#ffffff',
+        border: '1px solid #cbd5e1',
+        outline: clippedKeyIds?.has(key.keyId) ? '1.5px solid #ef4444' : undefined,
+        outlineOffset: clippedKeyIds?.has(key.keyId) ? -1 : undefined,
+        borderRadius: 3,
+        fontSize: 11,
+        color: '#1e293b',
+        userSelect: 'none',
+        cursor: interactive ? 'pointer' : undefined
+      }}
+    >
+      {key.display}
+    </div>
+  )
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', gap: 2 }}>
+      {effectiveRows.map((row, ri) => {
+        const realTotal = row.keys.reduce((sum, k) => sum + keyFlexWeight(k), 0)
+        const denom = Math.max(1e-6, 1 - row.leadingSpacerFraction - row.trailingSpacerFraction)
+        const leadingFlex = (row.leadingSpacerFraction / denom) * realTotal
+        const trailingFlex = (row.trailingSpacerFraction / denom) * realTotal
+        return (
+          <div key={ri} style={{ display: 'flex', flexDirection: 'row', flex: 1, gap: 2, minHeight: 0 }}>
+            {leadingFlex > 0 && <div style={{ flex: leadingFlex, pointerEvents: 'none' }} />}
+            {row.keys.map(renderKey)}
+            {trailingFlex > 0 && <div style={{ flex: trailingFlex, pointerEvents: 'none' }} />}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 type ResizeHandle = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
@@ -353,12 +677,25 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   const uiDisplay = useStore((s) => s.uiPreviewDisplayOverride ?? s.project.uiDesign.display)
   const display = { width: uiDisplay.width, height: uiDisplay.height, shape: uiDisplayShapeToDisplayShape(uiDisplay.shape) }
   const selectedWidgetId = useStore((s) => s.selectedWidgetId)
+  const simulatedFocusWidgetId = useStore((s) => s.simulatedFocusWidgetId)
+  const simulatedFocusKeyId = useStore((s) => s.simulatedFocusKeyId)
   const selectUiWidget = useStore((s) => s.selectUiWidget)
   const moveUiWidget = useStore((s) => s.moveUiWidget)
   const updateUiWidgetStyle = useStore((s) => s.updateUiWidgetStyle)
   const updateUiWidgetProps = useStore((s) => s.updateUiWidgetProps)
   const checkpoint = useStore((s) => s.checkpoint)
   const dragState = useRef<{ startClientX: number; startClientY: number; startX: number; startY: number } | null>(null)
+  // A keyboard key's own short-press handler (KeyboardWidgetInner's handleShortPress) calls
+  // e.stopPropagation() on its pointerup so a key-tap doesn't ALSO fire a generic click/released
+  // event on the keyboard widget itself — but that stopPropagation happens during the BUBBLE
+  // phase, which would otherwise also block this widget's own onPointerUp (below) from ever
+  // running, leaving dragState permanently populated: every subsequent pointermove (even pure
+  // hover, no button held) would then keep "dragging" the widget from its last known position
+  // forever. Fixed by clearing dragState in the CAPTURE phase instead, which always runs before
+  // any descendant's bubble-phase stopPropagation gets a chance to block anything — the bubble
+  // handler below reads the snapshot this capture handler took, not dragState itself, so it's
+  // unaffected by the phase split.
+  const pointerUpSnapshot = useRef<typeof dragState.current>(null)
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const longPressFired = useRef(false)
   const resizeState = useRef<{ handle: ResizeHandle; startClientX: number; startClientY: number; startX: number; startY: number; startWidth: number; startHeight: number } | null>(
@@ -422,6 +759,10 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   }
 
   const isSelected = selectedWidgetId === widget.id
+  // "The focused key must have a visible focus style" (simulated rotary-encoder navigation — see
+  // store.ts's simulateFocusNext/Previous/Press) — a distinct color from the design-time
+  // selection outline above so the two never look ambiguous during a live-preview walkthrough.
+  const isSimFocused = simulatedFocusWidgetId === widget.id
 
   // Select-on-click + pointer-drag move — same onPointerDown/Move/Up + getBoundingClientRect-
   // free delta math already used for sticker dragging in PreviewCanvas.tsx. stopPropagation so
@@ -465,11 +806,17 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     e.stopPropagation()
     moveUiWidget(widget.id, drag.startX + (e.clientX - drag.startClientX), drag.startY + (e.clientY - drag.startClientY))
   }
-  const handlePointerUp = (e: React.PointerEvent) => {
-    const drag = dragState.current
-    if (!drag) return
-    e.stopPropagation()
+  // Capture phase — see dragState's own comment above for why this must be a separate handler
+  // from the bubble-phase one below, rather than just inlining the clear at the top of it.
+  const handlePointerUpCapture = () => {
+    pointerUpSnapshot.current = dragState.current
     dragState.current = null
+  }
+  const handlePointerUp = (e: React.PointerEvent) => {
+    const drag = pointerUpSnapshot.current
+    if (!drag) return
+    pointerUpSnapshot.current = null
+    e.stopPropagation()
     snapInsideDisplayIfNeeded()
 
     if (longPressTimer.current) {
@@ -611,8 +958,16 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     style: {
       ...css,
       position: 'absolute' as const,
-      outline: affected ? '2px solid #22c55e' : isSelected ? '1.5px solid #4fa8ff' : outOfBounds ? '1.5px dashed #ef4444' : undefined,
-      outlineOffset: affected || isSelected || outOfBounds ? 1 : undefined,
+      outline: affected
+        ? '2px solid #22c55e'
+        : isSimFocused
+          ? '2px solid #f59e0b'
+          : isSelected
+            ? '1.5px solid #4fa8ff'
+            : outOfBounds
+              ? '1.5px dashed #ef4444'
+              : undefined,
+      outlineOffset: affected || isSimFocused || isSelected || outOfBounds ? 1 : undefined,
       boxShadow: affected ? '0 0 8px 2px rgba(34,197,94,0.6)' : (css.boxShadow as string | undefined),
       cursor: widget.locked ? 'default' : 'grab',
       opacity: isDisabled ? ((css.opacity as number | undefined) ?? 1) * 0.5 : css.opacity,
@@ -621,12 +976,13 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     title: outOfBounds ? 'Outside the visible display area' : undefined,
     onPointerDown: handlePointerDown,
     onPointerMove: handlePointerMove,
-    onPointerUp: handlePointerUp
+    onPointerUp: handlePointerUp,
+    onPointerUpCapture: handlePointerUpCapture
   }
 
   return (
     <div {...commonProps}>
-      <WidgetInner widget={widget} />
+      <WidgetInner widget={widget} simFocusedKeyId={isSimFocused ? simulatedFocusKeyId : null} />
       {CONTAINER_LIKE.has(widget.type) && widget.childIds.map((id) => <WidgetRenderer key={id} widgetId={id} />)}
       {isSelected &&
         !widget.locked &&

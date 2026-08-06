@@ -331,6 +331,8 @@ export class ScriptSandbox {
       this.snapshot = null
     }
     useStore.getState().resetRuntimeVariableValues()
+    useStore.getState().resetKeyboardRuntime()
+    useStore.getState().resetSimulatedFocus()
     this.cb.onRunningChange(false)
     this.cb.onVariablesChange({})
     this.cb.onSimulateTargetsChange({ buttons: [], hasEncoder: false, sensors: [] })

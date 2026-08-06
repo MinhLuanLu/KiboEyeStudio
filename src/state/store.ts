@@ -27,6 +27,9 @@ import type {
   TrackKind,
   UiCssRule,
   UiDisplaySettings,
+  UiKeyboardConfig,
+  UiKeyboardCustomKey,
+  UiListItem,
   UiVariable,
   UiWidget,
   UiWidgetStateName,
@@ -63,6 +66,9 @@ import { computeComboTimeline, loopCountForDuration } from '@/engine/comboPlayba
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
 import { STICKER_PRESET_BUNDLES } from '@/data/stickerPresets'
 import { createDefaultUiDesign, createWidget } from '@/lib/uiDesign/widgetDefaults'
+import { parseDeclaredCodepoints } from '@/lib/uiDesign/fontImport'
+import { applyKeyboardKeyPress, defaultKeyboardRuntimeState, resolveKeyboardMap, type UiKeyboardRuntimeState } from '@/lib/uiDesign/keyboardLayouts'
+import { EVENT_CAPABLE_WIDGET_TYPES, reachableWidgetsForScreen } from '@/lib/export/lvglExport'
 
 const HISTORY_LIMIT = 60
 const FRAME_STEP_MS = 1000 / 30
@@ -674,7 +680,11 @@ interface StoreState {
   selectedWidgetId: string | null
   selectUiWidget: (id: string | null) => void
   /** Creates a widget of `type` as a child of `parentId` (typically the active screen's root)
-   * at (x, y), selects it, and returns its id. */
+   * at (x, y), selects it, and returns its id. `type === 'keyboard'` additionally creates two
+   * linked sibling widgets (a 'textarea' output area and a 'label' debug/event-info panel) and
+   * wires keyboardConfig.targetTextareaId/debugLabelId to them — real LVGL has no combined
+   * keyboard+textarea widget either, so "drop one Keyboard" -> "get three linked objects" is
+   * the truthful shape, not a shortcut. */
   addUiWidget: (type: UiWidgetType, parentId: string, x: number, y: number) => string
   moveUiWidget: (id: string, x: number, y: number) => void
   updateUiWidgetStyle: (id: string, partial: Partial<UiWidgetStyle>) => void
@@ -759,9 +769,54 @@ interface StoreState {
   setRuntimeVariableValue: (name: string, value: string | number | boolean) => void
   resetRuntimeVariableValues: () => void
 
+  /** Live, per-keyboard-widget interactive state for the running preview (typed text, cursor,
+   * current language/case/page, last action/callback/character) — ephemeral like
+   * runtimeVariableValues above, never persisted, reset on Stop the same way. See
+   * UiKeyboardRuntimeState's own doc comment (keyboardLayouts.ts) for the full field list. */
+  keyboardRuntime: Record<string, UiKeyboardRuntimeState>
+  setKeyboardRuntimeState: (widgetId: string, partial: Partial<UiKeyboardRuntimeState>) => void
+  resetKeyboardRuntime: () => void
+
+  /** Simulated rotary-encoder navigation for the live preview (Logic tab's Simulate section) —
+   * mirrors the real per-screen `lv_group_t` focus-group behavior every exported screen gets
+   * (see lvglExport.ts's screenFocusNextFnName/etc.): `simulatedFocusWidgetId` cycles through the
+   * active screen's focusable widgets; pressing while a keyboard widget is focused enters
+   * "editing" (`simulatedFocusEditing`), where Next/Previous instead cycle that keyboard's own
+   * keys (`simulatedFocusKeyId`) and Press activates the highlighted key — the same two-level
+   * navigate/edit split LVGL's own group model uses. Ephemeral, reset on Stop like the other
+   * runtime-only state above. */
+  simulatedFocusWidgetId: string | null
+  simulatedFocusEditing: boolean
+  simulatedFocusKeyId: string | null
+  simulateFocusNext: () => void
+  simulateFocusPrevious: () => void
+  simulateFocusPress: () => void
+  resetSimulatedFocus: () => void
+
   // UI Design Mode — script runtime support (see lib/uiDesign/scriptLang/). updateUiWidgetProps
   // and setUiActiveScreen are also general-purpose, not just for the script sandbox.
   updateUiWidgetProps: (id: string, partial: Record<string, string | number | boolean>) => void
+  // List Items editor (only meaningful for widget.type === 'list' — see UiListItem). Callers
+  // checkpoint() before invoking, same convention as every other UI Design widget mutator above.
+  addUiListItem: (widgetId: string) => string
+  updateUiListItem: (widgetId: string, itemId: string, partial: Partial<UiListItem>) => void
+  deleteUiListItem: (widgetId: string, itemId: string) => void
+  duplicateUiListItem: (widgetId: string, itemId: string) => string | null
+  reorderUiListItem: (widgetId: string, fromIndex: number, toIndex: number) => void
+  // Keyboard widget config (only meaningful for widget.type === 'keyboard' — see UiKeyboardConfig)
+  // + its custom-layout key editor, same CRUD/reorder shape as the List Items editor above but
+  // over a flat UiKeyboardCustomKey[] (see UiKeyboardCustomLayout's own doc comment for why a
+  // flat, `newRow`-flagged list was chosen over rows-of-rows).
+  updateUiKeyboardConfig: (widgetId: string, partial: Partial<UiKeyboardConfig>) => void
+  addUiKeyboardCustomKey: (widgetId: string) => string
+  updateUiKeyboardCustomKey: (widgetId: string, keyId: string, partial: Partial<UiKeyboardCustomKey>) => void
+  deleteUiKeyboardCustomKey: (widgetId: string, keyId: string) => void
+  reorderUiKeyboardCustomKey: (widgetId: string, fromIndex: number, toIndex: number) => void
+  // Custom LVGL fonts (project.uiDesign.customFonts — see UiCustomFont). declaredCodepoints is
+  // parsed once here (see lib/uiDesign/fontImport.ts), not re-derived at render time.
+  addUiCustomFont: (name: string, cSource: string) => string
+  renameUiCustomFont: (id: string, name: string) => void
+  deleteUiCustomFont: (id: string) => void
   setUiActiveScreen: (screenId: string) => void
   /** Direct, non-undoable overwrite of every screen's widget map + activeScreenId — used ONLY
    * to restore the pre-run snapshot when the script sandbox's Stop/Restart controls revert
@@ -794,6 +849,18 @@ function activeAnimationOf(project: Project, id: string): Animation | undefined 
 
 function activeComboOf(project: Project, id: string | null): AnimationCombo | undefined {
   return id ? project.animationCombos.find((c) => c.id === id) : undefined
+}
+
+/** UI Design Mode's active screen's own encoder-focusable widgets, in the same tree-creation
+ * order the exported firmware's per-screen `lv_group_t` will add them in (see
+ * lvglExport.ts's `EVENT_CAPABLE_WIDGET_TYPES`/`isFocusable` checks) — backs the simulated-
+ * encoder-navigation store actions below. 'keyboard' is added on top of EVENT_CAPABLE_WIDGET_TYPES
+ * since a keyboard is always focusable regardless of its own eventCallbackEnabled setting. */
+function focusableWidgetsForActiveScreen(project: Project): UiWidget[] {
+  const ud = project.uiDesign
+  const screen = ud.screens.find((sc) => sc.id === ud.activeScreenId)
+  if (!screen) return []
+  return reachableWidgetsForScreen(ud, screen).filter((w) => EVENT_CAPABLE_WIDGET_TYPES.has(w.type) || w.type === 'keyboard')
 }
 
 /** The single source of truth for "is the bottom Timeline / center PreviewCanvas currently
@@ -2914,11 +2981,50 @@ export const useStore = create<StoreState>()(
       widget.parentId = parentId
       widget.style.x = x
       widget.style.y = y
+
+      // Keyboard widgets always arrive with a linked output textarea + debug label — see the
+      // action's own doc comment above for why this mirrors real LVGL structure instead of
+      // inventing a combined widget type.
+      let textareaWidget: ReturnType<typeof createWidget> | null = null
+      let labelWidget: ReturnType<typeof createWidget> | null = null
+      if (type === 'keyboard' && widget.keyboardConfig) {
+        const kbWidth = typeof widget.style.width === 'number' ? widget.style.width : 220
+
+        textareaWidget = createWidget('textarea')
+        textareaWidget.parentId = parentId
+        textareaWidget.style.x = x
+        textareaWidget.style.y = Math.max(0, y - 34)
+        textareaWidget.style.width = kbWidth
+        textareaWidget.style.height = 30
+        textareaWidget.text = ''
+        textareaWidget.props = { ...textareaWidget.props, placeholder: 'Enter text...' }
+
+        labelWidget = createWidget('label')
+        labelWidget.parentId = parentId
+        labelWidget.style.x = x
+        labelWidget.style.y = Math.max(0, y - 54)
+        labelWidget.style.width = kbWidth
+        labelWidget.style.height = 18
+        labelWidget.style.fontSize = 10
+        labelWidget.text = ''
+
+        widget.keyboardConfig.targetTextareaId = textareaWidget.id
+        widget.keyboardConfig.debugLabelId = labelWidget.id
+      }
+
       set((s) => {
         const parent = s.project.uiDesign.widgets[parentId]
         if (!parent) return
         s.project.uiDesign.widgets[widget.id] = widget
         parent.childIds.push(widget.id)
+        if (textareaWidget) {
+          s.project.uiDesign.widgets[textareaWidget.id] = textareaWidget
+          parent.childIds.push(textareaWidget.id)
+        }
+        if (labelWidget) {
+          s.project.uiDesign.widgets[labelWidget.id] = labelWidget
+          parent.childIds.push(labelWidget.id)
+        }
         s.selectedWidgetId = widget.id
         s.dirty = true
       })
@@ -3257,10 +3363,253 @@ export const useStore = create<StoreState>()(
         s.runtimeVariableValues = {}
       }),
 
+    keyboardRuntime: {},
+    setKeyboardRuntimeState: (widgetId, partial) =>
+      set((s) => {
+        const widget = s.project.uiDesign.widgets[widgetId]
+        if (!widget?.keyboardConfig) return
+        const existing = s.keyboardRuntime[widgetId] ?? defaultKeyboardRuntimeState(widget.keyboardConfig)
+        s.keyboardRuntime[widgetId] = { ...existing, ...partial }
+      }),
+    resetKeyboardRuntime: () =>
+      set((s) => {
+        s.keyboardRuntime = {}
+      }),
+
+    simulatedFocusWidgetId: null,
+    simulatedFocusEditing: false,
+    simulatedFocusKeyId: null,
+
+    simulateFocusNext: () =>
+      set((s) => {
+        const focusable = focusableWidgetsForActiveScreen(s.project)
+        if (focusable.length === 0) return
+        const focusedWidget = s.simulatedFocusWidgetId ? s.project.uiDesign.widgets[s.simulatedFocusWidgetId] : undefined
+        if (s.simulatedFocusEditing && focusedWidget?.type === 'keyboard' && focusedWidget.keyboardConfig) {
+          const rt = s.keyboardRuntime[focusedWidget.id] ?? defaultKeyboardRuntimeState(focusedWidget.keyboardConfig)
+          const keys = resolveKeyboardMap(focusedWidget.keyboardConfig, rt.case, rt.page).flat()
+          if (keys.length === 0) return
+          const idx = keys.findIndex((k) => k.keyId === s.simulatedFocusKeyId)
+          s.simulatedFocusKeyId = keys[(idx + 1 + keys.length) % keys.length].keyId
+          return
+        }
+        const idx = focusable.findIndex((w) => w.id === s.simulatedFocusWidgetId)
+        s.simulatedFocusWidgetId = focusable[(idx + 1 + focusable.length) % focusable.length].id
+        s.simulatedFocusEditing = false
+        s.simulatedFocusKeyId = null
+      }),
+
+    simulateFocusPrevious: () =>
+      set((s) => {
+        const focusable = focusableWidgetsForActiveScreen(s.project)
+        if (focusable.length === 0) return
+        const focusedWidget = s.simulatedFocusWidgetId ? s.project.uiDesign.widgets[s.simulatedFocusWidgetId] : undefined
+        if (s.simulatedFocusEditing && focusedWidget?.type === 'keyboard' && focusedWidget.keyboardConfig) {
+          const rt = s.keyboardRuntime[focusedWidget.id] ?? defaultKeyboardRuntimeState(focusedWidget.keyboardConfig)
+          const keys = resolveKeyboardMap(focusedWidget.keyboardConfig, rt.case, rt.page).flat()
+          if (keys.length === 0) return
+          const idx = keys.findIndex((k) => k.keyId === s.simulatedFocusKeyId)
+          s.simulatedFocusKeyId = keys[(idx - 1 + keys.length) % keys.length].keyId
+          return
+        }
+        const idx = focusable.findIndex((w) => w.id === s.simulatedFocusWidgetId)
+        s.simulatedFocusWidgetId = focusable[idx === -1 ? 0 : (idx - 1 + focusable.length) % focusable.length].id
+        s.simulatedFocusEditing = false
+        s.simulatedFocusKeyId = null
+      }),
+
+    // Pressing a non-keyboard focused widget is intentionally a no-op here (not routed through
+    // the script sandbox's dispatchWidgetEvent) — this simulate control exists to exercise a
+    // keyboard's own encoder-driven key navigation (see the store field's own doc comment above),
+    // not to duplicate the existing hardware.onEncoderRotate() Simulate section already built for
+    // testing script event handlers.
+    simulateFocusPress: () =>
+      set((s) => {
+        const focusable = focusableWidgetsForActiveScreen(s.project)
+        if (focusable.length === 0) return
+        if (!s.simulatedFocusWidgetId) {
+          s.simulatedFocusWidgetId = focusable[0].id
+          s.simulatedFocusEditing = false
+          s.simulatedFocusKeyId = null
+          return
+        }
+        const focusedWidget = s.project.uiDesign.widgets[s.simulatedFocusWidgetId]
+        if (!focusedWidget?.keyboardConfig || focusedWidget.type !== 'keyboard') return
+
+        const config = focusedWidget.keyboardConfig
+        const existing = s.keyboardRuntime[focusedWidget.id] ?? defaultKeyboardRuntimeState(config)
+        const keys = resolveKeyboardMap(config, existing.case, existing.page).flat()
+
+        if (!s.simulatedFocusEditing) {
+          // First press on a keyboard enters it (matches lv_group_set_editing(group, true)) —
+          // subsequent Next/Previous navigate its keys instead of screen widgets.
+          s.simulatedFocusEditing = true
+          s.simulatedFocusKeyId = keys[0]?.keyId ?? null
+          return
+        }
+
+        const key = keys.find((k) => k.keyId === s.simulatedFocusKeyId)
+        if (!key) return
+        const targetTextarea = config.targetTextareaId ? s.project.uiDesign.widgets[config.targetTextareaId] : undefined
+        const maxLength = typeof targetTextarea?.props.maxLength === 'number' ? targetTextarea.props.maxLength : 0
+        let updated = existing
+        applyKeyboardKeyPress(focusedWidget.id, config, existing, key, maxLength, (_id, partial) => {
+          updated = { ...updated, ...partial }
+        })
+        s.keyboardRuntime[focusedWidget.id] = updated
+      }),
+
+    resetSimulatedFocus: () =>
+      set((s) => {
+        s.simulatedFocusWidgetId = null
+        s.simulatedFocusEditing = false
+        s.simulatedFocusKeyId = null
+      }),
+
     updateUiWidgetProps: (id, partial) =>
       set((s) => {
         const w = s.project.uiDesign.widgets[id]
         if (w) Object.assign(w.props, partial)
+        s.dirty = true
+      }),
+
+    addUiListItem: (widgetId) => {
+      const id = nanoid(8)
+      set((s) => {
+        const w = s.project.uiDesign.widgets[widgetId]
+        if (!w) return
+        const items = w.listItems ?? (w.listItems = [])
+        // Auto-suggest a widgetId that doesn't collide with this widget's own existing items —
+        // cross-widget collisions are still caught by the Properties panel's inline validation
+        // (see ListItemsSection), same "suggest something reasonable, validate the real thing on
+        // top" split already used for reorderUiWidget/duplicateUiWidget elsewhere in this file.
+        let n = items.length + 1
+        while (items.some((it) => it.widgetId === `item_${n}`)) n++
+        items.push({ id, widgetId: `item_${n}`, text: `Item ${n}`, iconSymbol: null, clickEventEnabled: true, encoderFocusEnabled: true })
+        s.dirty = true
+      })
+      return id
+    },
+
+    updateUiListItem: (widgetId, itemId, partial) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[widgetId]
+        const item = w?.listItems?.find((it) => it.id === itemId)
+        if (!item) return
+        Object.assign(item, partial)
+        s.dirty = true
+      }),
+
+    deleteUiListItem: (widgetId, itemId) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[widgetId]
+        if (!w?.listItems) return
+        w.listItems = w.listItems.filter((it) => it.id !== itemId)
+        s.dirty = true
+      }),
+
+    duplicateUiListItem: (widgetId, itemId) => {
+      let newId: string | null = null
+      set((s) => {
+        const w = s.project.uiDesign.widgets[widgetId]
+        const items = w?.listItems
+        if (!items) return
+        const idx = items.findIndex((it) => it.id === itemId)
+        if (idx === -1) return
+        const original = items[idx]
+        let widgetIdCandidate = `${original.widgetId}_copy`
+        let n = 2
+        while (items.some((it) => it.widgetId === widgetIdCandidate)) {
+          widgetIdCandidate = `${original.widgetId}_copy${n}`
+          n++
+        }
+        newId = nanoid(8)
+        items.splice(idx + 1, 0, { ...original, id: newId, widgetId: widgetIdCandidate })
+        s.dirty = true
+      })
+      return newId
+    },
+
+    reorderUiListItem: (widgetId, fromIndex, toIndex) =>
+      set((s) => {
+        const items = s.project.uiDesign.widgets[widgetId]?.listItems
+        if (!items || fromIndex === toIndex || fromIndex < 0 || fromIndex >= items.length) return
+        const [moved] = items.splice(fromIndex, 1)
+        items.splice(Math.max(0, Math.min(toIndex, items.length)), 0, moved)
+        s.dirty = true
+      }),
+
+    updateUiKeyboardConfig: (widgetId, partial) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[widgetId]
+        if (!w?.keyboardConfig) return
+        Object.assign(w.keyboardConfig, partial)
+        s.dirty = true
+      }),
+
+    addUiKeyboardCustomKey: (widgetId) => {
+      const id = nanoid(6)
+      set((s) => {
+        const w = s.project.uiDesign.widgets[widgetId]
+        if (!w?.keyboardConfig) return
+        const layout = w.keyboardConfig.customLayout ?? (w.keyboardConfig.customLayout = { keys: [] })
+        layout.keys.push({ id, label: 'Key', insertText: 'Key' })
+        s.dirty = true
+      })
+      return id
+    },
+
+    updateUiKeyboardCustomKey: (widgetId, keyId, partial) =>
+      set((s) => {
+        const key = s.project.uiDesign.widgets[widgetId]?.keyboardConfig?.customLayout?.keys.find((k) => k.id === keyId)
+        if (!key) return
+        Object.assign(key, partial)
+        s.dirty = true
+      }),
+
+    deleteUiKeyboardCustomKey: (widgetId, keyId) =>
+      set((s) => {
+        const layout = s.project.uiDesign.widgets[widgetId]?.keyboardConfig?.customLayout
+        if (!layout) return
+        layout.keys = layout.keys.filter((k) => k.id !== keyId)
+        s.dirty = true
+      }),
+
+    reorderUiKeyboardCustomKey: (widgetId, fromIndex, toIndex) =>
+      set((s) => {
+        const keys = s.project.uiDesign.widgets[widgetId]?.keyboardConfig?.customLayout?.keys
+        if (!keys || fromIndex === toIndex || fromIndex < 0 || fromIndex >= keys.length) return
+        const [moved] = keys.splice(fromIndex, 1)
+        keys.splice(Math.max(0, Math.min(toIndex, keys.length)), 0, moved)
+        s.dirty = true
+      }),
+
+    addUiCustomFont: (name, cSource) => {
+      const id = nanoid(8)
+      const declaredCodepoints = parseDeclaredCodepoints(cSource)
+      set((s) => {
+        s.project.uiDesign.customFonts.push({ id, name, cSource, declaredCodepoints })
+        s.dirty = true
+      })
+      return id
+    },
+
+    renameUiCustomFont: (id, name) =>
+      set((s) => {
+        const font = s.project.uiDesign.customFonts.find((f) => f.id === id)
+        if (font) font.name = name
+        s.dirty = true
+      }),
+
+    deleteUiCustomFont: (id) =>
+      set((s) => {
+        s.project.uiDesign.customFonts = s.project.uiDesign.customFonts.filter((f) => f.id !== id)
+        // A keyboard/textarea referencing the deleted font falls back to the default font (null)
+        // rather than pointing at a dangling id — mirrors how deleteUiAsset-equivalent cleanups
+        // elsewhere in this file null out references instead of leaving them dangling.
+        for (const w of Object.values(s.project.uiDesign.widgets)) {
+          if (w.keyboardConfig?.customFontId === id) w.keyboardConfig.customFontId = null
+        }
         s.dirty = true
       }),
 

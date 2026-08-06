@@ -29,6 +29,7 @@ export type UiWidgetType =
   | 'flex'
   | 'tabs'
   | 'spinner'
+  | 'keyboard'
 
 /** HTML tag <-> widget type mapping, used by both the HTML serializer/parser (lib/uiDesign/
  * htmlSync.ts) and the Toolbox. 'container'/'flex' both serialize as <container> — flex is a
@@ -51,7 +52,8 @@ export const UI_WIDGET_TAG: Record<UiWidgetType, string> = {
   list: 'list',
   flex: 'container',
   tabs: 'tabs',
-  spinner: 'spinner'
+  spinner: 'spinner',
+  keyboard: 'keyboard'
 }
 
 export const UI_WIDGET_LABELS: Record<UiWidgetType, string> = {
@@ -72,7 +74,8 @@ export const UI_WIDGET_LABELS: Record<UiWidgetType, string> = {
   list: 'List',
   flex: 'Flex Layout',
   tabs: 'Tabs',
-  spinner: 'Spinner'
+  spinner: 'Spinner',
+  keyboard: 'Keyboard'
 }
 
 /** Widget kinds whose whole visual IS an image (use UiWidget.src) vs. kinds that can have an
@@ -127,7 +130,8 @@ export const UI_TOOLBOX_WIDGETS: UiWidgetType[] = [
   'textarea',
   'list',
   'tabs',
-  'spinner'
+  'spinner',
+  'keyboard'
 ]
 
 export type UiLengthValue = number | 'auto' | `${number}%`
@@ -208,6 +212,134 @@ export interface UiWidgetEvent {
   handlerName: string
 }
 
+/** One row inside a `list`-type widget's `listItems` — LVGL's real `lv_list_add_button()` API,
+ * not a generic child widget (a `list` widget's own `childIds` stays unused going forward; see
+ * lvglExport.ts's `listItemCreateCalls()`/`emitListItemClickCallback()`). `id` is an internal,
+ * never-exported React key (regenerated on duplicate/seed so two items never collide); `widgetId`
+ * is the user-facing, exported identity — it's the literal string passed to `Project_Register()`
+ * and looked up via `find_<screen>_widget()`, kept exactly as typed (not sanitized) so it stays
+ * stable and predictable, while the *generated C++ variable name* derived from it is separately
+ * sanitized at export time (see `toCIdentifier`). */
+export interface UiListItem {
+  id: string
+  widgetId: string
+  text: string
+  iconSymbol: string | null
+  clickEventEnabled: boolean
+  encoderFocusEnabled: boolean
+}
+
+export type UiKeyboardLanguage = 'english' | 'danish' | 'custom'
+export type UiKeyboardCase = 'lower' | 'upper'
+export type UiKeyboardPage = 'letters' | 'numbers' | 'symbols'
+
+/** One base key's long-press variant set, e.g. `{ base: 'a', variants: ['á','à','â','ä'] }` —
+ * see lib/uiDesign/keyboardLayouts.ts's DEFAULT_ALT_CHARS for the built-in English table. Danish's
+ * æ/ø/å are deliberately never alt-chars (they're direct keys in the Danish layout instead). */
+export interface UiKeyboardAltCharSet {
+  base: string
+  variants: string[]
+}
+
+/** One key in a `language: 'custom'` keyboard's hand-authored layout — `insertText` is what gets
+ * typed (usually equal to `label`, but lets a key show e.g. "123" while inserting nothing, for a
+ * mode-switch-style custom key). Stored as a flat, orderable list (not rows-of-rows) — `newRow`
+ * marks a key as starting a new row, the same "one flat reorderable array" shape as `UiListItem`,
+ * so the Properties panel's custom-layout editor can reuse the exact same drag-reorder row
+ * component instead of needing nested-array reorder logic. */
+export interface UiKeyboardCustomKey {
+  id: string
+  label: string
+  insertText: string
+  widthUnits?: number
+  newRow?: boolean
+}
+
+export interface UiKeyboardCustomLayout {
+  keys: UiKeyboardCustomKey[]
+}
+
+/** How a keyboard's rows lay themselves out relative to the project's display shape — see
+ * lib/uiDesign/keyboardAdaptiveLayout.ts for the actual row/spacer-fraction algorithm.
+ * 'rectangular': today's plain full-width rows, always, regardless of display shape (the
+ * default for every keyboard saved before this feature existed — see normalizeKeyboardConfig).
+ * 'adaptive': automatically curves rows to follow a round display's shape; a no-op (same as
+ * 'rectangular') on a non-round display. 'round': always applies the round-display curving
+ * algorithm even on a non-round display (mostly useful for previewing/authoring against a future
+ * display swap). 'custom': uses the fixed edgePadding values below instead of any automatic
+ * ellipse math. */
+export type UiKeyboardShape = 'rectangular' | 'adaptive' | 'round' | 'custom'
+
+/** Only meaningful when `shape === 'custom'` (fixed manual padding) — every other shape computes
+ * its own spacer fractions automatically and ignores leftCurve/rightCurve/top/bottom, but
+ * `safeAreaMargin`/`autoEdgeCompensation` apply to the automatic shapes too (see
+ * keyboardAdaptiveLayout.ts). Units are the same display-local px every other widget/style field
+ * in this project already uses. */
+export interface UiKeyboardEdgePadding {
+  leftCurve: number
+  rightCurve: number
+  top: number
+  bottom: number
+  /** Extra inward erosion applied to the display's safe ellipse before computing chord widths —
+   * a small safety margin so keys don't sit flush against the physical display edge. */
+  safeAreaMargin: number
+  /** Reserved for a future "auto-tune padding when the display changes" pass — currently just
+   * gates the Properties panel's "Use suggested values" button from silently overwriting fields
+   * the user has already hand-edited (see PropertiesPanel.tsx's KeyboardSection). */
+  autoEdgeCompensation: boolean
+}
+
+/** Only meaningful when `UiWidget.type === 'keyboard'`. A keyboard widget is always created
+ * alongside two sibling widgets (see store.ts's addUiWidget) — a `'textarea'` output/input area
+ * (`targetTextareaId`) and an optional `'label'` debug/event-info panel (`debugLabelId`); this
+ * config is what links the three together and holds everything genuinely keyboard-specific.
+ * Purely visual/positional properties (background, border, font, size, position, key/row
+ * spacing, pressed/focused states) deliberately live in the widget's own existing `style`/
+ * `states` instead of being duplicated here — see lvglExport.ts's keyboard codegen comment for
+ * the full reasoning. */
+export interface UiKeyboardConfig {
+  targetTextareaId: string | null
+  debugLabelId: string | null
+  title: string
+
+  language: UiKeyboardLanguage
+  defaultCase: UiKeyboardCase
+  defaultPage: UiKeyboardPage
+  showLanguageSwitchKey: boolean
+  /** Defaults true when language === 'danish'; lets a Danish keyboard's æ/ø/å keys be hidden
+   * without switching language entirely (spec's own separate toggle). */
+  danishCharsEnabled: boolean
+  /** language === 'custom' only. */
+  customLayout: UiKeyboardCustomLayout | null
+
+  altCharsEnabled: boolean
+  /** null = use the built-in DEFAULT_ALT_CHARS table (keyboardLayouts.ts). */
+  customAltChars: UiKeyboardAltCharSet[] | null
+
+  autoOpen: boolean
+  autoCloseOnSubmit: boolean
+
+  /** Master toggle for the linked debug label's content — the individual show* flags below only
+   * matter when this is true. */
+  showEventInfo: boolean
+  showSelectedCharacter: boolean
+  showCursorPosition: boolean
+  showCallbackName: boolean
+  showCurrentAction: boolean
+
+  encoderEnabled: boolean
+  wrapNavigation: boolean
+  repeatBackspace: boolean
+  repeatDelayMs: number
+
+  /** -> project.uiDesign.customFonts[].id — see UiCustomFont. null = the project's default font
+   * (LVGL's built-in Montserrat, no Danish glyphs). */
+  customFontId: string | null
+
+  shape: UiKeyboardShape
+  edgePadding: UiKeyboardEdgePadding
+}
+
 export interface UiWidget {
   id: string
   type: UiWidgetType
@@ -229,8 +361,18 @@ export interface UiWidget {
   iconSymbol?: string | null
   /** Widget-kind-specific data: slider min/max/value, dropdown/roller options, checkbox
    * checked, arc angles, tabs names, etc. Loosely typed (not one interface per widget kind)
-   * to keep the model flat — see lib/uiDesign/widgetDefaults.ts for the shape each kind uses. */
+   * to keep the model flat — see lib/uiDesign/widgetDefaults.ts for the shape each kind uses.
+   * `'textarea'` widgets additionally use: `multiline` (boolean), `passwordMode` (boolean),
+   * `readOnly` (boolean), `maxLength` (number, 0 = unlimited), `cursorColor`/`selectionColor`
+   * (hex strings, optional — map to LVGL's real `LV_PART_CURSOR`/`LV_PART_SELECTED` style
+   * parts, see lvglExport.ts's textarea codegen). */
   props: Record<string, string | number | boolean>
+  /** Only meaningful when `type === 'list'` — the widget's real content (LVGL `lv_list_add_button()`
+   * rows), managed entirely through the Properties panel's List Items editor. undefined/empty on
+   * every other widget kind. */
+  listItems?: UiListItem[]
+  /** Only meaningful when `type === 'keyboard'` — see UiKeyboardConfig. */
+  keyboardConfig?: UiKeyboardConfig
   style: UiWidgetStyle
   states: UiWidgetStateStyles
   visible: boolean
@@ -382,12 +524,27 @@ export interface UiVariable {
   fallback?: string | number | boolean
 }
 
+/** A user-imported LVGL v9 bitmap font, already converted to C source by LVGL's own official
+ * online font converter (https://lvgl.io/tools/fontconverter) — this project does no font
+ * rasterization of its own, it only stores/embeds/references what's pasted in. `declaredCodepoints`
+ * is parsed once at import time by text-scanning the pasted source's own declared unicode-range/
+ * list tables (not a real font parser — see lib/uiDesign/fontImport.ts), purely so the Properties
+ * panel and export validation can warn when a keyboard needs Danish glyphs (æ/ø/å/Æ/Ø/Å =
+ * U+00E6/00F8/00E5/00C6/00D8/00C5) a selected font doesn't declare. */
+export interface UiCustomFont {
+  id: string
+  name: string
+  cSource: string
+  declaredCodepoints: number[]
+}
+
 export interface UiDesignProject {
   widgets: Record<string, UiWidget>
   screens: UiScreen[]
   activeScreenId: string | null
   css: UiCssRule[]
   assets: UiAsset[]
+  customFonts: UiCustomFont[]
   variables: UiVariable[]
   display: UiDisplaySettings
   /** Regenerated text mirrors of the widget tree / css rules — see lib/uiDesign/htmlSync.ts

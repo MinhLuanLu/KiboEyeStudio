@@ -5,13 +5,22 @@ import {
   reachableWidgetsForScreen,
   requiredLibraries,
   screenCreateFnName,
+  screenFocusNextFnName,
+  screenFocusPreviousFnName,
+  screenIdentBase,
+  screenPressFnName,
   screenShowFnName,
+  toCIdentifier,
+  widgetBaseName,
   widgetCreateFnName
 } from '@/lib/export/lvglExport'
 import type { ExportTarget } from '@/lib/export/exportTarget'
 import { sanitizeFilename, sanitizeIdentifier } from '@/lib/export/naming'
 import { validateScript } from '@/lib/uiDesign/scriptLang/validateScript'
 import { parseVisualBindingRows } from '@/lib/uiDesign/scriptLang/visualBindings'
+import { missingDanishCodepoints, parseFontVariableName } from '@/lib/uiDesign/fontImport'
+import { resolveKeyboardMap } from '@/lib/uiDesign/keyboardLayouts'
+import { computeAdaptiveKeyboardRowLayout, findClippedKeys } from '@/lib/uiDesign/keyboardAdaptiveLayout'
 
 export type LvglValidationStatus = 'passed' | 'warning' | 'failed'
 
@@ -211,6 +220,120 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
     results.push({ category: 'Event callbacks', status, messages })
   }
 
+  // ---- Keyboard widgets ----
+  // Dangling targetTextareaId/debugLabelId (the linked widget was deleted, or moved out of this
+  // export's scope), Danish keyboards missing a Danish-capable font, and custom-language keyboards
+  // with no keys — three real correctness gaps that are otherwise silent until a real device shows
+  // boxes/garbage or the generated C++ fails to compile (a dangling target/label id still resolves
+  // via widgetVarName() to SOME identifier — just one that was never actually created in this
+  // export's own file/scope, a real "undeclared identifier" compile error, not just a display bug).
+  {
+    const messages: string[] = []
+    let status: LvglValidationStatus = 'passed'
+    const inScopeIds = new Set(widgets.map((w) => w.id))
+    const keyboards = widgets.filter((w) => w.type === 'keyboard' && w.keyboardConfig)
+    const danglingLinks: string[] = []
+    const outOfScopeLinks: string[] = []
+    const missingFontKeyboards: string[] = []
+    const danglingFontKeyboards: string[] = []
+    const incompleteFontKeyboards: { label: string; missing: string[] }[] = []
+    const unparsableFontKeyboards: string[] = []
+    const emptyCustomLayouts: string[] = []
+    const clippedKeyboards: { label: string; count: number }[] = []
+
+    for (const w of keyboards) {
+      const config = w.keyboardConfig!
+      const label = w.tagId ?? w.id
+      for (const [linkId, linkName] of [
+        [config.targetTextareaId, 'output text area'],
+        [config.debugLabelId, 'debug label']
+      ] as const) {
+        if (!linkId) continue
+        const linked = uiDesign.widgets[linkId]
+        if (!linked) danglingLinks.push(`${label}'s ${linkName}`)
+        else if (!inScopeIds.has(linkId)) outOfScopeLinks.push(`${label}'s ${linkName} ("${linked.tagId ?? linked.id}")`)
+      }
+
+      if (config.language === 'danish' && config.danishCharsEnabled) {
+        if (!config.customFontId) {
+          missingFontKeyboards.push(label)
+        } else {
+          const font = uiDesign.customFonts.find((f) => f.id === config.customFontId)
+          if (!font) {
+            danglingFontKeyboards.push(label)
+          } else {
+            if (!parseFontVariableName(font.cSource)) unparsableFontKeyboards.push(`${label} ("${font.name}")`)
+            const missing = missingDanishCodepoints(font.declaredCodepoints)
+            if (missing.length > 0) incompleteFontKeyboards.push({ label: `${label} ("${font.name}")`, missing })
+          }
+        }
+      }
+
+      if (config.language === 'custom' && (!config.customLayout || config.customLayout.keys.length === 0)) {
+        emptyCustomLayouts.push(label)
+      }
+
+      // Clipped-key diagnostic — only meaningful for shapes that skip the automatic round-display
+      // curving math (see keyboardAdaptiveLayout.ts's own header comment). Adaptive/Round never
+      // has a hit here by construction, so there's nothing to check or warn about for them.
+      if ((config.shape === 'rectangular' || config.shape === 'custom') && uiDesign.display.shape === 'round') {
+        const widgetRect = {
+          x: typeof w.style.x === 'number' ? w.style.x : 0,
+          y: typeof w.style.y === 'number' ? w.style.y : 0,
+          width: typeof w.style.width === 'number' ? w.style.width : 0,
+          height: typeof w.style.height === 'number' ? w.style.height : 0
+        }
+        const rows = resolveKeyboardMap(config, config.defaultCase, config.defaultPage)
+        const rowLayouts = computeAdaptiveKeyboardRowLayout(uiDesign.display, widgetRect, rows, config.shape, config.edgePadding)
+        const clipped = findClippedKeys(uiDesign.display, widgetRect, rowLayouts)
+        if (clipped.length > 0) clippedKeyboards.push({ label, count: clipped.length })
+      }
+    }
+
+    if (danglingLinks.length > 0) {
+      status = 'failed'
+      messages.push(`${danglingLinks.length} keyboard link(s) point to a widget that no longer exists: ${danglingLinks.join(', ')} — re-select the output text area/debug label in the Keyboard section.`)
+    }
+    if (outOfScopeLinks.length > 0) {
+      status = 'failed'
+      messages.push(`${outOfScopeLinks.length} keyboard link(s) point to a widget outside this export's scope: ${outOfScopeLinks.join(', ')} — the generated code would reference a variable that was never created here. Keep a keyboard and its linked widgets on the same screen.`)
+    }
+    if (danglingFontKeyboards.length > 0) {
+      status = 'failed'
+      messages.push(`${danglingFontKeyboards.length} keyboard(s) reference a custom font that no longer exists: ${danglingFontKeyboards.join(', ')} — re-select a font in the Keyboard section.`)
+    }
+    if (missingFontKeyboards.length > 0) {
+      status = status === 'failed' ? status : 'warning'
+      messages.push(`${missingFontKeyboards.length} Danish keyboard(s) have no custom font selected: ${missingFontKeyboards.join(', ')} — LVGL's built-in Montserrat fonts don't include æ/ø/å, so those keys/text will show as boxes on real hardware. Attach a font in the Keyboard section's Font picker.`)
+    }
+    if (incompleteFontKeyboards.length > 0) {
+      status = status === 'failed' ? status : 'warning'
+      messages.push(
+        `${incompleteFontKeyboards.length} Danish keyboard(s)' selected font is missing glyphs: ${incompleteFontKeyboards.map((f) => `${f.label} missing ${f.missing.join('')}`).join('; ')} — those characters will show as boxes on real hardware.`
+      )
+    }
+    if (unparsableFontKeyboards.length > 0) {
+      status = status === 'failed' ? status : 'warning'
+      messages.push(`${unparsableFontKeyboards.length} keyboard(s)' selected font couldn't be parsed for its declared \`lv_font_t\` symbol name: ${unparsableFontKeyboards.join(', ')} — double-check it's real LVGL font-converter output; the export will guess a name from the font's own library name instead.`)
+    }
+    if (emptyCustomLayouts.length > 0) {
+      status = status === 'failed' ? status : 'warning'
+      messages.push(`${emptyCustomLayouts.length} custom-layout keyboard(s) have no keys defined: ${emptyCustomLayouts.join(', ')} — add keys in the Keyboard section's custom layout editor, or the exported keyboard will be empty.`)
+    }
+    if (clippedKeyboards.length > 0) {
+      status = status === 'failed' ? status : 'warning'
+      messages.push(
+        `${clippedKeyboards.length} keyboard(s) may have keys clipped by the round display's edge: ${clippedKeyboards.map((k) => `${k.label} (${k.count} key(s))`).join(', ')} — switch Keyboard Shape to Adaptive or Round in the Keyboard section, or increase edge padding.`
+      )
+    }
+    if (keyboards.length === 0) {
+      messages.push('No keyboard widgets in scope.')
+    } else if (messages.length === 0) {
+      messages.push(`${keyboards.length} keyboard widget(s), all correctly linked.`)
+    }
+    results.push({ category: 'Keyboard widgets', status, messages })
+  }
+
   // ---- C++ identifiers ----
   // Defensive re-check that every identifier this export will actually emit (screen create/show
   // function names, named-widget create function names) is non-empty and doesn't collide with a
@@ -223,32 +346,65 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
     for (const s of scopedScreens) {
       const name = screenCreateFnName(s.name).replace(/^Create/, '').toLowerCase()
       if (RESERVED_IDENTIFIERS.has(name) || !name) badIdentifiers.add(s.name)
+      // The hardware-navigation namespace/function names (Main, Main_screen_focus_next, ...) are
+      // derived from screenIdentBase, not screenCreateFnName's own PascalCase — check it
+      // separately since the two can diverge (screenIdentBase strips a trailing "Screen" word
+      // that screenCreateFnName instead guarantees is present).
+      const navBase = screenIdentBase(s.name).toLowerCase()
+      if (RESERVED_IDENTIFIERS.has(navBase) || !navBase) badIdentifiers.add(s.name)
     }
     for (const w of widgets) {
       if (!w.tagId) continue
       const name = widgetCreateFnName(w).replace(/^Create/, '').toLowerCase()
       if (RESERVED_IDENTIFIERS.has(name) || !name) badIdentifiers.add(w.tagId)
     }
+    // List items — each item's own widgetId is what Project_Register()/find_<screen>_widget()
+    // key off (see lvglExport.ts's listItemCreateLines/emitListItemLines), same as a widget's
+    // tagId, so it needs the same reserved-word/empty check.
+    const emptyItemIds: string[] = []
+    for (const w of widgets) {
+      if (w.type !== 'list') continue
+      for (const item of w.listItems ?? []) {
+        const trimmed = item.widgetId.trim()
+        if (!trimmed) {
+          emptyItemIds.push(item.text || '(untitled item)')
+          continue
+        }
+        const sanitized = toCIdentifier(trimmed).toLowerCase()
+        if (RESERVED_IDENTIFIERS.has(sanitized)) badIdentifiers.add(trimmed)
+      }
+    }
+    if (emptyItemIds.length > 0) {
+      status = 'failed'
+      messages.push(`${emptyItemIds.length} list item(s) have no widget ID: ${emptyItemIds.join(', ')} — every item needs one to generate a valid Project_Register()/variable name.`)
+    }
     if (badIdentifiers.size > 0) {
       status = 'failed'
-      messages.push(`${badIdentifiers.size} name(s) sanitize to a reserved C++/Arduino word and would produce invalid generated code: ${[...badIdentifiers].join(', ')} — rename these widgets' ids.`)
+      messages.push(`${badIdentifiers.size} name(s) sanitize to a reserved C++/Arduino word and would produce invalid generated code: ${[...badIdentifiers].join(', ')} — rename these widgets'/list items' ids.`)
     }
     // Duplicate widget ids (tagId) — the widget registry (s_widgetIds/s_widgetObjs, see
     // lvglExport.ts's Register()) is a flat id -> lv_obj_t* lookup, so two widgets sharing an id
     // means UI.setText()/UI.setValue()/UI.findWidget() can only ever reach whichever one
-    // registered first — a real, silent runtime bug, not just a naming nicety.
+    // registered first — a real, silent runtime bug, not just a naming nicety. List item
+    // widgetIds share this exact same flat registry (see emitListItemLines' Project_Register()
+    // calls), so they're counted in the same namespace here, not a separate one.
     const idCounts = new Map<string, number>()
     for (const w of widgets) {
-      if (!w.tagId) continue
-      idCounts.set(w.tagId, (idCounts.get(w.tagId) ?? 0) + 1)
+      if (w.tagId) idCounts.set(w.tagId, (idCounts.get(w.tagId) ?? 0) + 1)
+      if (w.type === 'list') {
+        for (const item of w.listItems ?? []) {
+          const trimmed = item.widgetId.trim()
+          if (trimmed) idCounts.set(trimmed, (idCounts.get(trimmed) ?? 0) + 1)
+        }
+      }
     }
     const duplicateIds = [...idCounts.entries()].filter(([, count]) => count > 1).map(([id]) => id)
     if (duplicateIds.length > 0) {
       status = 'failed'
-      messages.push(`${duplicateIds.length} widget id(s) are used by more than one widget: ${duplicateIds.join(', ')} — UI.setText()/setValue()/findWidget() can only ever reach one of them. Rename these widgets' ids.`)
+      messages.push(`${duplicateIds.length} widget/list-item id(s) are used by more than one widget or item: ${duplicateIds.join(', ')} — UI.setText()/setValue()/findWidget() can only ever reach one of them. Rename these to be unique.`)
     }
-    if (badIdentifiers.size === 0 && duplicateIds.length === 0) {
-      messages.push('Every screen/widget name generates a valid, unique C++ identifier.')
+    if (badIdentifiers.size === 0 && duplicateIds.length === 0 && emptyItemIds.length === 0) {
+      messages.push('Every screen/widget/list-item name generates a valid, unique C++ identifier.')
     }
     results.push({ category: 'C++ identifiers', status, messages })
   }
@@ -267,9 +423,31 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
       list.push(label)
       fnNames.set(fnName, list)
     }
-    for (const s of scopedScreens) record(screenCreateFnName(s.name), `screen "${s.name}"`)
+    for (const s of scopedScreens) {
+      record(screenCreateFnName(s.name), `screen "${s.name}"`)
+      // The per-screen hardware-navigation namespace (Main, Settings, ...) and its three methods
+      // — see lvglExport.ts's generateKiboUIParts/generateUiScreenExport — land in the same flat
+      // global-identifier space as every screen/widget name here, so two screens whose names both
+      // sanitize to the same base (e.g. "Main" and "Main Screen") would collide on all four.
+      const navBase = screenIdentBase(s.name)
+      record(navBase, `screen "${s.name}"'s hardware-navigation namespace`)
+      record(screenFocusNextFnName(s.name), `screen "${s.name}"'s focus-next helper`)
+      record(screenFocusPreviousFnName(s.name), `screen "${s.name}"'s focus-previous helper`)
+      record(screenPressFnName(s.name), `screen "${s.name}"'s press helper`)
+    }
     for (const w of widgets) {
       if (w.tagId) record(widgetCreateFnName(w), `widget "${w.tagId}"`)
+      if (w.type === 'list' && (w.listItems?.length ?? 0) > 0) {
+        // Mirrors lvglExport.ts's computeListItemVars/emitListItemClickCallback naming exactly —
+        // each item's own `<id>_item` C++ variable, plus the one shared `<list>_item_event_cb`
+        // click-dispatch callback per list, both landing in the same flat function/variable
+        // namespace as every screen/widget name above.
+        for (const item of w.listItems ?? []) {
+          const trimmed = item.widgetId.trim()
+          if (trimmed) record(`${toCIdentifier(trimmed)}_item`, `list item "${item.text || trimmed}"`)
+        }
+        record(`${widgetBaseName(w)}_item_event_cb`, `list "${w.tagId ?? w.id}"'s item click callback`)
+      }
     }
     const collisions = [...fnNames.entries()].filter(([, labels]) => labels.length > 1)
     if (collisions.length > 0) {

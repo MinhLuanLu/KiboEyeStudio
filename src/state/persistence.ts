@@ -35,9 +35,27 @@ import {
   defaultEditorState
 } from '@/types'
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
-import { createDefaultUiDesign } from '@/lib/uiDesign/widgetDefaults'
+import { createDefaultUiDesign, defaultKeyboardConfig } from '@/lib/uiDesign/widgetDefaults'
 import { DEFAULT_UI_DISPLAY } from '@/types'
-import type { UiAsset, UiCssRule, UiDesignProject, UiDisplayOrientation, UiDisplayRotation, UiDisplayShape, UiDisplaySettings, UiScreen, UiVariable, UiWidget } from '@/types'
+import type {
+  UiAsset,
+  UiCssRule,
+  UiCustomFont,
+  UiDesignProject,
+  UiDisplayOrientation,
+  UiDisplayRotation,
+  UiDisplayShape,
+  UiDisplaySettings,
+  UiKeyboardAltCharSet,
+  UiKeyboardConfig,
+  UiKeyboardCustomKey,
+  UiKeyboardCustomLayout,
+  UiKeyboardEdgePadding,
+  UiListItem,
+  UiScreen,
+  UiVariable,
+  UiWidget
+} from '@/types'
 
 const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
 const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
@@ -363,6 +381,103 @@ function normalizeCustomEyeShapes(raw: unknown): CustomEyeShape[] {
  * normalize* helpers) rather than letting a hand-edited file crash the workspace. Falls back
  * to a fresh createDefaultUiDesign() if the field is missing entirely or has no usable
  * widgets — mirroring how normalizeStickerAssets always re-seeds a valid starting point. */
+function normalizeListItems(raw: unknown): UiListItem[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  return (raw as unknown[])
+    .filter((i): i is Record<string, unknown> => !!i && typeof i === 'object' && typeof (i as Record<string, unknown>).widgetId === 'string')
+    .map((i) => ({
+      id: typeof i.id === 'string' ? i.id : nanoid(8),
+      widgetId: i.widgetId as string,
+      text: typeof i.text === 'string' ? i.text : '',
+      iconSymbol: typeof i.iconSymbol === 'string' ? i.iconSymbol : null,
+      clickEventEnabled: i.clickEventEnabled !== false,
+      encoderFocusEnabled: i.encoderFocusEnabled !== false
+    }))
+}
+
+const UI_KEYBOARD_LANGUAGES = new Set(['english', 'danish', 'custom'])
+const UI_KEYBOARD_CASES = new Set(['lower', 'upper'])
+const UI_KEYBOARD_PAGES = new Set(['letters', 'numbers', 'symbols'])
+const UI_KEYBOARD_SHAPES = new Set(['rectangular', 'adaptive', 'round', 'custom'])
+
+function normalizeKeyboardEdgePadding(raw: unknown): UiKeyboardEdgePadding {
+  const r = (raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}) as Partial<UiKeyboardEdgePadding>
+  return {
+    leftCurve: typeof r.leftCurve === 'number' ? r.leftCurve : 0,
+    rightCurve: typeof r.rightCurve === 'number' ? r.rightCurve : 0,
+    top: typeof r.top === 'number' ? r.top : 0,
+    bottom: typeof r.bottom === 'number' ? r.bottom : 0,
+    safeAreaMargin: typeof r.safeAreaMargin === 'number' ? r.safeAreaMargin : 6,
+    autoEdgeCompensation: r.autoEdgeCompensation !== false
+  }
+}
+
+function normalizeKeyboardCustomLayout(raw: unknown): UiKeyboardCustomLayout | null {
+  if (!raw || typeof raw !== 'object' || !Array.isArray((raw as Record<string, unknown>).keys)) return null
+  const keys = ((raw as Record<string, unknown>).keys as unknown[])
+    .filter((k): k is Record<string, unknown> => !!k && typeof k === 'object' && typeof (k as Record<string, unknown>).label === 'string')
+    .map(
+      (k): UiKeyboardCustomKey => ({
+        id: typeof k.id === 'string' ? k.id : nanoid(6),
+        label: k.label as string,
+        insertText: typeof k.insertText === 'string' ? k.insertText : (k.label as string),
+        widthUnits: typeof k.widthUnits === 'number' ? k.widthUnits : undefined,
+        newRow: Boolean(k.newRow)
+      })
+    )
+  return { keys }
+}
+
+function normalizeAltChars(raw: unknown): UiKeyboardAltCharSet[] | null {
+  if (!Array.isArray(raw)) return null
+  return (raw as unknown[])
+    .filter((a): a is Record<string, unknown> => !!a && typeof a === 'object' && typeof (a as Record<string, unknown>).base === 'string')
+    .map((a) => ({
+      base: a.base as string,
+      variants: Array.isArray(a.variants) ? (a.variants as unknown[]).filter((v): v is string => typeof v === 'string') : []
+    }))
+}
+
+/** Backfills UiWidget.keyboardConfig — lenient spread-over-defaults idiom, same as every other
+ * field in this file, so a saved project from before a given keyboardConfig sub-field existed
+ * (or a hand-edited file with an invalid value) just falls back to defaultKeyboardConfig()'s
+ * value for that one field rather than the whole config being discarded. */
+function normalizeKeyboardConfig(raw: unknown): UiKeyboardConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Partial<UiKeyboardConfig> & Record<string, unknown>
+  const d = defaultKeyboardConfig()
+  return {
+    targetTextareaId: typeof r.targetTextareaId === 'string' ? r.targetTextareaId : null,
+    debugLabelId: typeof r.debugLabelId === 'string' ? r.debugLabelId : null,
+    title: typeof r.title === 'string' ? r.title : d.title,
+    language: UI_KEYBOARD_LANGUAGES.has(r.language as string) ? (r.language as UiKeyboardConfig['language']) : d.language,
+    defaultCase: UI_KEYBOARD_CASES.has(r.defaultCase as string) ? (r.defaultCase as UiKeyboardConfig['defaultCase']) : d.defaultCase,
+    defaultPage: UI_KEYBOARD_PAGES.has(r.defaultPage as string) ? (r.defaultPage as UiKeyboardConfig['defaultPage']) : d.defaultPage,
+    showLanguageSwitchKey: r.showLanguageSwitchKey !== false,
+    danishCharsEnabled: Boolean(r.danishCharsEnabled),
+    customLayout: normalizeKeyboardCustomLayout(r.customLayout),
+    altCharsEnabled: r.altCharsEnabled !== false,
+    customAltChars: normalizeAltChars(r.customAltChars),
+    autoOpen: Boolean(r.autoOpen),
+    autoCloseOnSubmit: Boolean(r.autoCloseOnSubmit),
+    showEventInfo: r.showEventInfo !== false,
+    showSelectedCharacter: r.showSelectedCharacter !== false,
+    showCursorPosition: r.showCursorPosition !== false,
+    showCallbackName: r.showCallbackName !== false,
+    showCurrentAction: r.showCurrentAction !== false,
+    encoderEnabled: r.encoderEnabled !== false,
+    wrapNavigation: r.wrapNavigation !== false,
+    repeatBackspace: r.repeatBackspace !== false,
+    repeatDelayMs: typeof r.repeatDelayMs === 'number' ? r.repeatDelayMs : d.repeatDelayMs,
+    customFontId: typeof r.customFontId === 'string' ? r.customFontId : null,
+    // NOT d.shape — defaultKeyboardConfig() defaults new keyboards to 'adaptive', but a project
+    // saved before this feature existed must keep rendering/exporting exactly as it did before,
+    // so an absent/invalid shape here falls back to 'rectangular' specifically, never d.shape.
+    shape: UI_KEYBOARD_SHAPES.has(r.shape as string) ? (r.shape as UiKeyboardConfig['shape']) : 'rectangular',
+    edgePadding: normalizeKeyboardEdgePadding(r.edgePadding)
+  }
+}
+
 function normalizeUiDesign(raw: unknown): UiDesignProject {
   if (!raw || typeof raw !== 'object') return createDefaultUiDesign()
   const r = raw as Partial<UiDesignProject> & Record<string, unknown>
@@ -393,7 +508,9 @@ function normalizeUiDesign(raw: unknown): UiDesignProject {
         eventCallbackEnabled: typeof wr.eventCallbackEnabled === 'boolean' ? wr.eventCallbackEnabled : undefined,
         eventCallbackTriggers: Array.isArray(wr.eventCallbackTriggers)
           ? wr.eventCallbackTriggers.filter((t): t is string => typeof t === 'string')
-          : []
+          : [],
+        listItems: normalizeListItems(wr.listItems),
+        keyboardConfig: normalizeKeyboardConfig(wr.keyboardConfig)
       }
     }
   }
@@ -432,6 +549,20 @@ function normalizeUiDesign(raw: unknown): UiDesignProject {
         }))
     : []
 
+  const customFonts: UiCustomFont[] = Array.isArray(r.customFonts)
+    ? (r.customFonts as unknown[])
+        .filter(
+          (f): f is Record<string, unknown> =>
+            !!f && typeof f === 'object' && typeof (f as Record<string, unknown>).id === 'string' && typeof (f as Record<string, unknown>).cSource === 'string'
+        )
+        .map((f) => ({
+          id: f.id as string,
+          name: typeof f.name === 'string' ? f.name : 'Untitled Font',
+          cSource: f.cSource as string,
+          declaredCodepoints: Array.isArray(f.declaredCodepoints) ? (f.declaredCodepoints as unknown[]).filter((c): c is number => typeof c === 'number') : []
+        }))
+    : []
+
   const activeScreenId = typeof r.activeScreenId === 'string' && screens.some((s) => s.id === r.activeScreenId) ? r.activeScreenId : screens[0].id
 
   const UI_VARIABLE_TYPES = new Set(['number', 'text', 'boolean', 'color', 'list', 'image', 'object'])
@@ -464,6 +595,7 @@ function normalizeUiDesign(raw: unknown): UiDesignProject {
     activeScreenId,
     css,
     assets,
+    customFonts,
     variables,
     display: normalizeUiDisplay(r.display),
     htmlSource: typeof r.htmlSource === 'string' ? r.htmlSource : '',

@@ -1,11 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useStore } from '@/state/store'
 import { UI_BACKGROUND_IMAGE_WIDGETS, UI_ICON_TEXT_WIDGETS, UI_SRC_IMAGE_WIDGETS, UI_WIDGET_LABELS } from '@/types'
-import type { UiLengthValue, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
+import type { UiKeyboardCustomKey, UiLengthValue, UiListItem, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
+import { DEFAULT_ALT_CHARS } from '@/lib/uiDesign/keyboardLayouts'
+import { missingDanishCodepoints } from '@/lib/uiDesign/fontImport'
 import { rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
 import { ACTION_TABLE, HARDWARE_ACTION_PRESETS } from '@/lib/uiDesign/scriptLang/actionTable'
-import { widgetVarName, widgetBaseName, EVENT_CAPABLE_WIDGET_TYPES, EVENT_CALLBACK_TRIGGER_OPTIONS } from '@/lib/export/lvglExport'
+import { widgetVarName, widgetBaseName, toCIdentifier, EVENT_CAPABLE_WIDGET_TYPES, EVENT_CALLBACK_TRIGGER_OPTIONS } from '@/lib/export/lvglExport'
 import { IconPicker } from './IconPicker'
+import { LVGL_SYMBOLS } from '@/lib/uiDesign/lvglSymbols'
 import {
   addEventRow,
   parseVisualEventRows,
@@ -921,6 +924,707 @@ function ActionCard({
   )
 }
 
+/** One row in the List widget's item editor (see ListItemsSection) — drag-to-reorder card modeled
+ * directly on ActionCard's shape above, with a compact collapsed IconPicker (only one row's picker
+ * expands at a time, since IconPicker's full swatch grid is too tall to keep open per-row). */
+function ListItemRow({
+  item,
+  invalidReason,
+  varNamePreview,
+  dragging,
+  iconOpen,
+  onToggleIcon,
+  onDragStart,
+  onDropOnto,
+  onTextInput,
+  onCommitChange,
+  onDuplicate,
+  onDelete
+}: {
+  item: UiListItem
+  invalidReason: string | null
+  varNamePreview: string
+  dragging: boolean
+  iconOpen: boolean
+  onToggleIcon: () => void
+  onDragStart: () => void
+  onDropOnto: () => void
+  onTextInput: (partial: Partial<UiListItem>) => void
+  onCommitChange: (partial: Partial<UiListItem>) => void
+  onDuplicate: () => void
+  onDelete: () => void
+}) {
+  const glyph = item.iconSymbol ? LVGL_SYMBOLS.find((s) => s.id === item.iconSymbol)?.glyph : null
+
+  return (
+    <div
+      className={`bg-studio-panel border rounded p-1.5 flex flex-col gap-1.5 ${dragging ? 'opacity-40' : ''} ${
+        invalidReason ? 'border-studio-danger' : 'border-studio-border2'
+      }`}
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault()
+        onDropOnto()
+      }}
+    >
+      <div className="flex items-center gap-1.5">
+        <span className="text-studio-muted cursor-grab select-none text-xs" title="Drag to reorder">
+          ⠿
+        </span>
+        <button
+          type="button"
+          title="Icon"
+          className={`w-6 h-6 shrink-0 flex items-center justify-center rounded border text-sm leading-none ${
+            iconOpen ? 'border-studio-accent bg-studio-accent/15' : 'border-studio-border bg-studio-panel2 text-studio-muted'
+          }`}
+          onClick={onToggleIcon}
+        >
+          {glyph ?? '—'}
+        </button>
+        <input
+          className="flex-1 min-w-0 bg-studio-panel2 border border-studio-border rounded px-1.5 py-0.5 text-xs"
+          placeholder="Item text"
+          value={item.text}
+          onChange={(e) => onTextInput({ text: e.target.value })}
+        />
+        <button className="text-[11px] text-studio-muted hover:text-studio-text" title="Duplicate item" onClick={onDuplicate}>
+          ⧉
+        </button>
+        <button className="text-[11px] text-studio-muted hover:text-red-400" title="Delete item" onClick={onDelete}>
+          ✕
+        </button>
+      </div>
+
+      {iconOpen && <IconPicker value={item.iconSymbol} onSelect={(symbolId) => onCommitChange({ iconSymbol: symbolId })} />}
+
+      <div className="flex flex-col gap-0.5">
+        <span className="text-[10px] text-studio-muted uppercase tracking-wide">Widget ID</span>
+        <input
+          className={`bg-studio-panel2 border rounded px-1.5 py-0.5 text-xs font-mono ${invalidReason ? 'border-studio-danger' : 'border-studio-border'}`}
+          value={item.widgetId}
+          onChange={(e) => onTextInput({ widgetId: e.target.value })}
+        />
+        {invalidReason ? (
+          <span className="text-[10px] text-studio-danger">{invalidReason}</span>
+        ) : (
+          <span className="text-[10px] text-studio-muted font-mono">→ {varNamePreview}</span>
+        )}
+      </div>
+
+      <div className="flex items-center gap-3">
+        <label className="flex items-center gap-1.5 cursor-pointer">
+          <input type="checkbox" checked={item.clickEventEnabled} onChange={(e) => onCommitChange({ clickEventEnabled: e.target.checked })} />
+          <span className="studio-label">Click event</span>
+        </label>
+        <label className="flex items-center gap-1.5 cursor-pointer">
+          <input type="checkbox" checked={item.encoderFocusEnabled} onChange={(e) => onCommitChange({ encoderFocusEnabled: e.target.checked })} />
+          <span className="studio-label">Encoder focus</span>
+        </label>
+      </div>
+    </div>
+  )
+}
+
+/** List widget item editor — add/edit/delete/duplicate/reorder rows, each backed directly by the
+ * addUiListItem/updateUiListItem/deleteUiListItem/duplicateUiListItem/reorderUiListItem store
+ * actions (store.ts). Every change writes straight to the store (no "Apply" step), so the canvas
+ * preview (WidgetRenderer.tsx's 'list' case) and the always-visible LVGL Code panel update live. */
+function ListItemsSection({ widget }: { widget: UiWidget }) {
+  const checkpoint = useStore((s) => s.checkpoint)
+  const addUiListItem = useStore((s) => s.addUiListItem)
+  const updateUiListItem = useStore((s) => s.updateUiListItem)
+  const deleteUiListItem = useStore((s) => s.deleteUiListItem)
+  const duplicateUiListItem = useStore((s) => s.duplicateUiListItem)
+  const reorderUiListItem = useStore((s) => s.reorderUiListItem)
+  const allWidgets = useStore((s) => s.project.uiDesign.widgets)
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [iconOpenFor, setIconOpenFor] = useState<string | null>(null)
+
+  const items = widget.listItems ?? []
+
+  const otherIdentifiers = useMemo(() => {
+    const set = new Set<string>()
+    for (const w of Object.values(allWidgets)) {
+      if (w.id !== widget.id && w.tagId) set.add(w.tagId)
+    }
+    return set
+  }, [allWidgets, widget.id])
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-studio-border pt-2.5">
+      <div className="flex items-center justify-between">
+        <span className="studio-label">List Items</span>
+        <button
+          className="text-[11px] text-studio-accent hover:text-studio-text"
+          onClick={() => {
+            checkpoint()
+            addUiListItem(widget.id)
+          }}
+        >
+          + Add Item
+        </button>
+      </div>
+
+      {items.length === 0 && <p className="text-[11px] text-studio-muted">No items yet — click "+ Add Item" to add one.</p>}
+
+      <div className="flex flex-col gap-1.5">
+        {items.map((item, index) => {
+          const trimmedId = item.widgetId.trim()
+          const dupInList = items.filter((it) => it.widgetId === item.widgetId).length > 1
+          let invalidReason: string | null = null
+          if (trimmedId === '') invalidReason = 'Widget ID is required'
+          else if (dupInList) invalidReason = 'Duplicate widget ID within this list'
+          else if (otherIdentifiers.has(trimmedId)) invalidReason = 'Widget ID collides with another widget'
+          else if (item.text.trim() === '') invalidReason = 'Item text is required'
+
+          return (
+            <ListItemRow
+              key={item.id}
+              item={item}
+              invalidReason={invalidReason}
+              varNamePreview={`${toCIdentifier(trimmedId || 'item')}_item`}
+              dragging={dragIndex === index}
+              iconOpen={iconOpenFor === item.id}
+              onToggleIcon={() => setIconOpenFor(iconOpenFor === item.id ? null : item.id)}
+              onDragStart={() => setDragIndex(index)}
+              onDropOnto={() => {
+                if (dragIndex !== null && dragIndex !== index) {
+                  checkpoint()
+                  reorderUiListItem(widget.id, dragIndex, index)
+                }
+                setDragIndex(null)
+              }}
+              onTextInput={(partial) => updateUiListItem(widget.id, item.id, partial)}
+              onCommitChange={(partial) => {
+                checkpoint()
+                updateUiListItem(widget.id, item.id, partial)
+              }}
+              onDuplicate={() => {
+                checkpoint()
+                duplicateUiListItem(widget.id, item.id)
+              }}
+              onDelete={() => {
+                checkpoint()
+                deleteUiListItem(widget.id, item.id)
+              }}
+            />
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/** One row in a Keyboard widget's custom-layout editor — same drag-reorder card shape as
+ * ListItemRow above, simpler fields (no icon/validation — any label/insertText is valid for a
+ * hand-authored layout). `newRow` starts a fresh row on the keyboard (see UiKeyboardCustomLayout's
+ * doc comment for why the layout is stored as one flat, `newRow`-flagged list). */
+function KeyboardCustomKeyRow({
+  keyItem,
+  dragging,
+  onDragStart,
+  onDropOnto,
+  onChange,
+  onCommitChange,
+  onDelete
+}: {
+  keyItem: UiKeyboardCustomKey
+  dragging: boolean
+  onDragStart: () => void
+  onDropOnto: () => void
+  onChange: (partial: Partial<UiKeyboardCustomKey>) => void
+  onCommitChange: (partial: Partial<UiKeyboardCustomKey>) => void
+  onDelete: () => void
+}) {
+  return (
+    <div
+      className={`bg-studio-panel border border-studio-border2 rounded p-1.5 flex items-center gap-1.5 ${dragging ? 'opacity-40' : ''}`}
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault()
+        onDropOnto()
+      }}
+    >
+      <span className="text-studio-muted cursor-grab select-none text-xs" title="Drag to reorder">
+        ⠿
+      </span>
+      <label className="flex items-center gap-1 shrink-0 cursor-pointer" title="Start a new row on the keyboard before this key">
+        <input type="checkbox" checked={Boolean(keyItem.newRow)} onChange={(e) => onCommitChange({ newRow: e.target.checked })} />
+        <span className="text-[10px] text-studio-muted">New row</span>
+      </label>
+      <input
+        className="w-16 bg-studio-panel2 border border-studio-border rounded px-1.5 py-0.5 text-xs"
+        placeholder="Label"
+        value={keyItem.label}
+        onChange={(e) => onChange({ label: e.target.value })}
+      />
+      <input
+        className="flex-1 min-w-0 bg-studio-panel2 border border-studio-border rounded px-1.5 py-0.5 text-xs font-mono"
+        placeholder="Inserts..."
+        value={keyItem.insertText}
+        onChange={(e) => onChange({ insertText: e.target.value })}
+      />
+      <button className="text-[11px] text-studio-muted hover:text-red-400 shrink-0" title="Delete key" onClick={onDelete}>
+        ✕
+      </button>
+    </div>
+  )
+}
+
+/** Keyboard widget's custom-layout editor — only rendered when `keyboardConfig.language ===
+ * 'custom'`. Each row is one key; add/delete/reorder mirror ListItemsSection's own actions. */
+function KeyboardCustomLayoutEditor({ widget }: { widget: UiWidget }) {
+  const checkpoint = useStore((s) => s.checkpoint)
+  const addUiKeyboardCustomKey = useStore((s) => s.addUiKeyboardCustomKey)
+  const updateUiKeyboardCustomKey = useStore((s) => s.updateUiKeyboardCustomKey)
+  const deleteUiKeyboardCustomKey = useStore((s) => s.deleteUiKeyboardCustomKey)
+  const reorderUiKeyboardCustomKey = useStore((s) => s.reorderUiKeyboardCustomKey)
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+
+  const keys = widget.keyboardConfig?.customLayout?.keys ?? []
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <span className="studio-label">Custom Layout Keys</span>
+        <button
+          className="text-[11px] text-studio-accent hover:text-studio-text"
+          onClick={() => {
+            checkpoint()
+            addUiKeyboardCustomKey(widget.id)
+          }}
+        >
+          + Add Key
+        </button>
+      </div>
+      {keys.length === 0 && <p className="text-[11px] text-studio-muted">No keys yet — click "+ Add Key" to add one.</p>}
+      <div className="flex flex-col gap-1">
+        {keys.map((k, index) => (
+          <KeyboardCustomKeyRow
+            key={k.id}
+            keyItem={k}
+            dragging={dragIndex === index}
+            onDragStart={() => setDragIndex(index)}
+            onDropOnto={() => {
+              if (dragIndex !== null && dragIndex !== index) {
+                checkpoint()
+                reorderUiKeyboardCustomKey(widget.id, dragIndex, index)
+              }
+              setDragIndex(null)
+            }}
+            onChange={(partial) => updateUiKeyboardCustomKey(widget.id, k.id, partial)}
+            onCommitChange={(partial) => {
+              checkpoint()
+              updateUiKeyboardCustomKey(widget.id, k.id, partial)
+            }}
+            onDelete={() => {
+              checkpoint()
+              deleteUiKeyboardCustomKey(widget.id, k.id)
+            }}
+          />
+        ))}
+      </div>
+      <p className="text-[11px] text-studio-muted">Backspace/Enter/Close keys are always added automatically after your own keys.</p>
+    </div>
+  )
+}
+
+/** Font picker + import, shown inside KeyboardSection — one font selection per keyboard, applied
+ * (at export time — see lvglExport.ts) to both the keyboard's own key labels and its linked
+ * output textarea, so "Danish text displays correctly" covers both places with one setting. This
+ * app does no font rasterization of its own (see fontImport.ts's file-top comment) — the user
+ * pastes/uploads a `.c` file already produced by LVGL's own official font converter. */
+function KeyboardFontPicker({ widget }: { widget: UiWidget }) {
+  const customFonts = useStore((s) => s.project.uiDesign.customFonts)
+  const addUiCustomFont = useStore((s) => s.addUiCustomFont)
+  const deleteUiCustomFont = useStore((s) => s.deleteUiCustomFont)
+  const updateUiKeyboardConfig = useStore((s) => s.updateUiKeyboardConfig)
+  const checkpoint = useStore((s) => s.checkpoint)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const config = widget.keyboardConfig
+  if (!config) return null
+
+  const selectedFont = customFonts.find((f) => f.id === config.customFontId) ?? null
+  const missing = selectedFont ? missingDanishCodepoints(selectedFont.declaredCodepoints) : []
+
+  const importFile = async (file: File) => {
+    const text = await file.text()
+    checkpoint()
+    const id = addUiCustomFont(file.name.replace(/\.c$/i, ''), text)
+    updateUiKeyboardConfig(widget.id, { customFontId: id })
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="studio-label">Custom Font (for Danish glyphs)</span>
+      <div className="flex items-center gap-1.5">
+        <select
+          className="flex-1 min-w-0 bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-xs"
+          value={config.customFontId ?? ''}
+          onChange={(e) => {
+            checkpoint()
+            updateUiKeyboardConfig(widget.id, { customFontId: e.target.value || null })
+          }}
+        >
+          <option value="">(default — LVGL Montserrat, no æøå)</option>
+          {customFonts.map((f) => (
+            <option key={f.id} value={f.id}>
+              {f.name}
+            </option>
+          ))}
+        </select>
+        <button className="text-[11px] text-studio-accent hover:text-studio-text shrink-0" onClick={() => fileInputRef.current?.click()}>
+          Import .c...
+        </button>
+        {selectedFont && (
+          <button
+            className="text-[11px] text-studio-muted hover:text-red-400 shrink-0"
+            title="Delete this font"
+            onClick={() => {
+              checkpoint()
+              deleteUiCustomFont(selectedFont.id)
+            }}
+          >
+            ✕
+          </button>
+        )}
+      </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".c,text/plain"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) void importFile(file)
+          e.target.value = ''
+        }}
+      />
+      <p className="text-[11px] text-studio-muted">
+        Convert a font at{' '}
+        <a href="https://lvgl.io/tools/fontconverter" target="_blank" rel="noreferrer" className="underline">
+          lvgl.io/tools/fontconverter
+        </a>{' '}
+        (include æ ø å Æ Ø Å in the character list) and import the generated .c file here.
+      </p>
+      {config.language === 'danish' && config.danishCharsEnabled && (
+        <>
+          {!selectedFont && <p className="text-[11px] text-studio-danger">⚠ No custom font selected — æ/ø/å will render as missing-glyph boxes on real hardware.</p>}
+          {selectedFont && missing.length > 0 && (
+            <p className="text-[11px] text-studio-danger">⚠ "{selectedFont.name}" is missing: {missing.join(' ')}</p>
+          )}
+          {selectedFont && missing.length === 0 && <p className="text-[11px] text-green-500">✓ "{selectedFont.name}" covers æ ø å Æ Ø Å.</p>}
+        </>
+      )}
+    </div>
+  )
+}
+
+const KEYBOARD_LANGUAGES: { value: NonNullable<UiWidget['keyboardConfig']>['language']; label: string }[] = [
+  { value: 'english', label: 'English' },
+  { value: 'danish', label: 'Danish' },
+  { value: 'custom', label: 'Custom' }
+]
+
+const KEYBOARD_SHAPES: { value: NonNullable<UiWidget['keyboardConfig']>['shape']; label: string; hint: string }[] = [
+  { value: 'rectangular', label: 'Rectangular', hint: "Today's plain full-width rows, regardless of display shape." },
+  { value: 'adaptive', label: 'Adaptive', hint: 'Automatically curves rows to fit a round display; no change on a square/rectangular one.' },
+  { value: 'round', label: 'Round', hint: 'Always applies the round-display curving, even on a non-round display.' },
+  { value: 'custom', label: 'Custom', hint: 'Uses the fixed padding values below instead of automatic curving.' }
+]
+
+/** A reasonable starting point for the Custom-shape padding fields, derived from the project's own
+ * display size — deliberately only ever applied via the explicit "Use suggested values" button
+ * below (see keyboardConfig.edgePadding.autoEdgeCompensation's own doc comment), never silently,
+ * matching DisplaySettingsPanel.tsx's own orientation-swap-button precedent for "a computed
+ * suggestion the user explicitly opts into," not a live-recomputing magic default. */
+function suggestedKeyboardEdgePadding(display: { width: number; height: number }): NonNullable<UiWidget['keyboardConfig']>['edgePadding'] {
+  const margin = Math.max(2, Math.round(Math.min(display.width, display.height) * 0.025))
+  return { leftCurve: margin * 2, rightCurve: margin * 2, top: margin, bottom: margin, safeAreaMargin: margin, autoEdgeCompensation: true }
+}
+
+/** Full Keyboard widget properties — General/Language/Alt Characters/Interaction/Debug Panel
+ * groups, matching the spec's own section grouping. Every field writes straight to
+ * keyboardConfig via updateUiKeyboardConfig (no "Apply" step), same live-update convention as
+ * every other Properties panel field in this file. */
+function KeyboardSection({ widget }: { widget: UiWidget }) {
+  const allWidgets = useStore((s) => s.project.uiDesign.widgets)
+  const display = useStore((s) => s.project.uiDesign.display)
+  const updateUiKeyboardConfig = useStore((s) => s.updateUiKeyboardConfig)
+  const checkpoint = useStore((s) => s.checkpoint)
+
+  const config = widget.keyboardConfig
+  if (!config) return null
+
+  const set = (partial: Partial<typeof config>) => {
+    checkpoint()
+    updateUiKeyboardConfig(widget.id, partial)
+  }
+
+  const otherTextareas = Object.values(allWidgets).filter((w) => w.type === 'textarea')
+  const otherLabels = Object.values(allWidgets).filter((w) => w.type === 'label')
+
+  return (
+    <div className="flex flex-col gap-3 border-t border-studio-border pt-2.5">
+      <span className="studio-label">Keyboard</span>
+
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[10px] text-studio-muted uppercase tracking-wide">General</span>
+        <input
+          className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+          placeholder="Keyboard title"
+          value={config.title}
+          onChange={(e) => updateUiKeyboardConfig(widget.id, { title: e.target.value })}
+          onBlur={() => checkpoint()}
+        />
+        <div className="grid grid-cols-2 gap-2">
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] text-studio-muted">Target Text Area</span>
+            <select
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-xs"
+              value={config.targetTextareaId ?? ''}
+              onChange={(e) => set({ targetTextareaId: e.target.value || null })}
+            >
+              <option value="">(none)</option>
+              {otherTextareas.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.tagId ?? w.id}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] text-studio-muted">Debug Label</span>
+            <select
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-xs"
+              value={config.debugLabelId ?? ''}
+              onChange={(e) => set({ debugLabelId: e.target.value || null })}
+            >
+              <option value="">(none)</option>
+              {otherLabels.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.tagId ?? w.id}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={config.autoOpen} onChange={(e) => set({ autoOpen: e.target.checked })} />
+            Auto-open
+          </label>
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={config.autoCloseOnSubmit} onChange={(e) => set({ autoCloseOnSubmit: e.target.checked })} />
+            Auto-close on submit
+          </label>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1.5 border-t border-studio-border pt-2">
+        <span className="text-[10px] text-studio-muted uppercase tracking-wide">Language</span>
+        <div className="flex bg-studio-panel2 rounded-md p-0.5 border border-studio-border">
+          {KEYBOARD_LANGUAGES.map((l) => (
+            <button
+              key={l.value}
+              className={`flex-1 text-xs py-1 rounded ${config.language === l.value ? 'bg-studio-accent/20 text-studio-accent' : 'text-studio-muted'}`}
+              onClick={() => set({ language: l.value, danishCharsEnabled: l.value === 'danish' ? true : config.danishCharsEnabled })}
+            >
+              {l.label}
+            </button>
+          ))}
+        </div>
+        {config.language !== 'custom' && (
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={config.showLanguageSwitchKey} onChange={(e) => set({ showLanguageSwitchKey: e.target.checked })} />
+            Show language-switch key
+          </label>
+        )}
+        {config.language === 'danish' && (
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={config.danishCharsEnabled} onChange={(e) => set({ danishCharsEnabled: e.target.checked })} />
+            Danish characters (æ ø å) enabled
+          </label>
+        )}
+        {config.language === 'custom' && <KeyboardCustomLayoutEditor widget={widget} />}
+      </div>
+
+      <div className="flex flex-col gap-1.5 border-t border-studio-border pt-2">
+        <span className="text-[10px] text-studio-muted uppercase tracking-wide">Keyboard Shape</span>
+        <div className="grid grid-cols-2 gap-1 bg-studio-panel2 rounded-md p-0.5 border border-studio-border">
+          {KEYBOARD_SHAPES.map((s) => (
+            <button
+              key={s.value}
+              title={s.hint}
+              className={`text-xs py-1 rounded ${config.shape === s.value ? 'bg-studio-accent/20 text-studio-accent' : 'text-studio-muted'}`}
+              onClick={() => set({ shape: s.value })}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] text-studio-muted">{KEYBOARD_SHAPES.find((s) => s.value === config.shape)?.hint}</p>
+        {config.shape === 'custom' && (
+          <div className="flex flex-col gap-1.5 pt-1">
+            <div className="grid grid-cols-2 gap-2">
+              <NumberField label="Left Curve Padding" value={config.edgePadding.leftCurve} onChange={(v) => set({ edgePadding: { ...config.edgePadding, leftCurve: v } })} />
+              <NumberField label="Right Curve Padding" value={config.edgePadding.rightCurve} onChange={(v) => set({ edgePadding: { ...config.edgePadding, rightCurve: v } })} />
+              <NumberField label="Top Padding" value={config.edgePadding.top} onChange={(v) => set({ edgePadding: { ...config.edgePadding, top: v } })} />
+              <NumberField label="Bottom Padding" value={config.edgePadding.bottom} onChange={(v) => set({ edgePadding: { ...config.edgePadding, bottom: v } })} />
+            </div>
+            <NumberField label="Safe-Area Margin" value={config.edgePadding.safeAreaMargin} onChange={(v) => set({ edgePadding: { ...config.edgePadding, safeAreaMargin: v } })} />
+            <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+              <input
+                type="checkbox"
+                checked={config.edgePadding.autoEdgeCompensation}
+                onChange={(e) => set({ edgePadding: { ...config.edgePadding, autoEdgeCompensation: e.target.checked } })}
+              />
+              Automatic edge compensation
+            </label>
+            <button
+              className="self-start text-xs px-2 py-1 rounded border border-studio-border text-studio-muted hover:text-studio-accent hover:border-studio-accent"
+              onClick={() => set({ edgePadding: suggestedKeyboardEdgePadding(display) })}
+            >
+              Use suggested values
+            </button>
+          </div>
+        )}
+        {(config.shape === 'round' || (config.shape === 'adaptive' && display.shape === 'round')) && (
+          <p className="text-[11px] text-studio-muted">Rows automatically indent to fit the round display — no manual padding needed.</p>
+        )}
+      </div>
+
+      {config.language !== 'custom' && (
+        <div className="flex flex-col gap-1.5 border-t border-studio-border pt-2">
+          <span className="text-[10px] text-studio-muted uppercase tracking-wide">Alternate Characters</span>
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={config.altCharsEnabled} onChange={(e) => set({ altCharsEnabled: e.target.checked })} />
+            Long-press for accented variants
+          </label>
+          {config.altCharsEnabled && (
+            <p className="text-[11px] text-studio-muted">
+              {(config.customAltChars ?? DEFAULT_ALT_CHARS).map((a) => `${a.base}→${a.variants.join('')}`).join('  ')}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="border-t border-studio-border pt-2">
+        <KeyboardFontPicker widget={widget} />
+      </div>
+
+      <div className="flex flex-col gap-1.5 border-t border-studio-border pt-2">
+        <span className="text-[10px] text-studio-muted uppercase tracking-wide">Interaction</span>
+        <div className="grid grid-cols-2 gap-1">
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={config.encoderEnabled} onChange={(e) => set({ encoderEnabled: e.target.checked })} />
+            Encoder enabled
+          </label>
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={config.wrapNavigation} onChange={(e) => set({ wrapNavigation: e.target.checked })} />
+            Wrap navigation
+          </label>
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={config.repeatBackspace} onChange={(e) => set({ repeatBackspace: e.target.checked })} />
+            Repeat backspace
+          </label>
+        </div>
+        <NumberField label="Repeat Delay (ms)" value={config.repeatDelayMs} onChange={(v) => set({ repeatDelayMs: v })} />
+      </div>
+
+      <div className="flex flex-col gap-1.5 border-t border-studio-border pt-2">
+        <label className="flex items-center gap-1.5 cursor-pointer">
+          <input type="checkbox" checked={config.showEventInfo} onChange={(e) => set({ showEventInfo: e.target.checked })} />
+          <span className="studio-label">Show Event Info (debug panel)</span>
+        </label>
+        {config.showEventInfo && (
+          <div className="grid grid-cols-2 gap-1 pl-1">
+            <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+              <input type="checkbox" checked={config.showSelectedCharacter} onChange={(e) => set({ showSelectedCharacter: e.target.checked })} />
+              Selected character
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+              <input type="checkbox" checked={config.showCursorPosition} onChange={(e) => set({ showCursorPosition: e.target.checked })} />
+              Cursor position
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+              <input type="checkbox" checked={config.showCallbackName} onChange={(e) => set({ showCallbackName: e.target.checked })} />
+              Callback name
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+              <input type="checkbox" checked={config.showCurrentAction} onChange={(e) => set({ showCurrentAction: e.target.checked })} />
+              Current action
+            </label>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** Extended textarea fields (multiline/password/read-only/max-length/cursor+selection color) —
+ * genuinely useful on any 'textarea' widget, not just ones linked to a keyboard. Written via the
+ * existing generic updateUiWidgetProps (see UiWidget.props' own doc comment for this convention). */
+function TextareaOutputSection({ widget }: { widget: UiWidget }) {
+  const updateUiWidgetProps = useStore((s) => s.updateUiWidgetProps)
+  const checkpoint = useStore((s) => s.checkpoint)
+
+  const set = (partial: Record<string, string | number | boolean>) => {
+    checkpoint()
+    updateUiWidgetProps(widget.id, partial)
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5 border-t border-studio-border pt-2.5">
+      <span className="studio-label">Text Area</span>
+      <div className="grid grid-cols-2 gap-1">
+        <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+          <input type="checkbox" checked={Boolean(widget.props.multiline)} onChange={(e) => set({ multiline: e.target.checked })} />
+          Multi-line
+        </label>
+        <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+          <input type="checkbox" checked={Boolean(widget.props.passwordMode)} onChange={(e) => set({ passwordMode: e.target.checked })} />
+          Password mode
+        </label>
+        <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+          <input type="checkbox" checked={Boolean(widget.props.readOnly)} onChange={(e) => set({ readOnly: e.target.checked })} />
+          Read-only
+        </label>
+      </div>
+      <NumberField
+        label="Max Length (0 = unlimited)"
+        value={typeof widget.props.maxLength === 'number' ? widget.props.maxLength : 0}
+        onChange={(v) => set({ maxLength: Math.max(0, v) })}
+      />
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-studio-muted">Cursor Color</span>
+          <input
+            type="color"
+            className="w-full h-7 bg-studio-panel2 border border-studio-border rounded"
+            value={typeof widget.props.cursorColor === 'string' ? widget.props.cursorColor : '#2196f3'}
+            onChange={(e) => set({ cursorColor: e.target.value })}
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-studio-muted">Selection Color</span>
+          <input
+            type="color"
+            className="w-full h-7 bg-studio-panel2 border border-studio-border rounded"
+            value={typeof widget.props.selectionColor === 'string' ? widget.props.selectionColor : '#2196f3'}
+            onChange={(e) => set({ selectionColor: e.target.value })}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // Position/size are always inline, direct-manipulation fields (drag/resize own them — states
 // don't carry their own position in this pass). The appearance block below (background/color/
 // border/padding/opacity/font/align) is state-aware: selecting Hover/Pressed/Disabled/Focused
@@ -1032,6 +1736,10 @@ export function PropertiesPanel() {
           </select>
         </div>
       )}
+
+      {widget.type === 'list' && <ListItemsSection widget={widget} />}
+      {widget.type === 'textarea' && <TextareaOutputSection widget={widget} />}
+      {widget.type === 'keyboard' && <KeyboardSection widget={widget} />}
 
       <div className="border-t border-studio-border pt-2.5 flex flex-col gap-2.5">
         <div className="flex bg-studio-panel2 rounded-md p-0.5 border border-studio-border">

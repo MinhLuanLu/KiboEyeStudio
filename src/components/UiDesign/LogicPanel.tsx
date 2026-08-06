@@ -8,7 +8,7 @@ import { useStore } from '@/state/store'
 import { useScriptSandbox, LOG_KIND_LEVEL, type SandboxLogEntry, type SandboxLogKind } from '@/lib/uiDesign/scriptLang/sandboxRuntime'
 import { parseScript } from '@/lib/uiDesign/scriptLang/parser'
 import { validateScript, type ScriptValidationResult } from '@/lib/uiDesign/scriptLang/validateScript'
-import { buildValidationCodegenContext } from '@/lib/export/lvglExport'
+import { buildValidationCodegenContext, EVENT_CAPABLE_WIDGET_TYPES, reachableWidgetsForScreen } from '@/lib/export/lvglExport'
 
 // Module-level, never-recreated CodeMirror config — see LvglCodePanel.tsx's own copy of this
 // exact note for why: passing fresh `extensions`/`basicSetup` literals on every render forces
@@ -123,6 +123,11 @@ export function LogicPanel() {
   const script = useStore((s) => s.project.uiDesign.script)
   const setUiScript = useStore((s) => s.setUiScript)
   const checkpoint = useStore((s) => s.checkpoint)
+  const simulatedFocusWidgetId = useStore((s) => s.simulatedFocusWidgetId)
+  const simulatedFocusEditing = useStore((s) => s.simulatedFocusEditing)
+  const simulateFocusNext = useStore((s) => s.simulateFocusNext)
+  const simulateFocusPrevious = useStore((s) => s.simulateFocusPrevious)
+  const simulateFocusPress = useStore((s) => s.simulateFocusPress)
 
   const [draft, setDraft] = useState(script)
   const lastScriptRef = useRef(script)
@@ -139,6 +144,16 @@ export function LogicPanel() {
       lastScriptRef.current = script
     }
   }, [script, draft])
+
+  // Gates the "Simulate Encoder Navigation" block below — only shown when there's actually
+  // something on the active screen to navigate to (any widget the exported firmware's own
+  // per-screen focus group would include — see EVENT_CAPABLE_WIDGET_TYPES/'keyboard').
+  const hasFocusableWidgets = useMemo(() => {
+    const ud = project.uiDesign
+    const activeScreen = ud.screens.find((sc) => sc.id === ud.activeScreenId)
+    if (!activeScreen) return false
+    return reachableWidgetsForScreen(ud, activeScreen).some((w) => EVENT_CAPABLE_WIDGET_TYPES.has(w.type) || w.type === 'keyboard')
+  }, [project.uiDesign])
 
   const hasUnappliedChanges = draft !== script
   const syntaxIssues = useMemo(() => parseScript(draft).errors, [draft])
@@ -289,6 +304,33 @@ export function LogicPanel() {
           ))}
         </div>
       ) : null}
+
+      {hasFocusableWidgets && (
+        <div className="studio-panel2 border border-studio-border rounded p-2 flex flex-col gap-1.5">
+          <span className="studio-label">Simulate Encoder Navigation</span>
+          <p className="text-[11px] text-studio-muted">
+            Mirrors the exported firmware's per-screen focus group — moves between focusable widgets on the active screen; pressing a focused
+            keyboard enters it (rotate to move between keys, press again to activate the highlighted one), matching real rotary-encoder hardware.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            <button className="studio-btn text-[11px] px-2 py-1" disabled={!sandbox.running} onClick={simulateFocusPrevious}>
+              ⟲ Focus
+            </button>
+            <button className="studio-btn text-[11px] px-2 py-1" disabled={!sandbox.running} onClick={simulateFocusNext}>
+              ⟳ Focus
+            </button>
+            <button className="studio-btn text-[11px] px-2 py-1" disabled={!sandbox.running} onClick={simulateFocusPress}>
+              ⏎ Press
+            </button>
+          </div>
+          {simulatedFocusWidgetId && (
+            <span className="text-[11px] text-studio-muted">
+              Focused: {project.uiDesign.widgets[simulatedFocusWidgetId]?.tagId ?? simulatedFocusWidgetId}
+              {simulatedFocusEditing ? ' (editing keys)' : ''}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="flex flex-col gap-1 min-w-0">
         <div className="flex items-center justify-between gap-2 flex-wrap">
