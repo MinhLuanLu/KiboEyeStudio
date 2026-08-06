@@ -116,11 +116,30 @@ function applyBindingFormat(value: unknown, options?: BindingOptions): string {
   return text
 }
 
+// 'bounce'/'overshoot' are real LVGL v9 anim path functions (lv_anim_path_bounce/
+// lv_anim_path_overshoot — see codegen.ts's renderAnimate), not a simulated/fake effect; these
+// preview approximations use the standard easeOutBounce/easeOutBack curves so the browser preview
+// looks like what the real exported firmware animation will actually do.
 const EASINGS: Record<string, (t: number) => number> = {
   linear: (t) => t,
   easeOut: (t) => 1 - (1 - t) * (1 - t),
   easeIn: (t) => t * t,
-  easeInOut: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
+  easeInOut: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
+  overshoot: (t) => {
+    const c1 = 1.70158
+    const c3 = c1 + 1
+    const x = t - 1
+    return 1 + c3 * x * x * x + c1 * x * x
+  },
+  bounce: (t) => {
+    const n1 = 7.5625
+    const d1 = 2.75
+    let x = t
+    if (x < 1 / d1) return n1 * x * x
+    if (x < 2 / d1) return n1 * (x -= 1.5 / d1) * x + 0.75
+    if (x < 2.5 / d1) return n1 * (x -= 2.25 / d1) * x + 0.9375
+    return n1 * (x -= 2.625 / d1) * x + 0.984375
+  }
 }
 
 // Exported (only) so scratch/unit-style scripts can drive it directly without mounting React —
@@ -331,6 +350,7 @@ export class ScriptSandbox {
       this.snapshot = null
     }
     useStore.getState().resetRuntimeVariableValues()
+    useStore.getState().resetRuntimeDataListItems()
     useStore.getState().resetKeyboardRuntime()
     useStore.getState().resetSimulatedFocus()
     this.cb.onRunningChange(false)
@@ -447,6 +467,7 @@ export class ScriptSandbox {
     if (typeof config.y === 'number') props.push({ key: 'y', from: typeof style.y === 'number' ? style.y : 0, to: config.y })
     if (typeof config.opacity === 'number') props.push({ key: 'opacity', from: style.opacity ?? 100, to: config.opacity })
     if (typeof config.scale === 'number') props.push({ key: 'scale', from: style.scale ?? 1, to: config.scale })
+    if (typeof config.rotation === 'number') props.push({ key: 'rotation', from: style.rotation ?? 0, to: config.rotation })
     if (props.length === 0) return
     const start = performance.now()
     const step = (now: number) => {

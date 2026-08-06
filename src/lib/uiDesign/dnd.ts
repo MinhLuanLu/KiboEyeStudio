@@ -1,4 +1,5 @@
 import type { UiWidgetType } from '@/types'
+import type { ComponentTemplateId } from './componentTemplates'
 
 /** Native HTML5 DnD MIME type used to drag a widget kind from the Toolbox onto the Canvas —
  * no drag-and-drop library, same "plain browser APIs" approach as this codebase's existing
@@ -28,4 +29,19 @@ export function setAssetDragPayload(e: React.DragEvent, assetId: string): void {
 export function readAssetDragPayload(e: React.DragEvent): string | null {
   const id = e.dataTransfer.getData(UI_ASSET_DND_TYPE)
   return id || null
+}
+
+/** Same pattern, for dragging a Professional Component template out of the Toolbox onto the
+ * Canvas — see Canvas.tsx's onDrop, which checks this payload type before falling back to
+ * readWidgetDragPayload. */
+export const UI_COMPONENT_TEMPLATE_DND_TYPE = 'application/x-kibo-ui-component-template'
+
+export function setComponentTemplateDragPayload(e: React.DragEvent, templateId: ComponentTemplateId): void {
+  e.dataTransfer.setData(UI_COMPONENT_TEMPLATE_DND_TYPE, templateId)
+  e.dataTransfer.effectAllowed = 'copy'
+}
+
+export function readComponentTemplateDragPayload(e: React.DragEvent): ComponentTemplateId | null {
+  const id = e.dataTransfer.getData(UI_COMPONENT_TEMPLATE_DND_TYPE)
+  return id ? (id as ComponentTemplateId) : null
 }

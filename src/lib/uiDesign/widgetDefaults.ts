@@ -1,6 +1,24 @@
 import { nanoid } from 'nanoid'
 import { DEFAULT_UI_DISPLAY } from '@/types'
-import type { UiDesignProject, UiKeyboardConfig, UiListItem, UiScreen, UiWidget, UiWidgetStyle, UiWidgetType } from '@/types'
+import type { UiDataListConfig, UiDesignProject, UiKeyboardConfig, UiListItem, UiScreen, UiWidget, UiWidgetStyle, UiWidgetType } from '@/types'
+
+/** A fresh `UiDataListConfig` for a newly-dropped Data List widget — no data source assigned yet
+ * (the user picks one in the Properties panel's Data section); the template subtree is built
+ * with the ordinary widget-editing tools (see UiWidgetType='dataList' doc comment), so unlike
+ * `defaultKeyboardConfig()` there's no linked-sibling-widget bookkeeping needed here. */
+export function defaultDataListConfig(): UiDataListConfig {
+  return {
+    dataSourceId: null,
+    emptyText: 'No items',
+    loadingText: 'Loading…',
+    errorText: 'Something went wrong',
+    maxItems: 0,
+    renderingMode: 'createAll',
+    itemClickEnabled: true,
+    includeSampleDataInExport: false,
+    itemSpacing: 4
+  }
+}
 
 /** A fresh `UiKeyboardConfig` for a newly-dropped keyboard widget — `targetTextareaId`/
  * `debugLabelId` are filled in by store.ts's `addUiWidget`, which is what actually creates the
@@ -51,6 +69,7 @@ const WIDGET_DEFAULTS: Record<
     style?: Partial<UiWidgetStyle>
     listItems?: Omit<UiListItem, 'id'>[]
     keyboardConfig?: UiKeyboardConfig
+    dataListConfig?: UiDataListConfig
   }
 > = {
   screen: { width: 240, height: 240 },
@@ -61,9 +80,12 @@ const WIDGET_DEFAULTS: Record<
   image: { width: 64, height: 64 },
   icon: { width: 24, height: 24, text: '', style: { fontSize: 24 } },
   switch: { width: 40, height: 20 },
-  slider: { width: 120, height: 12, props: { min: 0, max: 100, value: 50 } },
-  bar: { width: 120, height: 12, props: { min: 0, max: 100, value: 40 } },
-  arc: { width: 80, height: 80, props: { min: 0, max: 100, value: 25 } },
+  // `defaultValue` is captured once at creation time from the authored `value` — the "Reset"
+  // action (see actionTable.ts) sets the widget back to this, not to `min`, so resetting a bar
+  // someone deliberately authored at 40% doesn't silently jump to 0.
+  slider: { width: 120, height: 12, props: { min: 0, max: 100, value: 50, defaultValue: 50 } },
+  bar: { width: 120, height: 12, props: { min: 0, max: 100, value: 40, defaultValue: 40 } },
+  arc: { width: 80, height: 80, props: { min: 0, max: 100, value: 25, defaultValue: 25 } },
   checkbox: { width: 100, height: 20, text: 'Checkbox', props: { checked: false } },
   dropdown: { width: 100, height: 32, props: { options: 'Option 1\nOption 2\nOption 3' } },
   roller: { width: 100, height: 60, props: { options: 'Option 1\nOption 2\nOption 3' } },
@@ -78,7 +100,19 @@ const WIDGET_DEFAULTS: Record<
   },
   tabs: { width: 200, height: 120, props: { tabNames: 'Tab 1\nTab 2' } },
   spinner: { width: 32, height: 32 },
-  keyboard: { width: 220, height: 120, keyboardConfig: defaultKeyboardConfig() }
+  keyboard: { width: 220, height: 120, keyboardConfig: defaultKeyboardConfig() },
+  // Real lv_scale + a built-in-positioned needle line (see lvglExport.ts's 'gauge' create case) —
+  // angleRange/rotation 270/135 is the classic "opens at the bottom" automotive-gauge look.
+  gauge: { width: 90, height: 90, props: { min: 0, max: 100, value: 50, defaultValue: 50, totalTicks: 21, majorTickEvery: 5, angleRange: 270, rotation: 135 } },
+  // Real lv_led widget — color/brightness map directly to lv_led_set_color/set_brightness.
+  led: { width: 20, height: 20, props: { ledColor: '#22C55E', brightness: 100, state: 'off' } },
+  // status drives color/icon/glow/animation entirely via statusIndicatorPresets.ts's shared table
+  // — no independent color/icon fields here, that's the whole point of "automatically updates".
+  statusIndicator: { width: 90, height: 24, text: 'Online', props: { status: 'online' } },
+  // Empty childIds — the item template is built with the ordinary widget-editing tools (drag
+  // other widgets in as children); see WidgetRenderer.tsx's Data List rendering for how row 0
+  // is that real, editable template and rows 1..N-1 are non-interactive preview clones.
+  dataList: { width: 200, height: 140, dataListConfig: defaultDataListConfig() }
 }
 
 /** Creates a new widget of `type`, unattached (caller is responsible for setting parentId and
@@ -104,7 +138,8 @@ export function createWidget(type: UiWidgetType): UiWidget {
     listItems: d.listItems ? d.listItems.map((item) => ({ ...item, id: nanoid(8) })) : undefined,
     // Cloned (not the shared module-level default object) so two keyboard widgets never mutate
     // each other's config — same reasoning as listItems' fresh-id-per-item above.
-    keyboardConfig: d.keyboardConfig ? { ...d.keyboardConfig } : undefined
+    keyboardConfig: d.keyboardConfig ? { ...d.keyboardConfig } : undefined,
+    dataListConfig: d.dataListConfig ? { ...d.dataListConfig } : undefined
   }
 }
 
@@ -122,7 +157,10 @@ export function createDefaultUiDesign(): UiDesignProject {
     assets: [],
     customFonts: [],
     variables: [],
+    dataSources: [],
     display: { ...DEFAULT_UI_DISPLAY },
+    theme: 'dark',
+    customThemeTokens: null,
     htmlSource: '<screen>\n</screen>\n',
     cssSource: '',
     script: ''

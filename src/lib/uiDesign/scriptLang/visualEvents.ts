@@ -581,6 +581,30 @@ export function spliceActionAdd(script: string, widgets: Record<string, UiWidget
  * row with one action), declaring whichever `const ref = ui.get("#tag")` bindings don't already
  * exist yet. Both widgets must have a tagId (an event/action row needs a stable selector on both
  * ends). */
+/** Inserts `<ref>.on(trigger, () => { <ref>.animate(<configLiteral>); })`, reusing (never
+ * re-declaring) an existing `ui.get("#tagId")` ref exactly like addEventRow does — the mechanism
+ * the Properties panel's Animation Preset buttons use. `configLiteral` is raw object-literal
+ * source text (e.g. `{ scale: 1.2, duration: 200, easing: "bounce" }`), so this covers `.animate()`
+ * config shapes (rotation/scale/easing) the plain-literal-args visual event editor can't represent
+ * — a one-way insert, not a row the Events section can parse back out and re-edit (documented on
+ * `.animate()`'s own call site in codegen.ts), which is an accepted tradeoff for a preset-button
+ * convenience, not a bug. */
+export function addAnimatePresetRow(script: string, widgets: Record<string, UiWidget>, widgetId: string, trigger: string, configLiteral: string): string | null {
+  const widget = widgets[widgetId]
+  if (!widget?.tagId) return null
+  const { widgetIdToRefName } = findGetRefs(script, widgets)
+  let ref = widgetIdToRefName.get(widgetId)
+  const decls: string[] = []
+  if (!ref) {
+    ref = `${widget.tagId}Ref`
+    decls.push(`const ${ref} = ui.get(${JSON.stringify(`#${widget.tagId}`)});`)
+  }
+  const block = `${ref}.on(${JSON.stringify(trigger)}, () => { ${ref}.animate(${configLiteral}); });\n`
+  const prefix = decls.length > 0 ? `${decls.join('\n')}\n` : ''
+  const sep = script.trim() ? '\n' : ''
+  return `${script}${sep}${prefix}${block}`
+}
+
 export function addEventRow(script: string, widgets: Record<string, UiWidget>, sourceWidgetId: string, trigger: string, targetWidgetId: string, method: string): string | null {
   const source = widgets[sourceWidgetId]
   const target = widgets[targetWidgetId]

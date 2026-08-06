@@ -1,7 +1,12 @@
 import { useMemo, useRef, useState } from 'react'
+import * as acorn from 'acorn'
+import type { Node } from 'acorn'
 import { useStore } from '@/state/store'
 import { UI_BACKGROUND_IMAGE_WIDGETS, UI_ICON_TEXT_WIDGETS, UI_SRC_IMAGE_WIDGETS, UI_WIDGET_LABELS } from '@/types'
-import type { UiKeyboardCustomKey, UiLengthValue, UiListItem, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
+import { checkExpressionSubset } from '@/lib/uiDesign/scriptLang/restrictedSubset'
+import type { UiKeyboardCustomKey, UiLengthValue, UiListItem, UiThemeTokens, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
+import { MATERIAL_PRESET_LABELS } from '@/lib/uiDesign/materialPresets'
+import type { MaterialPresetId } from '@/lib/uiDesign/materialPresets'
 import { DEFAULT_ALT_CHARS } from '@/lib/uiDesign/keyboardLayouts'
 import { missingDanishCodepoints } from '@/lib/uiDesign/fontImport'
 import { rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
@@ -10,6 +15,7 @@ import { widgetVarName, widgetBaseName, toCIdentifier, EVENT_CAPABLE_WIDGET_TYPE
 import { IconPicker } from './IconPicker'
 import { LVGL_SYMBOLS } from '@/lib/uiDesign/lvglSymbols'
 import {
+  addAnimatePresetRow,
   addEventRow,
   parseVisualEventRows,
   spliceActionAdd,
@@ -140,7 +146,24 @@ function LengthField({ label, value, onChange }: { label: string; value: UiLengt
   )
 }
 
-function ColorField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+/** `themeToken`/`onThemeTokenChange` are optional — only the handful of themeable fields
+ * (background/text/border/shadow/glow color, see UiThemeableStyleField) pass them, giving those
+ * fields a small "Theme token" dropdown alongside the literal color picker. Picking a token
+ * doesn't discard the literal value (it stays as the fallback/last-applied color); it's tracked
+ * separately in UiWidget.themeTokens — see lib/uiDesign/themes.ts's resolveThemedStyle(). */
+function ColorField({
+  label,
+  value,
+  onChange,
+  themeToken,
+  onThemeTokenChange
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  themeToken?: keyof UiThemeTokens | null
+  onThemeTokenChange?: (token: keyof UiThemeTokens | null) => void
+}) {
   return (
     <div className="flex flex-col gap-1">
       <span className="studio-label">{label}</span>
@@ -152,9 +175,25 @@ function ColorField({ label, value, onChange }: { label: string; value: string; 
           onChange={(e) => onChange(e.target.value)}
         />
       </div>
+      {onThemeTokenChange && (
+        <select
+          className="bg-studio-panel2 border border-studio-border rounded px-1.5 py-0.5 text-[10px] text-studio-muted"
+          value={themeToken ?? ''}
+          onChange={(e) => onThemeTokenChange((e.target.value || null) as keyof UiThemeTokens | null)}
+        >
+          <option value="">Literal color (no theme token)</option>
+          {THEME_TOKEN_OPTIONS.map((t) => (
+            <option key={t} value={t}>
+              Theme token: {t}
+            </option>
+          ))}
+        </select>
+      )}
     </div>
   )
 }
+
+const THEME_TOKEN_OPTIONS: (keyof UiThemeTokens)[] = ['background', 'surface', 'primary', 'secondary', 'text', 'textMuted', 'border', 'accent']
 
 type StateTab = 'default' | UiWidgetStateName
 const STATE_TABS: { value: StateTab; label: string }[] = [
@@ -414,6 +453,86 @@ function AutoEventCallbackSection({ widget }: { widget: UiWidget }) {
           </span>
         </>
       )}
+    </div>
+  )
+}
+
+interface AnimationPresetDef {
+  label: string
+  title: string
+  configLiteral: (widget: UiWidget) => string
+}
+
+// Curated, realistic presets over the one real `.animate()` mechanism (real LVGL lv_anim, see
+// codegen.ts's renderAnimate) — sugar over a real primitive, not a second animation system. Each
+// button inserts a `<ref>.on('click', () => { <ref>.animate({...}); })` block via
+// addAnimatePresetRow (visualEvents.ts) — a one-way insert, editable afterward as plain script
+// text but not re-editable through the Events section's row UI (documented there). "Focus Glow" is
+// the one exception — it's not an animation at all, just a direct focused-state style write using
+// the existing per-state style mechanism, since glow isn't one of `.animate()`'s tweenable keys.
+const ANIMATION_PRESETS: AnimationPresetDef[] = [
+  { label: 'Fade', title: 'Fade toward 30% opacity on click', configLiteral: () => '{ opacity: 30, duration: 250, easing: "easeOut" }' },
+  { label: 'Zoom', title: 'Scale up to 120% with a slight overshoot on click', configLiteral: () => '{ scale: 1.2, duration: 220, easing: "overshoot" }' },
+  { label: 'Pulse', title: 'Shrink to 90% and back — click twice to see the pulse', configLiteral: () => '{ scale: 0.9, duration: 150, easing: "easeInOut" }' },
+  {
+    label: 'Slide',
+    title: 'Slide 24px to the right on click',
+    configLiteral: (w) => `{ x: ${Math.round((typeof w.style.x === 'number' ? w.style.x : 0) + 24)}, duration: 220, easing: "easeOut" }`
+  },
+  {
+    label: 'Press Depth',
+    title: 'Nudge down 4px on click, mimicking a pressed physical button',
+    configLiteral: (w) => `{ y: ${Math.round((typeof w.style.y === 'number' ? w.style.y : 0) + 4)}, duration: 100, easing: "easeOut" }`
+  },
+  {
+    // x/y are real lv_anim_t tweens (see codegen.ts's renderAnimate), so this is the one preset
+    // whose easing curve is genuinely animated on hardware, not just in the browser preview —
+    // rotation/scale currently snap to their final value at export time (documented on
+    // UiWidgetStyle/renderAnimate), so a "bounce" preset built around rotation would look bouncy
+    // in the live preview but NOT on real hardware; a bounce-eased slide is real end-to-end.
+    label: 'Bounce',
+    title: 'Slide 30px right with a real LVGL bounce easing curve on click (real on both preview and hardware)',
+    configLiteral: (w) => `{ x: ${Math.round((typeof w.style.x === 'number' ? w.style.x : 0) + 30)}, duration: 500, easing: "bounce" }`
+  }
+]
+
+function AnimationPresetsSection({ widget }: { widget: UiWidget }) {
+  const script = useStore((s) => s.project.uiDesign.script)
+  const widgets = useStore((s) => s.project.uiDesign.widgets)
+  const setUiScript = useStore((s) => s.setUiScript)
+  const updateUiWidgetState = useStore((s) => s.updateUiWidgetState)
+  const checkpoint = useStore((s) => s.checkpoint)
+
+  return (
+    <div className="border-t border-studio-border pt-2.5 flex flex-col gap-1.5">
+      <span className="studio-label">Animation Presets</span>
+      <div className="grid grid-cols-3 gap-1">
+        {ANIMATION_PRESETS.map((p) => (
+          <button
+            key={p.label}
+            className="studio-btn text-[10px] px-1 py-1"
+            title={p.title}
+            onClick={() => {
+              const next = addAnimatePresetRow(script, widgets, widget.id, 'click', p.configLiteral(widget))
+              if (next === null) return
+              checkpoint()
+              setUiScript(next)
+            }}
+          >
+            {p.label}
+          </button>
+        ))}
+        <button
+          className="studio-btn text-[10px] px-1 py-1"
+          title="Adds a glow to this widget's Focused state (real LVGL shadow-as-glow — see the Appearance section's Glow fields)"
+          onClick={() => {
+            checkpoint()
+            updateUiWidgetState(widget.id, 'focused', { glowColor: '#2196F3', glowRadius: 14 })
+          }}
+        >
+          Focus Glow
+        </button>
+      </div>
     </div>
   )
 }
@@ -1625,6 +1744,268 @@ function TextareaOutputSection({ widget }: { widget: UiWidget }) {
   )
 }
 
+/** True when `widgetId` is anywhere inside a `dataList` widget's item-template subtree (a
+ * descendant, at any depth, of a Data List's own childIds) — gates the "Visible when" field below,
+ * which only means something for a widget that gets re-evaluated once per repeated row. */
+function isDataListTemplateDescendant(widgets: Record<string, UiWidget>, widgetId: string): boolean {
+  let current = widgets[widgetId]
+  while (current?.parentId) {
+    const parent = widgets[current.parentId]
+    if (!parent) return false
+    if (parent.type === 'dataList') return true
+    current = parent
+  }
+  return false
+}
+
+/** The data source id bound to the nearest `dataList` ancestor, or null when `widgetId` isn't a
+ * template descendant at all (or its list has no source picked yet) — powers TemplateTextField's
+ * "Insert field" buttons below, so any widget anywhere in a template (not just an auto-scaffolded
+ * one) can bind to any field, and the button list updates live if the source's own field list
+ * changes later (this is read fresh on every render, never cached). */
+function dataListAncestorDataSourceId(widgets: Record<string, UiWidget>, widgetId: string): string | null {
+  let current = widgets[widgetId]
+  while (current?.parentId) {
+    const parent = widgets[current.parentId]
+    if (!parent) return null
+    if (parent.type === 'dataList') return parent.dataListConfig?.dataSourceId ?? null
+    current = parent
+  }
+  return null
+}
+
+/** A widget's Text field, with a small "Insert field" button row underneath when it's part of a
+ * Data List item template — one single Text field can freely combine any number of `{{field}}`
+ * placeholders (e.g. "{{name}} — {{age}}"), so there's no need for a separate widget per field.
+ * Clicking a button splices `{{fieldName}}` in at the current cursor position (or appends, when
+ * nothing's focused yet) rather than always appending to the end. */
+function TemplateTextField({ widget, allWidgets }: { widget: UiWidget; allWidgets: Record<string, UiWidget> }) {
+  const dataSources = useStore((s) => s.project.uiDesign.dataSources)
+  const updateUiWidgetText = useStore((s) => s.updateUiWidgetText)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const dataSourceId = dataListAncestorDataSourceId(allWidgets, widget.id)
+  const source = dataSourceId ? dataSources.find((d) => d.id === dataSourceId) : undefined
+
+  const insertPlaceholder = (fieldName: string) => {
+    const el = inputRef.current
+    const placeholder = `{{${fieldName}}}`
+    const text = widget.text ?? ''
+    const start = el?.selectionStart ?? text.length
+    const end = el?.selectionEnd ?? text.length
+    updateUiWidgetText(widget.id, text.slice(0, start) + placeholder + text.slice(end))
+    requestAnimationFrame(() => {
+      const pos = start + placeholder.length
+      el?.focus()
+      el?.setSelectionRange(pos, pos)
+    })
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="studio-label">Text</span>
+      <input
+        ref={inputRef}
+        className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+        value={widget.text ?? ''}
+        onChange={(e) => updateUiWidgetText(widget.id, e.target.value)}
+      />
+      {source && (
+        <div className="flex flex-col gap-1 mt-0.5">
+          {source.fields.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              <span className="text-[10px] text-studio-muted w-full">Insert field:</span>
+              {source.fields.map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-studio-panel2 border border-studio-border hover:border-blue-400"
+                  onClick={() => insertPlaceholder(f.name)}
+                  title={`Insert {{${f.name}}} at the cursor`}
+                >
+                  {`{{${f.name}}}`}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span className="text-[10px] text-studio-muted">"{source.name}" has no fields yet — add some in the Data Sources tab.</span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Data source picker + config for a `dataList` widget — this is how a Data Source Manager entry
+ * actually gets "applied" to a specific Data List on the canvas (a Data Source is reusable/
+ * many-to-many, so the binding lives here, on the widget that consumes it, not on the source
+ * itself). See WidgetRenderer.tsx's DataListRepeatedRows for how this immediately drives the live
+ * preview once picked, and lib/export/lvglExport.ts's Data List codegen for how it drives export. */
+function DataListSection({ widget }: { widget: UiWidget }) {
+  const dataSources = useStore((s) => s.project.uiDesign.dataSources)
+  const updateUiDataListConfig = useStore((s) => s.updateUiDataListConfig)
+  const addUiWidget = useStore((s) => s.addUiWidget)
+  const updateUiWidgetText = useStore((s) => s.updateUiWidgetText)
+  const checkpoint = useStore((s) => s.checkpoint)
+  const config = widget.dataListConfig
+  if (!config) return null
+
+  const set = (partial: Partial<typeof config>) => {
+    checkpoint()
+    updateUiDataListConfig(widget.id, partial)
+  }
+  const boundSource = dataSources.find((d) => d.id === config.dataSourceId)
+
+  // Picking a source on a still-empty Data List auto-scaffolds a SINGLE Label pre-bound to every
+  // field at once (e.g. "{{name}}  {{age}}  {{email}}"), not one widget per field — one Text field
+  // can already combine any number of `{{field}}` placeholders (see TemplateTextField's "Insert
+  // field" buttons below, which stay available on this and any other template widget for
+  // hand-editing afterward), so multiplying widgets per field would just be extra clutter to move/
+  // style/delete. This is a starting point, not a lock — fully hand-editable afterward, and never
+  // runs again once the list has any children, so it can never clobber a template the author
+  // already built.
+  const handleDataSourceChange = (dataSourceId: string) => {
+    checkpoint()
+    updateUiDataListConfig(widget.id, { dataSourceId: dataSourceId || null })
+    if (dataSourceId && widget.childIds.length === 0) {
+      const source = dataSources.find((d) => d.id === dataSourceId)
+      if (source && source.fields.length > 0) {
+        const labelId = addUiWidget('label', widget.id, 4, 4)
+        updateUiWidgetText(labelId, source.fields.map((f) => `{{${f.name}}}`).join('  '))
+      }
+    }
+  }
+
+  return (
+    <div className="border-t border-studio-border pt-2.5 flex flex-col gap-2">
+      <span className="studio-label">Data</span>
+
+      <div className="flex flex-col gap-1">
+        <span className="text-[10px] text-studio-muted">Data source</span>
+        <select
+          className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+          value={config.dataSourceId ?? ''}
+          onChange={(e) => handleDataSourceChange(e.target.value)}
+        >
+          <option value="">(none — add one in the Data Sources tab)</option>
+          {dataSources.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+        {config.dataSourceId && !boundSource && <span className="text-[10px] text-red-400">This data source no longer exists.</span>}
+        {boundSource && boundSource.fields.length === 0 && (
+          <span className="text-[10px] text-studio-muted">"{boundSource.name}" has no fields yet — add some in the Data Sources tab.</span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-studio-muted">Max items</span>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="number"
+              min={1}
+              disabled={config.maxItems === 0}
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm flex-1 min-w-0 disabled:opacity-40"
+              value={config.maxItems === 0 ? '' : config.maxItems}
+              placeholder="Unlimited"
+              onChange={(e) => set({ maxItems: Math.max(1, Number(e.target.value) || 1) })}
+            />
+            <label className="flex items-center gap-1 text-[10px] text-studio-muted shrink-0 cursor-pointer" title="0 = unlimited">
+              <input type="checkbox" checked={config.maxItems === 0} onChange={(e) => set({ maxItems: e.target.checked ? 0 : 10 })} />
+              ∞
+            </label>
+          </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-studio-muted">Item spacing (px, negative to overlap)</span>
+          <input
+            type="number"
+            className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+            value={config.itemSpacing}
+            onChange={(e) => set({ itemSpacing: Number(e.target.value) || 0 })}
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <span className="text-[10px] text-studio-muted">Rendering mode</span>
+        <div className="text-xs text-studio-muted px-2 py-1 bg-studio-panel2 border border-studio-border rounded">Create all (recycling — coming soon)</div>
+      </div>
+
+      <label className="flex items-center gap-2 text-xs">
+        <input type="checkbox" checked={config.itemClickEnabled} onChange={(e) => set({ itemClickEnabled: e.target.checked })} />
+        Item click enabled
+      </label>
+
+      <label className="flex items-center gap-2 text-xs">
+        <input type="checkbox" checked={config.includeSampleDataInExport} onChange={(e) => set({ includeSampleDataInExport: e.target.checked })} />
+        Include sample data in export
+      </label>
+      <span className="text-[10px] text-studio-muted -mt-1">Off by default — production firmware never ships demonstration rows unless you opt in here.</span>
+
+      <div className="grid grid-cols-1 gap-2">
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-studio-muted">Empty text</span>
+          <input className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm" value={config.emptyText} onChange={(e) => set({ emptyText: e.target.value })} />
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-studio-muted">Loading text</span>
+          <input className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm" value={config.loadingText} onChange={(e) => set({ loadingText: e.target.value })} />
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-studio-muted">Error text</span>
+          <input className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm" value={config.errorText} onChange={(e) => set({ errorText: e.target.value })} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** "Visible when" — a bare boolean expression (`{{}}` wrapper not needed here, unlike the text
+ * fields), shown only for a widget inside a Data List's item template (see
+ * isDataListTemplateDescendant above). Live-validated with the exact same parser + restricted-
+ * subset grammar the C++ export uses (scriptLang/codegen.ts's compileTemplateExpr), so a typo a
+ * user would only otherwise discover at export time is caught immediately here instead. */
+function VisibleWhenField({ widget }: { widget: UiWidget }) {
+  const updateUiWidgetMeta = useStore((s) => s.updateUiWidgetMeta)
+  const checkpoint = useStore((s) => s.checkpoint)
+  const [draft, setDraft] = useState(widget.visibleWhenExpr ?? '')
+
+  let error: string | null = null
+  if (draft.trim()) {
+    try {
+      const node = acorn.parseExpressionAt(draft, 0, { ecmaVersion: 2022 })
+      const errors = checkExpressionSubset(node as unknown as Node)
+      if (errors.length > 0) error = errors[0].message
+    } catch (e) {
+      error = e instanceof Error ? e.message.replace(/\s*\(\d+:\d+\)\s*$/, '') : String(e)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-[10px] text-studio-muted">Visible when (e.g. unread == true)</span>
+      <input
+        className={`bg-studio-panel2 border rounded px-2 py-1 text-sm font-mono ${error ? 'border-red-500' : 'border-studio-border'}`}
+        value={draft}
+        placeholder="always visible"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          if (error) return
+          checkpoint()
+          updateUiWidgetMeta(widget.id, { visibleWhenExpr: draft.trim() || null })
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+        }}
+      />
+      {error && <span className="text-[10px] text-red-400">{error}</span>}
+    </div>
+  )
+}
+
 // Position/size are always inline, direct-manipulation fields (drag/resize own them — states
 // don't carry their own position in this pass). The appearance block below (background/color/
 // border/padding/opacity/font/align) is state-aware: selecting Hover/Pressed/Disabled/Focused
@@ -1634,15 +2015,17 @@ function TextareaOutputSection({ widget }: { widget: UiWidget }) {
 export function PropertiesPanel() {
   const selectedWidgetId = useStore((s) => s.selectedWidgetId)
   const widget = useStore((s) => (s.selectedWidgetId ? s.project.uiDesign.widgets[s.selectedWidgetId] : null))
+  const allWidgets = useStore((s) => s.project.uiDesign.widgets)
   const assets = useStore((s) => s.project.uiDesign.assets)
   const uiDisplay = useStore((s) => s.project.uiDesign.display)
   const display = { width: uiDisplay.width, height: uiDisplay.height, shape: uiDisplayShapeToDisplayShape(uiDisplay.shape) }
   const updateUiWidgetStyle = useStore((s) => s.updateUiWidgetStyle)
   const updateUiWidgetState = useStore((s) => s.updateUiWidgetState)
-  const updateUiWidgetText = useStore((s) => s.updateUiWidgetText)
   const updateUiWidgetMeta = useStore((s) => s.updateUiWidgetMeta)
   const setUiWidgetSrc = useStore((s) => s.setUiWidgetSrc)
   const deleteUiWidget = useStore((s) => s.deleteUiWidget)
+  const setUiWidgetThemeToken = useStore((s) => s.setUiWidgetThemeToken)
+  const applyMaterialPreset = useStore((s) => s.applyMaterialPreset)
   const checkpoint = useStore((s) => s.checkpoint)
   const [stateTab, setStateTab] = useState<StateTab>('default')
 
@@ -1698,16 +2081,7 @@ export function PropertiesPanel() {
         </div>
       )}
 
-      {widget.text !== undefined && (
-        <div className="flex flex-col gap-1">
-          <span className="studio-label">Text</span>
-          <input
-            className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
-            value={widget.text}
-            onChange={(e) => updateUiWidgetText(widget.id, e.target.value)}
-          />
-        </div>
-      )}
+      {widget.text !== undefined && <TemplateTextField widget={widget} allWidgets={allWidgets} />}
 
       {UI_ICON_TEXT_WIDGETS.has(widget.type) && (
         <IconPicker
@@ -1740,6 +2114,8 @@ export function PropertiesPanel() {
       {widget.type === 'list' && <ListItemsSection widget={widget} />}
       {widget.type === 'textarea' && <TextareaOutputSection widget={widget} />}
       {widget.type === 'keyboard' && <KeyboardSection widget={widget} />}
+      {widget.type === 'dataList' && <DataListSection widget={widget} />}
+      {isDataListTemplateDescendant(allWidgets, widget.id) && <VisibleWhenField widget={widget} />}
 
       <div className="border-t border-studio-border pt-2.5 flex flex-col gap-2.5">
         <div className="flex bg-studio-panel2 rounded-md p-0.5 border border-studio-border">
@@ -1762,10 +2138,80 @@ export function PropertiesPanel() {
           </button>
         )}
 
+        {stateTab === 'default' && (
+          <div className="flex flex-col gap-1">
+            <span className="studio-label">Material Preset</span>
+            <div className="grid grid-cols-4 gap-1">
+              {(Object.keys(MATERIAL_PRESET_LABELS) as MaterialPresetId[]).map((p) => (
+                <button
+                  key={p}
+                  className="studio-btn text-[10px] px-1 py-1"
+                  title={`Apply the ${MATERIAL_PRESET_LABELS[p]} preset — a starting bundle, every field it sets stays editable afterward`}
+                  onClick={() => {
+                    checkpoint()
+                    applyMaterialPreset(widget.id, p)
+                  }}
+                >
+                  {MATERIAL_PRESET_LABELS[p]}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-2 gap-2">
-          <ColorField label="Background" value={appearance.background ?? ''} onChange={(v) => setAppearance({ background: v })} />
-          <ColorField label="Text Color" value={appearance.color ?? ''} onChange={(v) => setAppearance({ color: v })} />
+          <ColorField
+            label="Background"
+            value={appearance.background ?? ''}
+            onChange={(v) => setAppearance({ background: v })}
+            themeToken={stateTab === 'default' ? widget.themeTokens?.background : undefined}
+            onThemeTokenChange={stateTab === 'default' ? (t) => setUiWidgetThemeToken(widget.id, 'background', t) : undefined}
+          />
+          <ColorField
+            label="Text Color"
+            value={appearance.color ?? ''}
+            onChange={(v) => setAppearance({ color: v })}
+            themeToken={stateTab === 'default' ? widget.themeTokens?.color : undefined}
+            onThemeTokenChange={stateTab === 'default' ? (t) => setUiWidgetThemeToken(widget.id, 'color', t) : undefined}
+          />
         </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <NumberField label="Background Opacity %" value={appearance.backgroundOpacity ?? 100} onChange={(v) => setAppearance({ backgroundOpacity: v })} />
+          <NumberField label="Border Opacity %" value={appearance.borderOpacity ?? 100} onChange={(v) => setAppearance({ borderOpacity: v })} />
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <span className="studio-label">Surface Style</span>
+          <div className="grid grid-cols-4 gap-1">
+            {(['flat', 'glass', 'soft', 'bevel'] as const).map((s) => (
+              <button
+                key={s}
+                className={`studio-tab text-[10px] ${appearance.surfaceStyle === s || (s === 'flat' && !appearance.surfaceStyle) ? 'studio-tab-active' : ''}`}
+                onClick={() => setAppearance({ surfaceStyle: s === 'flat' ? undefined : s })}
+              >
+                {s[0].toUpperCase() + s.slice(1)}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <ColorField
+            label="Glow Color"
+            value={appearance.glowColor ?? ''}
+            onChange={(v) => setAppearance({ glowColor: v })}
+            themeToken={stateTab === 'default' ? widget.themeTokens?.glowColor : undefined}
+            onThemeTokenChange={stateTab === 'default' ? (t) => setUiWidgetThemeToken(widget.id, 'glowColor', t) : undefined}
+          />
+          <NumberField label="Glow Radius" value={appearance.glowRadius ?? 0} onChange={(v) => setAppearance({ glowRadius: v })} />
+        </div>
+
+        <NumberField
+          label="Elevation (0-24, Material-style — derives a shadow; ignored once Shadow Width below is set explicitly)"
+          value={appearance.elevation ?? 0}
+          onChange={(v) => setAppearance({ elevation: v })}
+        />
 
         {UI_BACKGROUND_IMAGE_WIDGETS.has(widget.type) && (
           <div className="grid grid-cols-2 gap-2">
@@ -1808,7 +2254,13 @@ export function PropertiesPanel() {
 
         <div className="grid grid-cols-3 gap-2">
           <NumberField label="Border Width" value={appearance.borderWidth ?? 0} onChange={(v) => setAppearance({ borderWidth: v })} />
-          <ColorField label="Border Color" value={appearance.borderColor ?? ''} onChange={(v) => setAppearance({ borderColor: v })} />
+          <ColorField
+            label="Border Color"
+            value={appearance.borderColor ?? ''}
+            onChange={(v) => setAppearance({ borderColor: v })}
+            themeToken={stateTab === 'default' ? widget.themeTokens?.borderColor : undefined}
+            onThemeTokenChange={stateTab === 'default' ? (t) => setUiWidgetThemeToken(widget.id, 'borderColor', t) : undefined}
+          />
           <NumberField label="Radius" value={appearance.borderRadius ?? 0} onChange={(v) => setAppearance({ borderRadius: v })} />
         </div>
         <div className="grid grid-cols-2 gap-2">
@@ -1860,6 +2312,7 @@ export function PropertiesPanel() {
       {widget.tagId && <BindingsSection widget={widget} />}
       <AutoEventCallbackSection widget={widget} />
       {widget.tagId && <EventsSection widget={widget} />}
+      {widget.tagId && <AnimationPresetsSection widget={widget} />}
     </div>
   )
 }

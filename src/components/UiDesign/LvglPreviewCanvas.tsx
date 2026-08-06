@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useStore } from '@/state/store'
-import type { UiAsset, UiCssRule, UiWidget } from '@/types'
+import type { UiAsset, UiCssRule, UiDesignProject, UiWidget } from '@/types'
 import { computeEffectiveStyle } from '@/lib/uiDesign/cssCascade'
 import { CONTAINER_LIKE, DEFAULT_VISUAL_CSS, WidgetInner, backgroundImageCss, mergeDefined, styleToCss } from './WidgetRenderer'
 
@@ -10,11 +10,23 @@ import { CONTAINER_LIKE, DEFAULT_VISUAL_CSS, WidgetInner, backgroundImageCss, me
  * while designing." Deliberately does NOT reuse WidgetRenderer itself — that component wires up
  * click-to-select/drag-to-move/resize against the live project, which would let a click inside
  * this preview accidentally move something while the user is just trying to look at the export. */
-function PreviewNode({ widget, widgets, cssRules, assetsById }: { widget: UiWidget; widgets: Record<string, UiWidget>; cssRules: UiCssRule[]; assetsById: Map<string, UiAsset> }) {
+function PreviewNode({
+  widget,
+  widgets,
+  cssRules,
+  assetsById,
+  theme
+}: {
+  widget: UiWidget
+  widgets: Record<string, UiWidget>
+  cssRules: UiCssRule[]
+  assetsById: Map<string, UiAsset>
+  theme: Pick<UiDesignProject, 'theme' | 'customThemeTokens'>
+}) {
   if (!widget.visible) return null
 
   if (widget.type === 'screen') {
-    const screenEffectiveStyle = computeEffectiveStyle(widget, cssRules)
+    const screenEffectiveStyle = computeEffectiveStyle(widget, cssRules, theme)
     return (
       <div
         style={{
@@ -30,13 +42,13 @@ function PreviewNode({ widget, widgets, cssRules, assetsById }: { widget: UiWidg
       >
         {widget.childIds.map((id) => {
           const child = widgets[id]
-          return child ? <PreviewNode key={id} widget={child} widgets={widgets} cssRules={cssRules} assetsById={assetsById} /> : null
+          return child ? <PreviewNode key={id} widget={child} widgets={widgets} cssRules={cssRules} assetsById={assetsById} theme={theme} /> : null
         })}
       </div>
     )
   }
 
-  const effectiveStyle = computeEffectiveStyle(widget, cssRules)
+  const effectiveStyle = computeEffectiveStyle(widget, cssRules, theme)
   const isImageLike = widget.type === 'image' || widget.type === 'icon'
   const transformParts: string[] = []
   if (isImageLike && effectiveStyle.rotation) transformParts.push(`rotate(${effectiveStyle.rotation}deg)`)
@@ -61,7 +73,7 @@ function PreviewNode({ widget, widgets, cssRules, assetsById }: { widget: UiWidg
       {CONTAINER_LIKE.has(widget.type) &&
         widget.childIds.map((id) => {
           const child = widgets[id]
-          return child ? <PreviewNode key={id} widget={child} widgets={widgets} cssRules={cssRules} assetsById={assetsById} /> : null
+          return child ? <PreviewNode key={id} widget={child} widgets={widgets} cssRules={cssRules} assetsById={assetsById} theme={theme} /> : null
         })}
     </div>
   )
@@ -108,7 +120,13 @@ export function LvglScreenPreview({ screenId }: { screenId: string | null }) {
             fontSize: 14
           }}
         >
-          <PreviewNode widget={root} widgets={uiDesign.widgets} cssRules={uiDesign.css} assetsById={assetsById} />
+          <PreviewNode
+            widget={root}
+            widgets={uiDesign.widgets}
+            cssRules={uiDesign.css}
+            assetsById={assetsById}
+            theme={{ theme: uiDesign.theme, customThemeTokens: uiDesign.customThemeTokens }}
+          />
         </div>
       </div>
       <span className="text-[10px] text-studio-muted">

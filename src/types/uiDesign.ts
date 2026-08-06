@@ -30,6 +30,10 @@ export type UiWidgetType =
   | 'tabs'
   | 'spinner'
   | 'keyboard'
+  | 'gauge'
+  | 'led'
+  | 'statusIndicator'
+  | 'dataList'
 
 /** HTML tag <-> widget type mapping, used by both the HTML serializer/parser (lib/uiDesign/
  * htmlSync.ts) and the Toolbox. 'container'/'flex' both serialize as <container> — flex is a
@@ -53,7 +57,11 @@ export const UI_WIDGET_TAG: Record<UiWidgetType, string> = {
   flex: 'container',
   tabs: 'tabs',
   spinner: 'spinner',
-  keyboard: 'keyboard'
+  keyboard: 'keyboard',
+  gauge: 'gauge',
+  led: 'led',
+  statusIndicator: 'status-indicator',
+  dataList: 'data-list'
 }
 
 export const UI_WIDGET_LABELS: Record<UiWidgetType, string> = {
@@ -75,7 +83,11 @@ export const UI_WIDGET_LABELS: Record<UiWidgetType, string> = {
   flex: 'Flex Layout',
   tabs: 'Tabs',
   spinner: 'Spinner',
-  keyboard: 'Keyboard'
+  keyboard: 'Keyboard',
+  gauge: 'Gauge',
+  led: 'LED',
+  statusIndicator: 'Status Indicator',
+  dataList: 'Data List'
 }
 
 /** Widget kinds whose whole visual IS an image (use UiWidget.src) vs. kinds that can have an
@@ -108,7 +120,8 @@ export const UI_BACKGROUND_IMAGE_WIDGETS: ReadonlySet<UiWidgetType> = new Set([
   'slider',
   'bar',
   'arc',
-  'spinner'
+  'spinner',
+  'dataList'
 ])
 
 /** Widget kinds offered in the Toolbox / droppable directly onto the canvas. 'screen' is
@@ -131,7 +144,11 @@ export const UI_TOOLBOX_WIDGETS: UiWidgetType[] = [
   'list',
   'tabs',
   'spinner',
-  'keyboard'
+  'keyboard',
+  'gauge',
+  'led',
+  'statusIndicator',
+  'dataList'
 ]
 
 export type UiLengthValue = number | 'auto' | `${number}%`
@@ -196,6 +213,55 @@ export interface UiWidgetStyle {
    * by the scripting API's `image.setScale(...)`, same narrow image/icon-only scoping as
    * rotation above. */
   scale?: number
+
+  // --- Advanced Style System (glow/elevation/glass) — all real LVGL v9 primitives, see
+  // lib/export/lvglExport.ts's styleSetCalls() for the exact mapping. Nothing here simulates an
+  // effect LVGL can't actually render; anything the spec asked for that LVGL genuinely can't do
+  // (true 3D perspective, mesh gradients, bloom, ambient occlusion, real blur) was deliberately
+  // left out rather than faked — see the "Advanced Style System..." plan for the full split.
+  /** A soft, colored glow — a second, zero-offset shadow layer (LVGL only carries one shadow
+   * part per style, so this and shadowWidth/Color both ultimately drive lv_style_set_shadow_*;
+   * setting both is flagged by validateLvglExport.ts since only one wins). */
+  glowColor?: string
+  glowRadius?: number // 0-40px
+  /** Material-style single knob (0-24) that derives shadowWidth/OffsetY/Color/opa automatically
+   * — a convenience preset over the real shadow fields below, not a distinct rendering concept.
+   * Ignored once shadowWidth is set explicitly (explicit shadow fields always win). */
+  elevation?: number
+  /** True glass-style translucency — real, distinct LVGL setters (lv_style_set_bg_opa/
+   * border_opa), independent of the existing overall `opacity` (which also fades text/children). */
+  backgroundOpacity?: number // 0-100
+  borderOpacity?: number // 0-100
+  /** A small derived-bundle convenience: 'glass' raises backgroundOpacity + adds a light border
+   * highlight; 'soft' widens elevation into a low-opacity neumorphism-ish shadow; 'bevel'
+   * approximates an edge highlight using the single borderColor LVGL actually has (no per-edge
+   * border color exists in LVGL — documented approximation, see validateLvglExport.ts). Applying
+   * this only pre-fills the underlying real fields above; it isn't itself exported. */
+  surfaceStyle?: 'flat' | 'glass' | 'soft' | 'bevel'
+}
+
+/** Color-bearing UiWidgetStyle fields that can track a project theme token instead of (or in
+ * addition to — the literal field always stays the fallback/last-applied value) a hardcoded hex
+ * string. Kept as a side-table (UiWidget.themeTokens) rather than widening every color field's
+ * type to a tagged union — far less invasive across colorLiteral()/styleToCss()/ColorField/
+ * cssSync/htmlSync, all of which keep assuming a plain hex string. See lib/uiDesign/themes.ts's
+ * resolveThemedStyle() for how a themed field's literal value gets overridden at read time. */
+export type UiThemeableStyleField = 'background' | 'color' | 'borderColor' | 'shadowColor' | 'glowColor'
+
+export type UiThemeId = 'light' | 'dark' | 'amoled' | 'material' | 'fluent' | 'apple' | 'gaming' | 'automotive' | 'cyberpunk' | 'custom'
+
+/** One theme's named color palette — see lib/uiDesign/themes.ts's UI_THEMES table for the actual
+ * per-theme values. Every named theme (including 'custom') resolves to one of these; 'custom'
+ * reads from Project.uiDesign.customThemeTokens instead of a fixed table entry. */
+export interface UiThemeTokens {
+  background: string
+  surface: string
+  primary: string
+  secondary: string
+  text: string
+  textMuted: string
+  border: string
+  accent: string
 }
 
 export type UiWidgetStateName = 'hover' | 'pressed' | 'disabled' | 'focused'
@@ -340,6 +406,54 @@ export interface UiKeyboardConfig {
   edgePadding: UiKeyboardEdgePadding
 }
 
+// Indicator widgets — Gauge/LED/Status Indicator + the animation-loop config shared by
+// bar/slider/arc/gauge/led. All of this lives in UiWidget.props (the existing loosely-typed
+// Record<string, string|number|boolean> bag — see UiWidget.props' own doc comment) rather than
+// as dedicated typed fields, matching how min/max/value already live there for bar/slider/arc;
+// these type aliases exist purely so UI code (Properties panel, WidgetRenderer, lvglExport) has a
+// single shared vocabulary instead of re-typing the string-literal unions everywhere.
+export type UiStatusIndicatorState = 'online' | 'offline' | 'busy' | 'error' | 'warning' | 'success' | 'loading'
+export type UiLedState = 'off' | 'on' | 'blink' | 'flash' | 'pulse'
+/** Reuses the exact 6-value easing vocabulary already established by the general-purpose
+ * `.animate()` script action (see scriptLang/sandboxRuntime.ts's EASINGS table) — deliberately
+ * the same names so authors don't have to learn two different easing vocabularies. */
+export type UiIndicatorEasing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'bounce' | 'overshoot'
+/** Tri-state checkbox value — LVGL has no real indeterminate checkbox state (confirmed against
+ * v9.2.0 source), so this is real in the editor/preview but export approximates it as unchecked
+ * with an explicit validateLvglExport.ts warning, never a silent drop. */
+export type UiCheckedValue = boolean | 'indeterminate'
+
+// Data List — repeats a user-designed item-template subtree (the widget's own `childIds`, authored
+// with the same tools as any other widget tree) once per row of a bound UiDataSource. See
+// lib/export/lvglExport.ts's "Data List codegen" section and WidgetRenderer.tsx's dataList
+// rendering branch — both read this same config so preview/export can't disagree about which
+// source/empty-text/etc. is active.
+export type UiDataListRenderingMode = 'createAll' // reserved: 'recycle' | 'paginate' — not implemented
+
+export interface UiDataListConfig {
+  dataSourceId: string | null
+  emptyText: string
+  loadingText: string
+  errorText: string
+  /** 0 = unlimited. */
+  maxItems: number
+  renderingMode: UiDataListRenderingMode
+  itemClickEnabled: boolean
+  /** Vertical gap (px) between repeated rows — matches the real LVGL `lv_obj_set_style_pad_row`
+   * on the list's own column-flex container (see lvglExport.ts's 'dataList' widgetCreateCalls
+   * case), and the same value drives the canvas preview's row-clone offset (see
+   * WidgetRenderer.tsx's DataListRepeatedRows) so the two can't disagree. Default 4, matching the
+   * hardcoded gap this used before it was configurable. */
+  itemSpacing: number
+  /** "Include sample data in export" — off by default, so production firmware never silently
+   * ships the Data Source Manager's design-time sample rows. When on, the bound data source's
+   * sample array is emitted as a literal C++ array and passed to a one-time SetItems() call
+   * inside the screen's own create function — a quick way to see real rows without writing
+   * application code yet, explicitly opt-in per the spec's own "must not depend on hardcoded
+   * editor-only demonstration items" requirement. */
+  includeSampleDataInExport: boolean
+}
+
 export interface UiWidget {
   id: string
   type: UiWidgetType
@@ -373,8 +487,23 @@ export interface UiWidget {
   listItems?: UiListItem[]
   /** Only meaningful when `type === 'keyboard'` — see UiKeyboardConfig. */
   keyboardConfig?: UiKeyboardConfig
+  /** Only meaningful when `type === 'dataList'` — see UiDataListConfig. */
+  dataListConfig?: UiDataListConfig
+  /** Only meaningful on a descendant of a `dataList` widget's template subtree (see
+   * lib/export/lvglExport.ts's dataListTemplateDescendants/isDataListTemplateDescendant) — a
+   * boolean expression (`item.<field>` / `data.<name>`, see scriptLang/templateExpr.ts) that
+   * controls this widget's visibility per repeated row. Stored top-level (not in `props`) since
+   * it's a narrow, typed field conditionally meaningful by tree position, not widget-kind data —
+   * same reasoning as `iconSymbol`. undefined/empty = always visible (today's default behavior
+   * for every widget that isn't inside a Data List template). */
+  visibleWhenExpr?: string
   style: UiWidgetStyle
   states: UiWidgetStateStyles
+  /** Which of this widget's own color fields (in `style`, default state only — per-state theming
+   * is deliberately out of scope this pass) should track the project's active theme token instead
+   * of their literal value — see UiThemeableStyleField's doc comment. undefined/empty = every
+   * color field uses its literal hex as authored, today's exact behavior. */
+  themeTokens?: Partial<Record<UiThemeableStyleField, keyof UiThemeTokens>>
   visible: boolean
   locked: boolean
   /** Escape hatch for the round-display soft-clamp (see renderer/displayMask.ts
@@ -524,6 +653,51 @@ export interface UiVariable {
   fallback?: string | number | boolean
 }
 
+export type UiDataSourceFieldType = 'int' | 'double' | 'bool' | 'string'
+
+export interface UiDataSourceField {
+  id: string
+  /** Becomes the generated C++ struct member name (sanitized via toCIdentifier at export time —
+   * stored here exactly as typed, matching UiListItem.widgetId's "sanitize at export, not at
+   * rest" precedent). */
+  name: string
+  type: UiDataSourceFieldType
+}
+
+/** Purely descriptive/documentation — shown in the Data Source Manager's picker and the exported
+ * README's guidance text. Does NOT branch codegen: every source kind ultimately feeds the exact
+ * same generated SetItems()/AddItem() API (see lib/export/lvglExport.ts's Data List codegen), so
+ * this is deliberately NOT a discriminant for different code paths — the same "don't build 13
+ * shallow paths when one real one covers them all" call this project has made repeatedly. */
+export type UiDataSourceKind =
+  | 'static' | 'cppArray' | 'cppStructArray' | 'stdArray' | 'stdVector'
+  | 'jsonObject' | 'jsonArray' | 'httpResponse' | 'mqttPayload' | 'sensorValue'
+  | 'appVariable' | 'callbackFunction' | 'custom'
+
+/** A reusable, named data source — a field schema (-> a generated C++ struct) plus hand-authored
+ * sample JSON used only for design-time preview (see lib/export/lvglExport.ts's
+ * dataSourceStructName()/emitDataListStructDecl() for how `fields` becomes real C++, and
+ * WidgetRenderer.tsx's Data List rendering for how `sampleData` drives the canvas). At runtime the
+ * generated `<var>_SetItems(...)`/`<var>_AddItem(...)` API replaces this sample data entirely —
+ * sample data is never baked into a production export. */
+export interface UiDataSource {
+  id: string
+  name: string
+  sourceKind: UiDataSourceKind
+  fields: UiDataSourceField[]
+  /** -> fields[].id. Authored/validated (see validateLvglExport.ts) but not used for codegen
+   * addressing this pass — the generated API stays index-based (AddItem/UpdateItem/RemoveItem/
+   * OnItemClicked(index, item)); reserved for a future FindIndexByKey() convenience. */
+  keyFieldId: string | null
+  /** Raw JSON array text, hand-edited in the Data Source Manager panel — parsed on demand
+   * (JSON.parse), never persisted pre-parsed, so a parse-error display always reflects exactly
+   * the saved text. */
+  sampleData: string
+  /** Escape hatch for when the auto-derived struct name (see dataSourceStructName(), a simple
+   * trailing-'s' strip of the source name — "Notifications" -> "NotificationItem") is wrong. */
+  structNameOverride?: string
+}
+
 /** A user-imported LVGL v9 bitmap font, already converted to C source by LVGL's own official
  * online font converter (https://lvgl.io/tools/fontconverter) — this project does no font
  * rasterization of its own, it only stores/embeds/references what's pasted in. `declaredCodepoints`
@@ -546,7 +720,16 @@ export interface UiDesignProject {
   assets: UiAsset[]
   customFonts: UiCustomFont[]
   variables: UiVariable[]
+  dataSources: UiDataSource[]
   display: UiDisplaySettings
+  /** The project's active color theme — see lib/uiDesign/themes.ts's UI_THEMES table. Only
+   * affects widgets that opt a color field into theming via UiWidget.themeTokens; every other
+   * widget's literal hex colors are completely unaffected by this field, so switching themes on
+   * a project that uses no tokens is a visual no-op (today's exact behavior, preserved). */
+  theme: UiThemeId
+  /** Only meaningful when `theme === 'custom'` — the user-edited palette used in place of a
+   * fixed UI_THEMES table entry. null while `theme !== 'custom'`. */
+  customThemeTokens: UiThemeTokens | null
   /** Regenerated text mirrors of the widget tree / css rules — see lib/uiDesign/htmlSync.ts
    * and cssSync.ts. Source of truth flows whichever direction was edited last (full
    * regenerate each way, not incremental patching); both are persisted so a reopened project

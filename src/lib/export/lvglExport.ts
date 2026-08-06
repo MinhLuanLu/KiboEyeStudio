@@ -20,12 +20,14 @@
 // `sanitizeIdentifier`/`sanitizeFilename` (see naming.ts) — nothing here hardcodes this app's own
 // name into exported files, classes, functions, folders, comments, or namespaces.
 
-import type { Project, UiAsset, UiCssRule, UiCustomFont, UiDesignProject, UiDisplaySettings, UiKeyboardConfig, UiListItem, UiScreen, UiVariable, UiWidget, UiWidgetStateName, UiWidgetStyle, UiWidgetType } from '@/types'
+import type { Project, UiAsset, UiCssRule, UiCustomFont, UiDataListConfig, UiDataSource, UiDataSourceField, UiDesignProject, UiDisplaySettings, UiKeyboardConfig, UiListItem, UiScreen, UiVariable, UiWidget, UiWidgetStateName, UiWidgetStyle, UiWidgetType } from '@/types'
 import { UI_WIDGET_LABELS } from '@/types'
 import { decodeDataUrlToRgba } from '@/lib/import/uiAssetImport'
 import { matchesSelector } from '@/lib/uiDesign/selectors'
-import { cppTypeFor, generateScriptCpp, type CodegenContext, type CodegenResult, type ExprType } from '@/lib/uiDesign/scriptLang/codegen'
+import { compileTemplateExpr, compileTemplateText, cppTypeFor, generateScriptCpp, type CodegenContext, type CodegenResult, type ExprType } from '@/lib/uiDesign/scriptLang/codegen'
+import { hasTemplateExpr } from '@/lib/uiDesign/scriptLang/templateExpr'
 import { parseScript } from '@/lib/uiDesign/scriptLang/parser'
+import type { ScriptError } from '@/lib/uiDesign/scriptLang/parser'
 import { LV_CONF_TEMPLATE_V9 } from './lvConfTemplate'
 import { sanitizeFilename, sanitizeIdentifier } from './naming'
 import { KB_CONTROL_LVGL_LITERAL, resolveKeyboardMap } from '@/lib/uiDesign/keyboardLayouts'
@@ -33,6 +35,9 @@ import { computeAdaptiveKeyboardRowLayout, type UiKeyboardRowLayout } from '@/li
 import { parseFontVariableName } from '@/lib/uiDesign/fontImport'
 import { lvglSymbolById } from '@/lib/uiDesign/lvglSymbols'
 import { boardIdFor, DISPLAY_MODEL_LABELS, type ExportTarget } from './exportTarget'
+import { resolveThemedStyle } from '@/lib/uiDesign/themes'
+import { emitIndicatorAnimStart, statusIndicatorApplyLines } from '@/lib/uiDesign/scriptLang/actionTable'
+import { dataListTemplateBounds, dataListTemplateDescendants } from '@/lib/uiDesign/dataListLayout'
 
 const LVGL_VERSION = '9.x'
 
@@ -197,7 +202,15 @@ function children(uiDesign: UiDesignProject, widget: UiWidget): UiWidget[] {
 
 /** Every widget reachable from any screen's root, in tree order — used to decide which CSS
  * rules/assets/styles are actually referenced (so unused ones don't bloat the export or trip
- * "unresolved" validation). */
+ * "unresolved" validation). A `dataList` widget's own item-template descendants are deliberately
+ * NOT CONTAINER_LIKE (same reasoning as `list`'s own items — they aren't ordinary screen
+ * children), so without the extra `dataListTemplateDescendants` visit below they'd be invisible
+ * to `usedCssRules`/`usedAssets`/`exportLvglStyles`/`collectCustomFontUsage` — silently dropping
+ * a template widget's styling/assets/fonts on export while it looks correct in the studio canvas.
+ * See lvglExport.ts's "Data List codegen" section for the matching `templateDescendantIds`
+ * exclusion (the other half of this: template descendants must be reachable for
+ * styles/assets/fonts, but must NOT be treated as ordinary top-level widgets for the declaration
+ * loop / collectEvents / widget registry). */
 export function allReachableWidgets(uiDesign: UiDesignProject): UiWidget[] {
   const out: UiWidget[] = []
   const seen = new Set<string>()
@@ -206,6 +219,7 @@ export function allReachableWidgets(uiDesign: UiDesignProject): UiWidget[] {
     seen.add(widget.id)
     out.push(widget)
     for (const child of children(uiDesign, widget)) visit(child)
+    if (widget.type === 'dataList') for (const w of dataListTemplateDescendants(uiDesign, widget)) visit(w)
   }
   for (const screen of uiDesign.screens) {
     const root = uiDesign.widgets[screen.rootWidgetId]
@@ -228,6 +242,7 @@ export function reachableWidgetsForScreen(uiDesign: UiDesignProject, screen: UiS
     seen.add(widget.id)
     out.push(widget)
     for (const child of children(uiDesign, widget)) visit(child)
+    if (widget.type === 'dataList') for (const w of dataListTemplateDescendants(uiDesign, widget)) visit(w)
   }
   const root = uiDesign.widgets[screen.rootWidgetId]
   if (root) visit(root)
@@ -280,11 +295,43 @@ export function colorLiteral(css: string | undefined): string | null {
 // on a small display, not capped at body-text sizes. Stops at 48 rather than enabling every LVGL
 // size up to 8px increments beyond that — each additional size is real flash cost for its own
 // glyph set, and nothing in this app currently asks for anything larger.
-const MONTSERRAT_SIZES_ALWAYS_AVAILABLE = [12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48]
+export const MONTSERRAT_SIZES_ALWAYS_AVAILABLE = [12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48]
 
-function nearestMontserratSize(px: number): number {
+export function nearestMontserratSize(px: number): number {
   for (const size of MONTSERRAT_SIZES_ALWAYS_AVAILABLE) if (px <= size) return size
   return MONTSERRAT_SIZES_ALWAYS_AVAILABLE[MONTSERRAT_SIZES_ALWAYS_AVAILABLE.length - 1]
+}
+
+/** LVGL styles carry exactly one shadow per part, so an explicit manual shadow, a glow, and an
+ * elevation-derived shadow all ultimately compete for the same lv_style_set_shadow_* calls —
+ * priority is explicit shadowWidth > glowColor/glowRadius > elevation (documented on the
+ * `elevation`/`glowColor` fields themselves; validateLvglExport.ts's "Advanced style fidelity"
+ * category warns when more than one of these is set on the same widget). Extracted as its own
+ * exported function (rather than inlined in styleSetCalls below) so UI Design Mode's live-preview
+ * "ESP32 Preview" toggle (WidgetRenderer.tsx) can resolve the exact same winning shadow the real
+ * exporter will emit — one shared decision, not two implementations that could drift. */
+export type ResolvedShadow =
+  | { kind: 'shadow'; width: number; offsetX?: number; offsetY?: number; color?: string }
+  | { kind: 'glow'; width: number; spread: number; color?: string }
+  | { kind: 'elevation'; width: number; offsetY: number; opa255: number; color: string }
+
+export function resolveEffectiveShadow(style: Partial<UiWidgetStyle>): ResolvedShadow | null {
+  if (style.shadowWidth !== undefined) {
+    return { kind: 'shadow', width: Math.round(style.shadowWidth), offsetX: style.shadowOffsetX, offsetY: style.shadowOffsetY, color: style.shadowColor }
+  }
+  if (style.glowColor !== undefined || style.glowRadius !== undefined) {
+    // A "glow" is a real, standard LVGL technique: a colored shadow with zero offset so it
+    // radiates evenly outward from the widget's own edge instead of casting a directional drop.
+    const radius = Math.round(style.glowRadius ?? 12)
+    return { kind: 'glow', width: radius, spread: Math.round(radius / 3), color: style.glowColor }
+  }
+  if (style.elevation !== undefined) {
+    // Material-style single knob (0-24) derived into a real shadow — wider/further-offset/softer
+    // as elevation increases, a convenience preset over the same real shadow fields above.
+    const e = Math.max(0, Math.min(24, style.elevation))
+    return { kind: 'elevation', width: Math.round(4 + e * 1.4), offsetY: Math.round(1 + e * 0.5), opa255: Math.round(60 + Math.min(e, 12) * 3), color: '#000000' }
+  }
+  return null
 }
 
 /** Emits `lv_style_set_*` calls for the style fields this pass supports, skipping any field
@@ -321,6 +368,8 @@ function styleSetCalls(varName: string, style: Partial<UiWidgetStyle>, identByAs
     }
   }
   if (style.opacity !== undefined) set(`lv_style_set_opa(&${varName}, ${Math.round((style.opacity / 100) * 255)});`)
+  if (style.backgroundOpacity !== undefined) set(`lv_style_set_bg_opa(&${varName}, ${Math.round((style.backgroundOpacity / 100) * 255)});`)
+  if (style.borderOpacity !== undefined) set(`lv_style_set_border_opa(&${varName}, ${Math.round((style.borderOpacity / 100) * 255)});`)
   if (style.borderWidth !== undefined) set(`lv_style_set_border_width(&${varName}, ${Math.round(style.borderWidth)});`)
   if (style.borderColor !== undefined) {
     const c = colorLiteral(style.borderColor)
@@ -344,14 +393,29 @@ function styleSetCalls(varName: string, style: Partial<UiWidgetStyle>, identByAs
   if (style.paddingBottom !== undefined) set(`lv_style_set_pad_bottom(&${varName}, ${Math.round(style.paddingBottom)});`)
   if (style.paddingLeft !== undefined) set(`lv_style_set_pad_left(&${varName}, ${Math.round(style.paddingLeft)});`)
   if (style.paddingRight !== undefined) set(`lv_style_set_pad_right(&${varName}, ${Math.round(style.paddingRight)});`)
-  if (style.shadowWidth !== undefined) {
-    set(`lv_style_set_shadow_width(&${varName}, ${Math.round(style.shadowWidth)});`)
-    if (style.shadowColor !== undefined) {
-      const c = colorLiteral(style.shadowColor)
+  const shadow = resolveEffectiveShadow(style)
+  if (shadow?.kind === 'shadow') {
+    set(`lv_style_set_shadow_width(&${varName}, ${shadow.width});`)
+    if (shadow.color !== undefined) {
+      const c = colorLiteral(shadow.color)
       if (c) set(`lv_style_set_shadow_color(&${varName}, ${c});`)
     }
-    if (style.shadowOffsetX !== undefined) set(`lv_style_set_shadow_offset_x(&${varName}, ${Math.round(style.shadowOffsetX)});`)
-    if (style.shadowOffsetY !== undefined) set(`lv_style_set_shadow_offset_y(&${varName}, ${Math.round(style.shadowOffsetY)});`)
+    if (shadow.offsetX !== undefined) set(`lv_style_set_shadow_offset_x(&${varName}, ${Math.round(shadow.offsetX)});`)
+    if (shadow.offsetY !== undefined) set(`lv_style_set_shadow_offset_y(&${varName}, ${Math.round(shadow.offsetY)});`)
+  } else if (shadow?.kind === 'glow') {
+    set(`lv_style_set_shadow_width(&${varName}, ${shadow.width});`)
+    set(`lv_style_set_shadow_spread(&${varName}, ${shadow.spread});`)
+    set(`lv_style_set_shadow_offset_x(&${varName}, 0);`)
+    set(`lv_style_set_shadow_offset_y(&${varName}, 0);`)
+    if (shadow.color !== undefined) {
+      const c = colorLiteral(shadow.color)
+      if (c) set(`lv_style_set_shadow_color(&${varName}, ${c});`)
+    }
+  } else if (shadow?.kind === 'elevation') {
+    set(`lv_style_set_shadow_width(&${varName}, ${shadow.width}); // derived from elevation ${Math.max(0, Math.min(24, style.elevation!))}`)
+    set(`lv_style_set_shadow_offset_y(&${varName}, ${shadow.offsetY});`)
+    set(`lv_style_set_shadow_opa(&${varName}, ${shadow.opa255});`)
+    set(`lv_style_set_shadow_color(&${varName}, lv_color_hex(0x000000));`)
   }
   if (style.flexDirection !== undefined) {
     set(`lv_style_set_flex_flow(&${varName}, ${style.flexDirection === 'row' ? 'LV_FLEX_FLOW_ROW' : 'LV_FLEX_FLOW_COLUMN'}${style.flexWrap ? '_WRAP' : ''});`)
@@ -410,6 +474,7 @@ function hasVisualStyle(style: Partial<UiWidgetStyle> | undefined): boolean {
 }
 
 function exportLvglStyles(
+  uiDesign: Pick<UiDesignProject, 'theme' | 'customThemeTokens'>,
   widgets: UiWidget[],
   rules: CssRuleExport[],
   identByAssetId: Map<string, string>,
@@ -468,7 +533,7 @@ function exportLvglStyles(
     if (hasVisualStyle(w.style)) {
       const varName = `style_local_${widgetVarName(w)}`
       lines.push(`  lv_style_init(&${varName});`)
-      lines.push(...styleSetCalls(varName, w.style, identByAssetId))
+      lines.push(...styleSetCalls(varName, resolveThemedStyle(w, uiDesign), identByAssetId))
       lines.push('')
     }
     for (const stateName of Object.keys(w.states) as UiWidgetStateName[]) {
@@ -757,10 +822,105 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
     }
     case 'spinner':
       lines.push(`${indent}${varName} = lv_spinner_create(${parentVar});`)
-      lines.push(`${indent}lv_spinner_set_anim_params(${varName}, 1000, 60);`)
+      lines.push(`${indent}lv_spinner_set_anim_params(${varName}, ${Math.round(propNum(widget, 'spinDurationMs', 1000))}, ${Math.round(propNum(widget, 'spinAngle', 60))});`)
+      break
+    case 'gauge': {
+      // Real lv_scale (lv_meter was removed in LVGL v9) + a built-in-positioned needle line —
+      // the standard v9 round-scale-with-needle pattern (see lv_example_scale_2). Needle length
+      // is derived from the widget's own authored px width/height since lv_scale has no
+      // "give me my own radius" getter to read back at generation time — an approximation, same
+      // tier as this exporter's other size-derived-at-generation-time visuals.
+      lines.push(`${indent}${varName} = lv_scale_create(${parentVar});`)
+      lines.push(`${indent}lv_scale_set_mode(${varName}, LV_SCALE_MODE_ROUND_OUTER);`)
+      lines.push(`${indent}lv_scale_set_range(${varName}, ${Math.round(propNum(widget, 'min', 0))}, ${Math.round(propNum(widget, 'max', 100))});`)
+      lines.push(`${indent}lv_scale_set_total_tick_count(${varName}, ${Math.round(propNum(widget, 'totalTicks', 21))});`)
+      lines.push(`${indent}lv_scale_set_major_tick_every(${varName}, ${Math.round(propNum(widget, 'majorTickEvery', 5))});`)
+      lines.push(`${indent}lv_scale_set_angle_range(${varName}, ${Math.round(propNum(widget, 'angleRange', 270))});`)
+      lines.push(`${indent}lv_scale_set_rotation(${varName}, ${Math.round(propNum(widget, 'rotation', 135))});`)
+      const warnMin = widget.props.warningMin, warnMax = widget.props.warningMax
+      if (typeof warnMin === 'number' && typeof warnMax === 'number') {
+        const warnColor = colorLiteral(typeof widget.props.warningColor === 'string' ? widget.props.warningColor : '#F59E0B') ?? 'lv_color_hex(0xF59E0B)'
+        lines.push(`${indent}{ lv_scale_section_t* sec = lv_scale_add_section(${varName}); lv_scale_section_set_range(sec, ${Math.round(warnMin)}, ${Math.round(warnMax)}); lv_scale_section_set_style(sec, LV_PART_INDICATOR, ${warnColor}); }`)
+      }
+      const critMin = widget.props.criticalMin, critMax = widget.props.criticalMax
+      if (typeof critMin === 'number' && typeof critMax === 'number') {
+        const critColor = colorLiteral(typeof widget.props.criticalColor === 'string' ? widget.props.criticalColor : '#EF4444') ?? 'lv_color_hex(0xEF4444)'
+        lines.push(`${indent}{ lv_scale_section_t* sec = lv_scale_add_section(${varName}); lv_scale_section_set_range(sec, ${Math.round(critMin)}, ${Math.round(critMax)}); lv_scale_section_set_style(sec, LV_PART_INDICATOR, ${critColor}); }`)
+      }
+      const wNum = typeof widget.style.width === 'number' ? widget.style.width : 90
+      const hNum = typeof widget.style.height === 'number' ? widget.style.height : 90
+      const needleLen = Math.max(4, Math.round(Math.min(wNum, hNum) / 2) - 10)
+      lines.push(`${indent}${varName}_needle = lv_line_create(${varName});`)
+      lines.push(`${indent}lv_obj_set_style_line_color(${varName}_needle, lv_palette_main(LV_PALETTE_RED), LV_PART_MAIN);`)
+      lines.push(`${indent}lv_obj_set_style_line_width(${varName}_needle, 3, LV_PART_MAIN);`)
+      lines.push(`${indent}lv_obj_set_style_line_rounded(${varName}_needle, true, LV_PART_MAIN);`)
+      lines.push(`${indent}${varName}_needle_len = ${needleLen};`)
+      lines.push(`${indent}${varName}_value = ${Math.round(propNum(widget, 'value', 0))};`)
+      lines.push(`${indent}lv_scale_set_line_needle_value(${varName}, ${varName}_needle, ${varName}_needle_len, ${varName}_value);`)
+      if (widget.props.animAutoStart === true) {
+        lines.push(...emitIndicatorAnimStart(varName, 'gauge', widget, String(Math.round(propNum(widget, 'min', 0))), String(Math.round(propNum(widget, 'max', 100))), indent))
+      }
+      break
+    }
+    case 'led': {
+      lines.push(`${indent}${varName} = lv_led_create(${parentVar});`)
+      const ledColor = colorLiteral(typeof widget.props.ledColor === 'string' ? widget.props.ledColor : '#22C55E') ?? 'lv_color_hex(0x22C55E)'
+      lines.push(`${indent}lv_led_set_color(${varName}, ${ledColor});`)
+      lines.push(`${indent}lv_led_set_brightness(${varName}, ${Math.round(propNum(widget, 'brightness', 100) * 255 / 100)});`)
+      const state = typeof widget.props.state === 'string' ? widget.props.state : 'off'
+      if (state === 'off') lines.push(`${indent}lv_led_off(${varName});`)
+      else lines.push(`${indent}lv_led_on(${varName});`)
+      if (state === 'blink' || state === 'flash' || state === 'pulse') {
+        lines.push(`${indent}__kibo_led_anim_start(${varName}, ${state === 'pulse' ? 1000 : 500}, ${state === 'blink' ? 'true' : 'false'});`)
+      }
+      break
+    }
+    case 'statusIndicator': {
+      // A plain container + a colored circular "dot" child + a text "label" child — LVGL has no
+      // dedicated status-indicator widget, so this composes 3 ordinary objects, same convention
+      // as the button's own label-child pattern above. Initial color/icon/glow/animation are
+      // resolved from STATUS_INDICATOR_PRESETS (statusIndicatorApplyLines, shared with the
+      // runtime `setStatus` action — see actionTable.ts) so creation-time and runtime status
+      // changes can never disagree.
+      lines.push(`${indent}${varName} = lv_obj_create(${parentVar});`)
+      lines.push(`${indent}lv_obj_set_style_bg_opa(${varName}, LV_OPA_TRANSP, LV_PART_MAIN);`)
+      lines.push(`${indent}lv_obj_set_style_border_width(${varName}, 0, LV_PART_MAIN);`)
+      lines.push(`${indent}lv_obj_set_style_pad_all(${varName}, 4, LV_PART_MAIN);`)
+      lines.push(`${indent}lv_obj_set_style_pad_column(${varName}, 6, LV_PART_MAIN);`)
+      lines.push(`${indent}lv_obj_set_flex_flow(${varName}, LV_FLEX_FLOW_ROW);`)
+      lines.push(`${indent}lv_obj_set_flex_align(${varName}, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);`)
+      lines.push(`${indent}${varName}_dot = lv_obj_create(${varName});`)
+      lines.push(`${indent}lv_obj_set_size(${varName}_dot, 10, 10);`)
+      lines.push(`${indent}lv_obj_set_style_radius(${varName}_dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);`)
+      lines.push(`${indent}lv_obj_set_style_border_width(${varName}_dot, 0, LV_PART_MAIN);`)
+      lines.push(`${indent}lv_obj_set_style_pad_all(${varName}_dot, 0, LV_PART_MAIN);`)
+      lines.push(`${indent}${varName}_label = lv_label_create(${varName});`)
+      const status = typeof widget.props.status === 'string' ? widget.props.status : 'online'
+      lines.push(...statusIndicatorApplyLines(varName, status, indent))
+      break
+    }
+    case 'dataList':
+      // A plain vertically-scrollable, column-flexed container — the widget itself is just the
+      // scroll viewport; its repeated rows are created separately by the generated per-list
+      // <var>_RebuildRows()/SetItems() API (see the "Data List codegen" section below), never
+      // baked into a fixed unrolled call sequence like the static List widget's items are.
+      lines.push(`${indent}${varName} = lv_obj_create(${parentVar});`)
+      lines.push(`${indent}lv_obj_set_flex_flow(${varName}, LV_FLEX_FLOW_COLUMN);`)
+      lines.push(`${indent}lv_obj_set_scroll_dir(${varName}, LV_DIR_VER);`)
+      // Real LVGL row gap for a column-flex container (lv_obj_set_style_pad_column is the ROW-flow
+      // equivalent — see styleSetCalls' own generic `gap` handling — this is the COLUMN-flow one).
+      // Matches WidgetRenderer.tsx's canvas-preview row offset exactly (same itemSpacing value),
+      // so the two can't disagree about row spacing.
+      lines.push(`${indent}lv_obj_set_style_pad_row(${varName}, ${Math.round(widget.dataListConfig?.itemSpacing ?? 4)}, LV_PART_MAIN);`)
       break
     default:
       lines.push(`${indent}${varName} = lv_obj_create(${parentVar});`)
+  }
+
+  if (widget.type === 'bar' || widget.type === 'slider' || widget.type === 'arc') {
+    if (widget.props.animAutoStart === true) {
+      lines.push(...emitIndicatorAnimStart(varName, widget.type, widget, String(Math.round(propNum(widget, 'min', 0))), String(Math.round(propNum(widget, 'max', 100))), indent))
+    }
   }
 
   lines.push(`${indent}lv_obj_set_pos(${varName}, ${x}, ${y});`)
@@ -768,6 +928,95 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
   if (widget.style.visible === false) lines.push(`${indent}lv_obj_add_flag(${varName}, LV_OBJ_FLAG_HIDDEN);`)
 
   return lines
+}
+
+/** Companion `lv_obj_t*`/tracker-variable declarations beyond a widget's own `${varName}` —
+ * button's `_label` child was the sole existing case; extended here for bar/slider/arc/gauge's
+ * `_default_value` (what the `resetValue` action resets to) and `_value_exec` trampoline (what
+ * `emitIndicatorAnimStart`'s hand-rolled lv_anim_t targets — see actionTable.ts's
+ * indicatorAnimSetterExpr), gauge's `_needle`/`_needle_len`/`_value` companions + `_needle_exec`
+ * trampoline (lv_scale has no anim-friendly 2-arg needle setter, see emitValueSetLines' doc
+ * comment in actionTable.ts), and statusIndicator's `_dot`/`_label` children. Called identically
+ * from all 3 duplicated widget-declaration loops (UI Screen Only / live-preview / Complete
+ * Project) — `linkage` is 'inline' for the header-only mode (C++17 inline vars/functions, see
+ * that mode's own item-8 fix) and 'static' for the other two (safe there since they're single
+ * translation units). */
+function extraWidgetDeclLines(w: UiWidget, v: string, linkage: 'inline' | 'static'): string[] {
+  const lines: string[] = []
+  if (w.type === 'button') lines.push(`${linkage} lv_obj_t* ${v}_label = nullptr;`)
+  if (w.type === 'bar' || w.type === 'slider' || w.type === 'arc' || w.type === 'gauge') {
+    const dflt = Math.round(propNum(w, 'defaultValue', propNum(w, 'value', 0)))
+    lines.push(`${linkage} int32_t ${v}_default_value = ${dflt};`)
+    // Real event stubs for the spec's OnAnimationStarted()/OnAnimationFinished() — called by
+    // emitIndicatorAnimStart (see actionTable.ts) around every playIndicatorAnimation/
+    // animAutoStart run. Declared unconditionally (like every other companion here) rather than
+    // only when animation is actually used, so a script/Properties-panel action added later never
+    // needs new declarations threaded in — same tradeoff as _default_value's own always-on cost.
+    lines.push(`${linkage} void ${v}_on_anim_started() {`)
+    lines.push(`  // USER CODE BEGIN ${v}_on_anim_started`)
+    lines.push(`  // TODO: called when this indicator's animation starts`)
+    lines.push(`  // USER CODE END ${v}_on_anim_started`)
+    lines.push('}')
+    lines.push(`${linkage} void ${v}_on_anim_finished(lv_anim_t* a) {`)
+    lines.push('  (void)a;')
+    lines.push(`  // USER CODE BEGIN ${v}_on_anim_finished`)
+    lines.push(`  // TODO: called when this indicator's animation finishes (non-looping only)`)
+    lines.push(`  // USER CODE END ${v}_on_anim_finished`)
+    lines.push('}')
+  }
+  if (w.type === 'bar') {
+    lines.push(`${linkage} void ${v}_value_exec(void* obj, int32_t val) { lv_bar_set_value((lv_obj_t*)obj, val, LV_ANIM_OFF); }`)
+  }
+  if (w.type === 'slider') {
+    lines.push(`${linkage} void ${v}_value_exec(void* obj, int32_t val) { lv_slider_set_value((lv_obj_t*)obj, val, LV_ANIM_OFF); }`)
+  }
+  if (w.type === 'gauge') {
+    lines.push(`${linkage} lv_obj_t* ${v}_needle = nullptr;`)
+    lines.push(`${linkage} int32_t ${v}_needle_len = 0;`)
+    lines.push(`${linkage} int32_t ${v}_value = ${Math.round(propNum(w, 'value', 0))};`)
+    lines.push(`${linkage} void ${v}_needle_exec(void* obj, int32_t val) { ${v}_value = val; lv_scale_set_line_needle_value((lv_obj_t*)obj, ${v}_needle, ${v}_needle_len, val); }`)
+  }
+  if (w.type === 'statusIndicator') {
+    lines.push(`${linkage} lv_obj_t* ${v}_dot = nullptr;`)
+    lines.push(`${linkage} lv_obj_t* ${v}_label = nullptr;`)
+  }
+  return lines
+}
+
+/** Shared runtime helpers used by LED/statusIndicator blink/pulse animations (see actionTable.ts's
+ * `blinkLed`/`pulseLed`/`statusIndicatorApplyLines`) — emitted once per export, only when the
+ * project actually has an led/statusIndicator widget (see the 3 call sites), so a project with
+ * neither never gets an unused-function warning. `__kibo_led_anim_start` drives a real `lv_led`'s
+ * brightness (blink = hard step to 0, pulse/flash = smooth ease to a dim floor);
+ * `__kibo_opacity_anim_start` is the same idea for a plain `lv_obj_t*` (statusIndicator's dot has
+ * no brightness concept) via a small `lv_obj_set_style_opa` trampoline, since that setter's real
+ * 3-arg signature doesn't fit `lv_anim_exec_xcb_t`'s plain (obj, int32_t) shape either. */
+function ledRuntimeHelperLines(linkage: 'inline' | 'static'): string[] {
+  return [
+    `${linkage} void __kibo_opa_exec(void* obj, int32_t v) { lv_obj_set_style_opa((lv_obj_t*)obj, (lv_opa_t)v, LV_PART_MAIN); }`,
+    `${linkage} void __kibo_led_anim_start(lv_obj_t* led, uint32_t durationMs, bool isBlink) {`,
+    `  static lv_anim_t a; lv_anim_init(&a);`,
+    `  lv_anim_set_var(&a, led);`,
+    `  lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_led_set_brightness);`,
+    `  lv_anim_set_values(&a, 255, isBlink ? 0 : 60);`,
+    `  lv_anim_set_duration(&a, durationMs / 2);`,
+    `  lv_anim_set_playback_time(&a, durationMs / 2);`,
+    `  lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);`,
+    `  lv_anim_set_path_cb(&a, isBlink ? lv_anim_path_step : lv_anim_path_ease_in_out);`,
+    `  lv_anim_start(&a);`,
+    `}`,
+    `${linkage} void __kibo_opacity_anim_start(lv_obj_t* obj, uint32_t durationMs) {`,
+    `  static lv_anim_t a2; lv_anim_init(&a2);`,
+    `  lv_anim_set_var(&a2, obj);`,
+    `  lv_anim_set_exec_cb(&a2, __kibo_opa_exec);`,
+    `  lv_anim_set_values(&a2, 255, 60);`,
+    `  lv_anim_set_duration(&a2, durationMs / 2);`,
+    `  lv_anim_set_playback_time(&a2, durationMs / 2);`,
+    `  lv_anim_set_repeat_count(&a2, LV_ANIM_REPEAT_INFINITE);`,
+    `  lv_anim_set_path_cb(&a2, lv_anim_path_ease_in_out);`,
+    `  lv_anim_start(&a2);`,
+    `}`
+  ]
 }
 
 /** One `case` inside a widget's single event callback — `trigger`/`bodyLines` pairs sharing the
@@ -826,7 +1075,7 @@ export const TRIGGER_TO_LVGL_EVENT: Record<string, string> = {
  * widget of one of these types still gets skipped if its own eventCallbackEnabled is explicitly
  * false, and a widget of ANY OTHER type still gets a callback if it has real script-authored
  * events or legacy widget.events — this set only controls the *automatic default*. */
-export const EVENT_CAPABLE_WIDGET_TYPES = new Set<UiWidgetType>(['button', 'switch', 'slider', 'checkbox', 'dropdown', 'roller', 'textarea', 'list', 'arc', 'tabs'])
+export const EVENT_CAPABLE_WIDGET_TYPES = new Set<UiWidgetType>(['button', 'switch', 'slider', 'checkbox', 'dropdown', 'roller', 'textarea', 'list', 'arc', 'tabs', 'gauge', 'led', 'statusIndicator'])
 
 /** The Properties panel's Events section checkbox list — a deliberately restricted subset of
  * TRIGGER_TO_LVGL_EVENT's full vocabulary (no checked/unchecked/screenLoaded/screenUnloaded,
@@ -1115,6 +1364,371 @@ function emitListItemClickCallback(
   })
   lines.push('}')
   return { handlerName, lines }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Data List codegen — generates a real C++ struct per used UiDataSource, a per-item creation
+// function that builds the FULL template subtree (not just one label) per row, and a runtime API
+// (SetItems/AddItem/UpdateItem/RemoveItem/ClearItems/Refresh/selection/loading-empty-error state)
+// — see the plan's §6.2-6.4. Every dataList widget's own template descendants (dataListTemplateBounds/
+// dataListTemplateDescendants, dataListLayout.ts) are function-LOCAL variables inside the generated
+// per-item creation function — they are NOT part of the ordinary top-level widget declaration loop/
+// registry/collectEvents (see templateDescendantIds filtering at each of this file's 3 export-mode
+// call sites), matching how a repeated row's children can't each be one static global.
+// ---------------------------------------------------------------------------------------------
+
+/** "Notifications" -> "Notification" — the simple trailing-'s' strip dataSourceStructName() uses
+ * when no structNameOverride is set. Deliberately simple (not a real pluralization library) —
+ * matches this exporter's own "good enough, escape hatch exists" precedent elsewhere. */
+function stripTrailingS(pascal: string): string {
+  return pascal.length > 1 && pascal.endsWith('s') && !pascal.endsWith('ss') ? pascal.slice(0, -1) : pascal
+}
+
+function dataSourceStructName(ds: UiDataSource): string {
+  if (ds.structNameOverride?.trim()) return toCIdentifier(ds.structNameOverride.trim())
+  return `${stripTrailingS(toPascalCase(ds.name))}Item`
+}
+
+function dataSourceFieldIdent(f: UiDataSourceField): string {
+  return toCIdentifier(f.name || 'field')
+}
+
+/** Arduino `String` for text (matching this exporter's established uiVariableExprType convention
+ * — see the file-top note on variableVarName), real numeric/bool C++ types otherwise. */
+function dataSourceFieldCppType(f: UiDataSourceField): string {
+  if (f.type === 'int') return 'int32_t'
+  if (f.type === 'double') return 'double'
+  if (f.type === 'bool') return 'bool'
+  return 'String'
+}
+
+function dataSourceFieldExprType(f: UiDataSourceField): ExprType {
+  if (f.type === 'int' || f.type === 'double') return 'number'
+  if (f.type === 'bool') return 'boolean'
+  return 'String'
+}
+
+/** `struct <StructName> { <field>; ... };` — once per used data source, deduped by the caller
+ * (see computeDataListInfo's usedDataSourcesById). */
+function emitDataListStructDecl(ds: UiDataSource): string[] {
+  const structName = dataSourceStructName(ds)
+  const lines = [`struct ${structName} {`]
+  for (const f of ds.fields) {
+    lines.push(`  ${dataSourceFieldCppType(f)} ${dataSourceFieldIdent(f)};`)
+  }
+  lines.push('};')
+  return lines
+}
+
+/** A shallow clone of the screen's own CodegenContext with `templateItemFields` populated from the
+ * assigned data source's field list — see codegen.ts's CodegenContext.templateItemFields doc
+ * comment. `data.<name>` (Variable Manager) stays reachable inside a template expression for free
+ * since every other field of `base` is untouched. */
+function buildDataListTemplateCodegenCtx(base: CodegenContext, ds: UiDataSource): CodegenContext {
+  const templateItemFields = new Map<string, { ident: string; type: ExprType }>()
+  for (const f of ds.fields) {
+    templateItemFields.set(f.name, { ident: dataSourceFieldIdent(f), type: dataSourceFieldExprType(f) })
+  }
+  return { ...base, templateItemFields }
+}
+
+interface DataListTemplateNode {
+  widget: UiWidget
+  varName: string
+  parentVarName: string
+}
+
+/** Flattens a Data List's item-template subtree (dataListTemplateDescendants) into fresh, FUNCTION-
+ * LOCAL variable names (`n_<shortId>`, never widgetVarName()'s global `_obj` — N row instances
+ * can't share one static/inline var) in creation order, each tracking its own local parent var so
+ * the per-item creation function can pass the right parent to widgetCreateCalls(). */
+function computeDataListTemplateNodes(uiDesign: UiDesignProject, listWidget: UiWidget): DataListTemplateNode[] {
+  const nodes: DataListTemplateNode[] = []
+  const varNameById = new Map<string, string>()
+  varNameById.set(listWidget.id, 'row')
+  const used = new Set<string>(['row'])
+  const visit = (widget: UiWidget, parentVarName: string) => {
+    for (const childId of widget.childIds) {
+      const child = uiDesign.widgets[childId]
+      if (!child) continue
+      let base = `n_${toCIdentifier(child.tagId || child.id.slice(0, 6))}`
+      let varName = base
+      let i = 2
+      while (used.has(varName)) {
+        varName = `${base}_${i}`
+        i++
+      }
+      used.add(varName)
+      varNameById.set(child.id, varName)
+      nodes.push({ widget: child, varName, parentVarName })
+      visit(child, varName)
+    }
+  }
+  visit(listWidget, 'row')
+  return nodes
+}
+
+/** `static lv_obj_t* <fnName>(lv_obj_t* parent, const <StructName>& item, int index)` — builds one
+ * full row from the template subtree (every descendant, not just one label), substituting `{{}}`
+ * text and evaluating each descendant's own `visibleWhenExpr`. Text-target dispatch (which var a
+ * `{{}}` substitution's real lv_*_set_text call targets) deliberately mirrors codegen.ts's own
+ * established `setText` target logic exactly (button -> `${varName}_label` child, every other
+ * settable kind -> the widget's own var) — this is the same convention already shipped and used by
+ * the runtime `setText` script action, not a new one invented for this feature. */
+function emitDataListItemCreateFn(
+  uiDesign: UiDesignProject,
+  listWidget: UiWidget,
+  fnName: string,
+  structName: string,
+  identByAssetId: Map<string, string>,
+  rules: CssRuleExport[],
+  templateCtx: CodegenContext,
+  linkage: 'static' | 'inline'
+): { lines: string[]; errors: ScriptError[] } {
+  const nodes = computeDataListTemplateNodes(uiDesign, listWidget)
+  const bounds = dataListTemplateBounds(uiDesign, listWidget)
+  const errors: ScriptError[] = []
+  const lines: string[] = []
+  const clickEnabled = !!listWidget.dataListConfig?.itemClickEnabled
+  lines.push(`${linkage} lv_obj_t* ${fnName}(lv_obj_t* parent, const ${structName}& item, int index) {`)
+  lines.push('  lv_obj_t* row = lv_obj_create(parent);')
+  lines.push(`  lv_obj_set_size(row, ${Math.round(bounds.width)}, ${Math.round(bounds.height)});`)
+  lines.push('  lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN);')
+  lines.push('  lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);')
+  lines.push('  lv_obj_set_style_radius(row, 0, LV_PART_MAIN);')
+  for (const node of nodes) {
+    lines.push(`  lv_obj_t* ${node.varName};`)
+    // Companion pointer vars widgetCreateCalls itself assigns into (button's own child label;
+    // gauge's needle line; statusIndicator's dot+label) must be function-LOCAL here — one fresh
+    // instance per generated row — unlike an ordinary top-level widget's own single global/inline
+    // companion var (see extraWidgetDeclLines, which is NOT reused here for exactly that reason).
+    // Auto-animating (animAutoStart) bar/slider/arc/gauge/led/statusIndicator template children
+    // reference additional file-scope exec/callback functions this per-item function does not
+    // declare — not yet supported inside a Data List template (flagged for validateLvglExport.ts).
+    if (node.widget.type === 'button') lines.push(`  lv_obj_t* ${node.varName}_label;`)
+    if (node.widget.type === 'gauge') {
+      lines.push(`  lv_obj_t* ${node.varName}_needle;`)
+      lines.push(`  int32_t ${node.varName}_needle_len;`)
+      lines.push(`  int32_t ${node.varName}_value;`)
+    }
+    if (node.widget.type === 'statusIndicator') {
+      lines.push(`  lv_obj_t* ${node.varName}_dot;`)
+      lines.push(`  lv_obj_t* ${node.varName}_label;`)
+    }
+    lines.push(...widgetCreateCalls(node.widget, node.varName, node.parentVarName, identByAssetId, '  '))
+    lines.push(...styleApplyCalls(node.widget, rules, node.varName, '  '))
+    if (hasTemplateExpr(node.widget.text)) {
+      const compiled = compileTemplateText(node.widget.text ?? '', templateCtx)
+      errors.push(...compiled.errors)
+      const isButton = node.widget.type === 'button'
+      const textTarget = isButton ? `${node.varName}_label` : node.varName
+      if (node.widget.type === 'checkbox') lines.push(`  lv_checkbox_set_text(${textTarget}, ${compiled.cppExpr}.c_str());`)
+      else if (node.widget.type === 'textarea') lines.push(`  lv_textarea_set_text(${textTarget}, ${compiled.cppExpr}.c_str());`)
+      else lines.push(`  lv_label_set_text(${textTarget}, ${compiled.cppExpr}.c_str());`)
+    }
+    if (node.widget.visibleWhenExpr?.trim()) {
+      const compiled = compileTemplateExpr(node.widget.visibleWhenExpr, templateCtx)
+      errors.push(...compiled.errors)
+      lines.push(`  if (${compiled.text}) { lv_obj_remove_flag(${node.varName}, LV_OBJ_FLAG_HIDDEN); } else { lv_obj_add_flag(${node.varName}, LV_OBJ_FLAG_HIDDEN); }`)
+    }
+  }
+  lines.push('  lv_obj_set_user_data(row, (void*)(uintptr_t)index);')
+  if (clickEnabled) lines.push('  lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);')
+  lines.push('  (void)index;')
+  lines.push('  return row;')
+  lines.push('}')
+  return { lines, errors }
+}
+
+/** One shared click-dispatch callback for a Data List's rows — reads the clicked row's index (see
+ * emitDataListItemCreateFn's lv_obj_set_user_data), bounds-checks against the live item vector, and
+ * calls a USER-CODE-wrapped `<var>_OnItemClicked(index, item)` stub — same preservation convention
+ * every other generated callback body in this exporter already uses. `itemsExpr` is the runtime
+ * item-vector variable this callback reads (declared by emitDataListRuntimeApi). */
+function emitDataListClickCallback(
+  varName: string,
+  structName: string,
+  itemsExpr: string,
+  useUserCodeMarkers: boolean,
+  linkage: 'static' | 'inline'
+): { handlerName: string; lines: string[] } {
+  const handlerName = `${varName}_item_event_cb`
+  const stubName = `${varName}_OnItemClicked`
+  const lines: string[] = []
+  lines.push(`${linkage} void ${stubName}(int index, const ${structName}& item) {`)
+  lines.push('  (void)index; (void)item;')
+  if (useUserCodeMarkers) {
+    lines.push(`  // USER CODE BEGIN ${stubName}`)
+    lines.push('  // TODO: handle a row click here.')
+    lines.push(`  // USER CODE END ${stubName}`)
+  } else {
+    lines.push('  // TODO: handle a row click here.')
+  }
+  lines.push('}')
+  lines.push('')
+  lines.push(`${linkage} void ${handlerName}(lv_event_t * e) {`)
+  lines.push('  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;')
+  lines.push('  lv_obj_t* row = lv_event_get_target_obj(e);')
+  lines.push('  int index = (int)(uintptr_t)lv_obj_get_user_data(row);')
+  lines.push(`  if (index < 0 || (size_t)index >= ${itemsExpr}.size()) return;`)
+  lines.push(`  ${stubName}(index, ${itemsExpr}[(size_t)index]);`)
+  lines.push('}')
+  return { handlerName, lines }
+}
+
+/** The generated runtime API: `<var>_items` storage (std::vector — an approved v1 scope decision,
+ * see the plan) + SetItems/AddItem/UpdateItem/RemoveItem/ClearItems/Refresh/selection/loading-empty-
+ * error state, all funneling into one `<var>_RebuildRows()` (`lv_obj_clean` + recreate every
+ * surviving row) — a documented full-rebuild-on-mutation v1 tradeoff (see the plan's §6.4), using
+ * only bedrock LVGL v9 APIs. Declaration order matters here: `_QueueItems` references `_async_apply`
+ * which references `_ProcessPendingUpdates`, both of which must already be declared above it (no
+ * function hoisting in C++). */
+function emitDataListRuntimeApi(
+  varName: string,
+  listObjExpr: string,
+  structName: string,
+  createFnName: string,
+  clickHandlerName: string | null,
+  config: UiDataListConfig,
+  linkage: 'static' | 'inline'
+): string[] {
+  const items = `${varName}_items`
+  const lines: string[] = []
+  lines.push(`${linkage} std::vector<${structName}> ${items};`)
+  lines.push(`${linkage} int ${varName}_selectedIndex = -1;`)
+  lines.push(`${linkage} bool ${varName}_showLoading = false;`)
+  lines.push(`${linkage} bool ${varName}_showError = false;`)
+  lines.push(`${linkage} std::vector<${structName}> ${varName}_pendingItems;`)
+  lines.push(`${linkage} bool ${varName}_hasPending = false;`)
+  lines.push('')
+  lines.push(`${linkage} void ${varName}_RebuildRows() {`)
+  lines.push(`  lv_obj_clean(${listObjExpr});`)
+  lines.push(`  if (${varName}_showLoading) { lv_obj_t* l = lv_label_create(${listObjExpr}); lv_label_set_text(l, ${widgetTextLiteral(config.loadingText)}); return; }`)
+  lines.push(`  if (${varName}_showError) { lv_obj_t* l = lv_label_create(${listObjExpr}); lv_label_set_text(l, ${widgetTextLiteral(config.errorText)}); return; }`)
+  lines.push(`  if (${items}.empty()) { lv_obj_t* l = lv_label_create(${listObjExpr}); lv_label_set_text(l, ${widgetTextLiteral(config.emptyText)}); return; }`)
+  lines.push(`  size_t n = ${items}.size();`)
+  if (config.maxItems > 0) lines.push(`  if (n > (size_t)${Math.round(config.maxItems)}) n = (size_t)${Math.round(config.maxItems)};`)
+  lines.push('  for (size_t i = 0; i < n; i++) {')
+  lines.push(`    lv_obj_t* row = ${createFnName}(${listObjExpr}, ${items}[i], (int)i);`)
+  if (clickHandlerName) lines.push(`    lv_obj_add_event_cb(row, ${clickHandlerName}, LV_EVENT_CLICKED, NULL);`)
+  lines.push('  }')
+  lines.push('}')
+  lines.push('')
+  lines.push(`${linkage} void ${varName}_SetItems(const ${structName}* itemsIn, size_t itemCount) {`)
+  lines.push(`  ${items}.assign(itemsIn, itemsIn + itemCount);`)
+  lines.push(`  ${varName}_selectedIndex = -1;`)
+  lines.push(`  ${varName}_showLoading = false;`)
+  lines.push(`  ${varName}_showError = false;`)
+  lines.push(`  ${varName}_RebuildRows();`)
+  lines.push('}')
+  lines.push(`${linkage} void ${varName}_SetItems(const std::vector<${structName}>& itemsIn) { ${varName}_SetItems(itemsIn.data(), itemsIn.size()); }`)
+  lines.push(`${linkage} void ${varName}_AddItem(const ${structName}& item) { ${items}.push_back(item); ${varName}_showLoading = false; ${varName}_showError = false; ${varName}_RebuildRows(); }`)
+  lines.push(`${linkage} void ${varName}_UpdateItem(size_t index, const ${structName}& item) { if (index >= ${items}.size()) return; ${items}[index] = item; ${varName}_RebuildRows(); }`)
+  lines.push(`${linkage} void ${varName}_RemoveItem(size_t index) { if (index >= ${items}.size()) return; ${items}.erase(${items}.begin() + index); if (${varName}_selectedIndex == (int)index) ${varName}_selectedIndex = -1; ${varName}_RebuildRows(); }`)
+  lines.push(`${linkage} void ${varName}_ClearItems() { ${items}.clear(); ${varName}_selectedIndex = -1; ${varName}_RebuildRows(); }`)
+  lines.push(`${linkage} void ${varName}_Refresh() { ${varName}_RebuildRows(); }`)
+  lines.push(`${linkage} bool ${varName}_HasSelection() { return ${varName}_selectedIndex >= 0; }`)
+  lines.push(`${linkage} int ${varName}_GetSelectedIndex() { return ${varName}_selectedIndex; }`)
+  lines.push(`${linkage} bool ${varName}_GetSelectedItem(${structName}& out) { if (${varName}_selectedIndex < 0) return false; out = ${items}[(size_t)${varName}_selectedIndex]; return true; }`)
+  lines.push(`${linkage} void ${varName}_ClearSelection() { ${varName}_selectedIndex = -1; }`)
+  lines.push(`${linkage} void ${varName}_ShowLoading() { ${varName}_showLoading = true; ${varName}_showError = false; ${varName}_RebuildRows(); }`)
+  lines.push(`${linkage} void ${varName}_ShowEmpty() { ${varName}_showLoading = false; ${varName}_showError = false; ${items}.clear(); ${varName}_RebuildRows(); }`)
+  lines.push(`${linkage} void ${varName}_ShowError() { ${varName}_showLoading = false; ${varName}_showError = true; ${varName}_RebuildRows(); }`)
+  lines.push(`${linkage} void ${varName}_ShowData() { ${varName}_showLoading = false; ${varName}_showError = false; ${varName}_RebuildRows(); }`)
+  lines.push(`${linkage} void ${varName}_ProcessPendingUpdates() { if (!${varName}_hasPending) return; ${varName}_hasPending = false; ${varName}_SetItems(${varName}_pendingItems); }`)
+  lines.push(`${linkage} void ${varName}_async_apply(void* ud) { (void)ud; ${varName}_ProcessPendingUpdates(); }`)
+  lines.push(`${linkage} void ${varName}_QueueItems(const std::vector<${structName}>& itemsIn) {`)
+  lines.push(`  ${varName}_pendingItems = itemsIn;`)
+  lines.push(`  ${varName}_hasPending = true;`)
+  lines.push(`  lv_async_call(${varName}_async_apply, nullptr);`)
+  lines.push('}')
+  return lines
+}
+
+interface DataListInfo {
+  ds: UiDataSource
+  structName: string
+  declLines: string[]
+  errors: ScriptError[]
+  sampleSetupLines: string[]
+}
+
+/** Computes struct/create-fn/click-cb/runtime-API codegen for every dataList widget in `widgets`
+ * that has a bound data source — one call, shared by whichever export mode needs it, so the
+ * struct/API text can't drift between call sites. `baseCtx` supplies the screen's own
+ * CodegenContext (for `data.<name>` Variable Manager reachability inside a template — see
+ * buildDataListTemplateCodegenCtx); pass null when the caller has none available (script-derived
+ * variable access inside a template compiles to an "unknown identifier" error in that case, same as
+ * any other unresolved identifier). */
+function computeDataListInfo(
+  uiDesign: UiDesignProject,
+  widgets: UiWidget[],
+  identByAssetId: Map<string, string>,
+  rules: CssRuleExport[],
+  baseCtx: CodegenContext,
+  linkage: 'static' | 'inline',
+  useUserCodeMarkers: boolean
+): { usedDataSourcesById: Map<string, UiDataSource>; infoByWidgetId: Map<string, DataListInfo> } {
+  const usedDataSourcesById = new Map<string, UiDataSource>()
+  const infoByWidgetId = new Map<string, DataListInfo>()
+  for (const w of widgets) {
+    if (w.type !== 'dataList' || !w.dataListConfig?.dataSourceId) continue
+    const ds = uiDesign.dataSources.find((d) => d.id === w.dataListConfig!.dataSourceId)
+    if (!ds) continue
+    usedDataSourcesById.set(ds.id, ds)
+    const varName = widgetVarName(w)
+    const listObjExpr = varName
+    const structName = dataSourceStructName(ds)
+    const createFnName = `${varName}_CreateRow`
+    const templateCtx = buildDataListTemplateCodegenCtx(baseCtx, ds)
+    const { lines: createLines, errors } = emitDataListItemCreateFn(uiDesign, w, createFnName, structName, identByAssetId, rules, templateCtx, linkage)
+    const clickCb = w.dataListConfig.itemClickEnabled ? emitDataListClickCallback(varName, structName, `${varName}_items`, useUserCodeMarkers, linkage) : null
+    const apiLines = emitDataListRuntimeApi(varName, listObjExpr, structName, createFnName, clickCb?.handlerName ?? null, w.dataListConfig, linkage)
+    const declLines = [...createLines, '', ...(clickCb ? clickCb.lines : []), ...(clickCb ? [''] : []), ...apiLines]
+
+    const sampleSetupLines: string[] = []
+    if (w.dataListConfig.includeSampleDataInExport) {
+      try {
+        const rows = JSON.parse(ds.sampleData || '[]')
+        if (Array.isArray(rows) && rows.length > 0) {
+          sampleSetupLines.push(`  { std::vector<${structName}> sample;`)
+          for (const row of rows) {
+            const fieldInits = ds.fields.map((f) => {
+              const ident = dataSourceFieldIdent(f)
+              const raw = row && typeof row === 'object' ? (row as Record<string, unknown>)[f.name] : undefined
+              if (f.type === 'bool') return `.${ident} = ${raw ? 'true' : 'false'}`
+              if (f.type === 'int') return `.${ident} = ${Math.round(typeof raw === 'number' ? raw : 0)}`
+              if (f.type === 'double') return `.${ident} = ${typeof raw === 'number' ? raw : 0}`
+              return `.${ident} = ${JSON.stringify(String(raw ?? ''))}`
+            })
+            sampleSetupLines.push(`    sample.push_back(${structName}{ ${fieldInits.join(', ')} });`)
+          }
+          sampleSetupLines.push(`    ${varName}_SetItems(sample); }`)
+        }
+      } catch {
+        // Invalid sample JSON — validateLvglExport.ts's "Data Sources" category surfaces this;
+        // silently skip emitting a bogus initial-population call here rather than breaking the build.
+      }
+    }
+
+    infoByWidgetId.set(w.id, { ds, structName, declLines, errors, sampleSetupLines })
+  }
+  return { usedDataSourcesById, infoByWidgetId }
+}
+
+/** Every widget id that's a template descendant of ANY dataList widget in `widgets` — must be
+ * excluded from the ordinary top-level widget declaration loop / collectEvents / widget registry at
+ * every export-mode call site (they're function-local vars inside the generated per-item creation
+ * function instead, see computeDataListTemplateNodes) while remaining fully reachable for
+ * style/asset/font export (already handled by allReachableWidgets/reachableWidgetsForScreen's own
+ * dataListTemplateDescendants visit). */
+function dataListTemplateDescendantIds(uiDesign: UiDesignProject, widgets: UiWidget[]): Set<string> {
+  const ids = new Set<string>()
+  for (const w of widgets) {
+    if (w.type !== 'dataList') continue
+    for (const d of dataListTemplateDescendants(uiDesign, w)) ids.add(d.id)
+  }
+  return ids
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1769,6 +2383,10 @@ export async function generateUiScreenExport(project: Project, screenId: string,
 
   const widgets = reachableWidgetsForScreen(uiDesign, screen)
   const rules = usedCssRules(uiDesign, widgets)
+  // Data List template descendants are reachable above (for style/asset/font export) but must NOT
+  // be treated as ordinary top-level widgets — see dataListTemplateDescendantIds' own doc comment.
+  const templateDescendantIds = dataListTemplateDescendantIds(uiDesign, widgets)
+  const nonTemplateWidgets = widgets.filter((w) => !templateDescendantIds.has(w.id))
 
   const trimmedScreenName = customName?.trim() || screen.name
   const snake = deriveUiScreenSnakeName(trimmedScreenName)
@@ -1803,8 +2421,27 @@ export async function generateUiScreenExport(project: Project, screenId: string,
   const stylesNsPrefix = 'Ui'
 
   const { header: assetsHeaderRaw, source: assetsSourceRaw, identByAssetId } = await exportLvglAssets(uiDesign, widgets, rules, assetsFilenameBase)
-  const stylesCode = exportLvglStyles(widgets, rules, identByAssetId, stylesNsPrefix, focusedStyleVarName, 'inline')
-  const events = collectEvents(widgets, [] /* no script output — see the section comment above */)
+  const stylesCode = exportLvglStyles(uiDesign, widgets, rules, identByAssetId, stylesNsPrefix, focusedStyleVarName, 'inline')
+  const events = collectEvents(nonTemplateWidgets, [] /* no script output — see the section comment above */)
+
+  // Data List codegen (struct + per-item creation function + click callback + runtime API) — see
+  // the "Data List codegen" section above. This mode has no Variable Manager/script codegen
+  // context (see the "no script output" note just above), so `data.<name>` inside a Data List
+  // `{{}}` binding has nothing to resolve against here — an unresolved-identifier error surfaced
+  // via validateLvglExport.ts, same as any other codegen-unsupported reference in this mode.
+  const dataListBaseCtx: CodegenContext = {
+    widgets: uiDesign.widgets,
+    varNameForWidget: widgetVarName,
+    identForAssetName: (name) => {
+      const asset = uiDesign.assets.find((a) => a.name === name)
+      return asset ? identByAssetId.get(asset.id) : undefined
+    },
+    namespaceName: '',
+    identForClassSelector: (className) => rules.find((r) => r.rule.selector === `.${className}`)?.ident,
+    screenFnNameByName: () => undefined,
+    identForVariableName: () => undefined
+  }
+  const { usedDataSourcesById, infoByWidgetId: dataListInfoByWidgetId } = computeDataListInfo(uiDesign, widgets, identByAssetId, rules, dataListBaseCtx, 'inline', true)
 
   // List items — computed once up front (not inside emitWidget) so the same item vars/click
   // callback can be reused for the "Widget objects" declarations, the "Event Callbacks" section,
@@ -1926,7 +2563,7 @@ ${
  */
 #pragma once
 #include "lvgl.h"
-${widgets.length > 0 ? '#include <cstring>   // for strcmp() — used by the widget registry below\n' : ''}#include "ui.h"`
+${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used by the widget registry below\n' : ''}${usedDataSourcesById.size > 0 ? '#include <vector>    // for the Data List runtime item storage below\n#include <cstdint>   // for uintptr_t, used by the Data List row-index encoding below\n' : ''}#include "ui.h"`
   ]
   if (identByAssetId.size > 0) c.push(`#include "${assetsHeaderFilename}"`)
   c.push('')
@@ -1970,12 +2607,12 @@ ${widgets.length > 0 ? '#include <cstring>   // for strcmp() — used by the wid
   c.push('}')
   c.push('')
 
-  if (widgets.length > 0) {
+  if (nonTemplateWidgets.length > 0) {
     c.push('// ---- Widget-by-ID registry — every widget below is Project_Register()-ed the moment it\'s')
     c.push(`// created (see ${findWidgetFnName}() and the per-widget calls further down). Sized to exactly`)
-    c.push(`// this screen's own widget count (${widgets.length}), known up front since one widget always`)
+    c.push(`// this screen's own widget count (${nonTemplateWidgets.length}), known up front since one widget always`)
     c.push('// yields exactly one registration. ----')
-    c.push(`#define ${maxWidgetsMacro} ${widgets.length}`)
+    c.push(`#define ${maxWidgetsMacro} ${nonTemplateWidgets.length}`)
     c.push('')
     c.push(`inline const char* s_widgetIds[${maxWidgetsMacro}];`)
     c.push(`inline lv_obj_t* s_widgetObjs[${maxWidgetsMacro}];`)
@@ -2002,19 +2639,40 @@ ${widgets.length > 0 ? '#include <cstring>   // for strcmp() — used by the wid
     c.push(`// own .cpp either via ${findWidgetFnName}("id") above, or with a matching`)
     c.push('// `extern lv_obj_t* wifiButton_obj;` declaration if you\'d rather skip the string lookup. ----')
     const declared = new Set<string>()
-    for (const w of widgets) {
+    for (const w of nonTemplateWidgets) {
       const v = widgetVarName(w)
       if (!declared.has(v)) {
         declared.add(v)
         c.push(`inline lv_obj_t* ${v} = nullptr;`)
       }
-      if (w.type === 'button') c.push(`inline lv_obj_t* ${v}_label = nullptr;`)
+      c.push(...extraWidgetDeclLines(w, v, 'inline'))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) c.push(`inline lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
       if (kbDeclLines) c.push(...kbDeclLines)
     }
+    if (widgets.some((w) => w.type === 'led' || w.type === 'statusIndicator')) {
+      c.push(...ledRuntimeHelperLines('inline'))
+    }
     c.push('')
+  }
+
+  if (usedDataSourcesById.size > 0) {
+    c.push('// ---- Data Sources — one struct per bound data source (see the Data Source Manager). ----')
+    for (const ds of usedDataSourcesById.values()) {
+      c.push(...emitDataListStructDecl(ds))
+      c.push('')
+    }
+    c.push('// ---- Data Lists — per-item creation function + (if item clicks are enabled) a click')
+    c.push('// dispatch callback + a real runtime API (SetItems/AddItem/UpdateItem/RemoveItem/ClearItems/')
+    c.push('// Refresh/selection/loading-empty-error state). Initial state is EMPTY — call <var>_SetItems(...)')
+    c.push('// from your own code once real data exists; nothing here auto-populates from sample data')
+    c.push('// (sample data is a design-time preview convenience only, unless "Include sample data in')
+    c.push('// export" was explicitly enabled for a given list — see its own SetItems() call below). ----')
+    for (const info of dataListInfoByWidgetId.values()) {
+      c.push(...info.declLines)
+      c.push('')
+    }
   }
 
   const eventByWidgetId = new Map<string, EventExport>(events.map((ev) => [ev.widget.id, ev]))
@@ -2182,7 +2840,7 @@ ${widgets.length > 0 ? '#include <cstring>   // for strcmp() — used by the wid
   }
 
   c.push(`inline lv_obj_t* ${createFnName}() {`)
-  if (widgets.length > 0) {
+  if (nonTemplateWidgets.length > 0) {
     c.push('  // Reset the registry every time this screen is (re)created — otherwise a second call')
     c.push("  // would append past the widgets from the *previous* call's now-deleted lv_obj_t*s,")
     c.push('  // leaving stale/dangling pointers behind old entries no one will ever overwrite.')
@@ -2203,6 +2861,12 @@ ${widgets.length > 0 ? '#include <cstring>   // for strcmp() — used by the wid
   c.push(`  lv_group_focus_freeze(${focusGroupVarName}, true);`)
   c.push('  lv_obj_t* screen = lv_obj_create(NULL);')
   c.push(...bodyBuffer)
+  for (const info of dataListInfoByWidgetId.values()) {
+    if (info.sampleSetupLines.length === 0) continue
+    c.push('  // "Include sample data in export" was enabled for this Data List — one-time SetItems()')
+    c.push('  // call so the screen shows real rows immediately; remove this block once real data exists.')
+    c.push(...info.sampleSetupLines)
+  }
   if (firstFocusableVar) {
     c.push('  // Gives the first focusable widget on this screen a visible focused border the moment')
     c.push('  // the screen loads, instead of waiting for the first real encoder/keyboard input.')
@@ -2393,6 +3057,11 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
   // Identifiers only — no decode (see the doc comment above). Real byte arrays are only ever
   // produced by the actual Export dialog, which does need them.
   const identByAssetId = new Map<string, string>(assets.map((a, i) => [a.id, assetIdent(a, i)]))
+  // See generateUiScreenExport's identical exclusion — a dataList's own template descendants are
+  // reachable above (for style/asset/font export) but must not be treated as ordinary top-level
+  // widgets (declaration loop / collectEvents below).
+  const templateDescendantIds = dataListTemplateDescendantIds(uiDesign, widgets)
+  const nonTemplateWidgets = widgets.filter((w) => !templateDescendantIds.has(w.id))
 
   const snake = deriveUiScreenSnakeName(screen.name)
   const createFnName = `create_${snake}_screen`
@@ -2404,9 +3073,15 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
   const focusPrevFnName = screenFocusPreviousFnName(screen.name)
   const pressFnName = screenPressFnName(screen.name)
 
-  const stylesCode = exportLvglStyles(widgets, rules, identByAssetId, stylesNsPrefix)
-  const codegen = runScriptCodegen(uiDesign, buildCodegenContext(uiDesign, rules, identByAssetId, stylesNsPrefix))
-  const events = collectEvents(widgets, codegen.eventHandlers)
+  const stylesCode = exportLvglStyles(uiDesign, widgets, rules, identByAssetId, stylesNsPrefix)
+  const baseCodegenCtx = buildCodegenContext(uiDesign, rules, identByAssetId, stylesNsPrefix)
+  const codegen = runScriptCodegen(uiDesign, baseCodegenCtx)
+  const events = collectEvents(nonTemplateWidgets, codegen.eventHandlers)
+  // Data List codegen (struct + per-item creation function + click callback + runtime API) — see
+  // the "Data List codegen" section. Reuses the same CodegenContext the Logic tab's script codegen
+  // already built above, so `data.<name>` (Variable Manager) stays reachable inside a `{{}}`
+  // binding here, unlike the standalone "UI Screen Only" mode which has no script context.
+  const { usedDataSourcesById, infoByWidgetId: dataListInfoByWidgetId } = computeDataListInfo(uiDesign, widgets, identByAssetId, rules, baseCodegenCtx, 'static', false)
 
   const out: string[] = [
     `// ${screen.name} — live LVGL ${LVGL_VERSION} preview, regenerated automatically as you design.`,
@@ -2479,22 +3154,40 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
   }
   const hasKeyboardWidget = keyboardMapVarsByWidgetId.size > 0
 
-  if (widgets.length > 0) {
+  if (nonTemplateWidgets.length > 0) {
     out.push('// ---- Widget objects ----')
     const declared = new Set<string>()
-    for (const w of widgets) {
+    for (const w of nonTemplateWidgets) {
       const v = widgetVarName(w)
       if (!declared.has(v)) {
         declared.add(v)
         out.push(`static lv_obj_t* ${v} = nullptr;`)
       }
-      if (w.type === 'button') out.push(`static lv_obj_t* ${v}_label = nullptr;`)
+      out.push(...extraWidgetDeclLines(w, v, 'static'))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) out.push(`static lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
       if (kbDeclLines) out.push(...kbDeclLines)
     }
+    if (widgets.some((w) => w.type === 'led' || w.type === 'statusIndicator')) {
+      out.push(...ledRuntimeHelperLines('static'))
+    }
     out.push('')
+  }
+
+  if (usedDataSourcesById.size > 0) {
+    out.push('// ---- Data Sources ----')
+    for (const ds of usedDataSourcesById.values()) {
+      out.push(...emitDataListStructDecl(ds))
+      out.push('')
+    }
+    out.push('// ---- Data Lists — per-item creation function + (if item clicks are enabled) a click')
+    out.push('// dispatch callback + a real runtime API (SetItems/AddItem/UpdateItem/RemoveItem/ClearItems/')
+    out.push('// Refresh/selection/loading-empty-error state). ----')
+    for (const info of dataListInfoByWidgetId.values()) {
+      out.push(...info.declLines)
+      out.push('')
+    }
   }
 
   const eventByWidgetId = new Map<string, EventExport>(events.map((ev) => [ev.widget.id, ev]))
@@ -2623,6 +3316,11 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
   out.push(`  lv_group_focus_freeze(${focusGroupVarName}, true);`)
   out.push('  lv_obj_t* screen = lv_obj_create(NULL);')
   out.push(...bodyBuffer)
+  for (const info of dataListInfoByWidgetId.values()) {
+    if (info.sampleSetupLines.length === 0) continue
+    out.push('  // "Include sample data in export" was enabled for this Data List.')
+    out.push(...info.sampleSetupLines)
+  }
   if (firstFocusableVar) out.push(`  if (${focusGroupVarName}) { lv_group_focus_obj(${firstFocusableVar}); }`)
   out.push(`  lv_group_focus_freeze(${focusGroupVarName}, false);`)
   out.push('  return screen;')
@@ -2745,9 +3443,12 @@ async function buildKiboUiCore(project: Project) {
   // internal scaffolding, not part of the branded public API, so it stays a stable generic name
   // (`Project_InitStyles`) regardless of the project's name — see Project_Register below for the
   // same reasoning applied to the widget registry.
-  const stylesCode = exportLvglStyles(widgets, rules, identByAssetId, 'Project')
+  const stylesCode = exportLvglStyles(uiDesign, widgets, rules, identByAssetId, 'Project')
   const codegen = runScriptCodegen(uiDesign, buildCodegenContext(uiDesign, rules, identByAssetId, ns))
-  const events = collectEvents(widgets, codegen.eventHandlers)
+  // See generateUiScreenExport's identical exclusion — a dataList's own template descendants must
+  // not be treated as ordinary top-level widgets for event-callback collection.
+  const nonTemplateWidgetsForEvents = widgets.filter((w) => !dataListTemplateDescendantIds(uiDesign, widgets).has(w.id))
+  const events = collectEvents(nonTemplateWidgetsForEvents, codegen.eventHandlers)
   const named = namedWidgets(widgets)
   const parts = generateKiboUIParts(uiDesign, widgets, rules, identByAssetId, events, stylesCode, codegen, ns)
   return { uiDesign, ns, widgets, rules, assetsHeader, assetsSource, identByAssetId, hasAssets, stylesCode, codegen, events, named, parts }
@@ -3194,6 +3895,27 @@ function generateKiboUIParts(
   ]
   const macroPrefix = macroPrefixFor(ns)
 
+  // See generateUiScreenExport's identical exclusion — a dataList's own template descendants are
+  // reachable in `widgets` (for style/asset/font export) but must not be treated as ordinary
+  // top-level widgets (registry sizing / declaration loop below).
+  const templateDescendantIds = dataListTemplateDescendantIds(uiDesign, widgets)
+  const nonTemplateWidgets = widgets.filter((w) => !templateDescendantIds.has(w.id))
+
+  // Data List codegen (struct + per-item creation function + click callback + runtime API) — see
+  // the "Data List codegen" section. Reuses a fresh CodegenContext built the same way
+  // buildKiboUiCore's own script-codegen context was (data.<name> Variable Manager reachability
+  // stays available inside a template's `{{}}` binding). Tracks each dataList widget's owning
+  // screen (mirrors the keyboard-widget map just below) so a per-list "Include sample data in
+  // export" SetItems() call lands inside the right screen's own create function, not every screen.
+  const dataListBaseCtx = buildCodegenContext(uiDesign, rules, identByAssetId, ns)
+  const { usedDataSourcesById, infoByWidgetId: dataListInfoByWidgetId } = computeDataListInfo(uiDesign, widgets, identByAssetId, rules, dataListBaseCtx, 'static', true)
+  const dataListOwnerScreenId = new Map<string, string>()
+  for (const { screen } of screenFns) {
+    for (const w of reachableWidgetsForScreen(uiDesign, screen)) {
+      if (w.type === 'dataList' && dataListInfoByWidgetId.has(w.id)) dataListOwnerScreenId.set(w.id, screen.id)
+    }
+  }
+
   // List items — see generateUiScreenExport's identical map for why this is computed once up
   // front.
   const listItemVarsByWidgetId = new Map<string, ListItemVar[]>()
@@ -3239,7 +3961,7 @@ function generateKiboUIParts(
   // Project_Register'd below (see emitWidget), using its own tagId when set or its auto-generated
   // fallback id (the same string already shown in its variable name) otherwise, so FindWidget()
   // works even for widgets the user never explicitly named.
-  core.push(`#define ${macroPrefix}_MAX_WIDGETS ${Math.max(1, widgets.length)}`)
+  core.push(`#define ${macroPrefix}_MAX_WIDGETS ${Math.max(1, nonTemplateWidgets.length)}`)
   core.push(`static const char* s_widgetIds[${macroPrefix}_MAX_WIDGETS];`)
   core.push(`static lv_obj_t* s_widgetObjs[${macroPrefix}_MAX_WIDGETS];`)
   core.push('static int s_widgetCount = 0;')
@@ -3312,19 +4034,37 @@ function generateKiboUIParts(
     core.push('// file) so a script handler/timer attached to one screen can reference a widget on')
     core.push('// a different screen. ----')
     const declared = new Set<string>()
-    for (const w of widgets) {
+    for (const w of nonTemplateWidgets) {
       const v = widgetVarName(w)
       if (!declared.has(v)) {
         declared.add(v)
         core.push(`static lv_obj_t* ${v} = nullptr;`)
       }
-      if (w.type === 'button') core.push(`static lv_obj_t* ${v}_label = nullptr;`)
+      core.push(...extraWidgetDeclLines(w, v, 'static'))
       const itemVars = listItemVarsByWidgetId.get(w.id)
       if (itemVars) for (const iv of itemVars) core.push(`static lv_obj_t* ${iv.varName} = nullptr;`)
       const kbDeclLines = keyboardMapDeclLinesByWidgetId.get(w.id)
       if (kbDeclLines) core.push(...kbDeclLines)
     }
+    if (widgets.some((w) => w.type === 'led' || w.type === 'statusIndicator')) {
+      core.push(...ledRuntimeHelperLines('static'))
+    }
     core.push('')
+  }
+
+  if (usedDataSourcesById.size > 0) {
+    core.push('// ---- Data Sources ----')
+    for (const ds of usedDataSourcesById.values()) {
+      core.push(...emitDataListStructDecl(ds))
+      core.push('')
+    }
+    core.push('// ---- Data Lists — per-item creation function + (if item clicks are enabled) a click')
+    core.push('// dispatch callback + a real runtime API (SetItems/AddItem/UpdateItem/RemoveItem/ClearItems/')
+    core.push('// Refresh/selection/loading-empty-error state). ----')
+    for (const info of dataListInfoByWidgetId.values()) {
+      core.push(...info.declLines)
+      core.push('')
+    }
   }
 
   core.push('// ---- Screen navigation history (for GoBack()) ----')
@@ -3626,6 +4366,11 @@ function generateKiboUIParts(
     core.push(`  lv_group_focus_freeze(${activeGroupVar}, true);`)
     core.push('  lv_obj_t* screen = lv_obj_create(NULL);')
     core.push(...bodyBuffer)
+    for (const [widgetId, info] of dataListInfoByWidgetId) {
+      if (dataListOwnerScreenId.get(widgetId) !== screen.id || info.sampleSetupLines.length === 0) continue
+      core.push('  // "Include sample data in export" was enabled for this Data List.')
+      core.push(...info.sampleSetupLines)
+    }
     if (firstFocusableVar) {
       core.push('  // Gives the first focusable widget on this screen a visible focused border the moment')
       core.push('  // this screen is first created, instead of waiting for the first real encoder input.')

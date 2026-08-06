@@ -1,7 +1,7 @@
 import { useRef } from 'react'
 import { useStore } from '@/state/store'
 import { WidgetRenderer } from './WidgetRenderer'
-import { readAssetDragPayload, readWidgetDragPayload } from '@/lib/uiDesign/dnd'
+import { readAssetDragPayload, readComponentTemplateDragPayload, readWidgetDragPayload } from '@/lib/uiDesign/dnd'
 import { UI_SRC_IMAGE_WIDGETS } from '@/types'
 
 /** Live design canvas — a real, size/shape-matched DOM box (not a canvas-2D rendering) so the
@@ -15,6 +15,7 @@ export function Canvas() {
   const display = useStore((s) => s.uiPreviewDisplayOverride ?? s.project.uiDesign.display)
   const uiDesign = useStore((s) => s.project.uiDesign)
   const addUiWidget = useStore((s) => s.addUiWidget)
+  const addUiComponentTemplate = useStore((s) => s.addUiComponentTemplate)
   const setUiWidgetSrc = useStore((s) => s.setUiWidgetSrc)
   const updateUiWidgetStyle = useStore((s) => s.updateUiWidgetStyle)
   const checkpoint = useStore((s) => s.checkpoint)
@@ -25,6 +26,29 @@ export function Canvas() {
 
   if (!activeScreen) {
     return <div className="p-4 text-sm text-studio-muted">No screen — this shouldn't happen; the project always seeds one.</div>
+  }
+
+  // Every other widget kind drops straight onto the screen root (this app has no general
+  // "drop into an existing container" mechanism — nesting under `container`/`flex` today only
+  // happens via component templates or hand-editing the HTML text). A Data List's own `childIds`
+  // IS its item template (see UiDataListConfig's doc comment) — without a way to actually drop
+  // widgets into it, the template couldn't be built with the ordinary Toolbox/Properties-panel
+  // tools at all, so this is the one targeted exception: dropping onto (or inside) an existing
+  // `dataList` widget parents there instead of at the root, with the drop position measured
+  // relative to that widget's own box (matching how `style.x/y` already behaves for any nested
+  // widget — position:absolute nesting, not display-global coordinates).
+  const resolveDropTarget = (e: React.DragEvent, screenRect: DOMRect): { parentId: string; originLeft: number; originTop: number } => {
+    const hitEl = (e.target as Element).closest<HTMLElement>('[data-widget-id]')
+    let hitWidget = hitEl ? uiDesign.widgets[hitEl.dataset.widgetId ?? ''] : undefined
+    while (hitWidget && hitWidget.type !== 'dataList' && hitWidget.parentId) {
+      hitWidget = uiDesign.widgets[hitWidget.parentId]
+    }
+    if (hitWidget?.type === 'dataList') {
+      const targetEl = boxRef.current?.querySelector<HTMLElement>(`[data-widget-id="${hitWidget.id}"]`)
+      const targetRect = targetEl?.getBoundingClientRect()
+      if (targetRect) return { parentId: hitWidget.id, originLeft: targetRect.left, originTop: targetRect.top }
+    }
+    return { parentId: activeScreen.rootWidgetId, originLeft: screenRect.left, originTop: screenRect.top }
   }
 
   const handleDrop = (e: React.DragEvent) => {
@@ -51,10 +75,18 @@ export function Canvas() {
       return
     }
 
+    const templateId = readComponentTemplateDragPayload(e)
+    if (templateId) {
+      checkpoint()
+      addUiComponentTemplate(templateId, activeScreen.rootWidgetId, Math.round(e.clientX - rect.left), Math.round(e.clientY - rect.top))
+      return
+    }
+
     const type = readWidgetDragPayload(e)
     if (!type) return
     checkpoint()
-    addUiWidget(type, activeScreen.rootWidgetId, Math.round(e.clientX - rect.left), Math.round(e.clientY - rect.top))
+    const target = resolveDropTarget(e, rect)
+    addUiWidget(type, target.parentId, Math.round(e.clientX - target.originLeft), Math.round(e.clientY - target.originTop))
   }
 
   return (

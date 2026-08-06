@@ -26,16 +26,25 @@ import type {
   StickerScope,
   TrackKind,
   UiCssRule,
+  UiDataListConfig,
+  UiDataSource,
+  UiDataSourceField,
   UiDisplaySettings,
   UiKeyboardConfig,
   UiKeyboardCustomKey,
   UiListItem,
+  UiThemeableStyleField,
+  UiThemeId,
+  UiThemeTokens,
   UiVariable,
   UiWidget,
   UiWidgetStateName,
   UiWidgetStyle,
   UiWidgetType
 } from '@/types'
+import type { MaterialPresetId } from '@/lib/uiDesign/materialPresets'
+import type { ComponentTemplateId } from '@/lib/uiDesign/componentTemplates'
+import { createComponentTemplate } from '@/lib/uiDesign/componentTemplates'
 import {
   DEFAULT_DISPLAY,
   DEFAULT_EYE_COLORS,
@@ -60,6 +69,8 @@ import {
   rightEyeParams
 } from '@/types'
 import { builtinAnimations } from '@/data/builtinAnimations'
+import { MATERIAL_PRESETS } from '@/lib/uiDesign/materialPresets'
+import { DEFAULT_CUSTOM_THEME_TOKENS } from '@/lib/uiDesign/themes'
 import { builtinExpressions } from '@/data/builtinExpressions'
 import { MIN_SEGMENT_MS, animationDuration, sampleAnimationEye, sampleTrack } from '@/engine/interpolate'
 import { computeComboTimeline, loopCountForDuration } from '@/engine/comboPlayback'
@@ -686,6 +697,10 @@ interface StoreState {
    * keyboard+textarea widget either, so "drop one Keyboard" -> "get three linked objects" is
    * the truthful shape, not a shortcut. */
   addUiWidget: (type: UiWidgetType, parentId: string, x: number, y: number) => string
+  /** Drops a Professional Component template (see lib/uiDesign/componentTemplates.ts) — a
+   * pre-styled group of ordinary widget types (container/label/button), not a new UiWidgetType, so
+   * it exports through the exact same codegen every other widget already uses. */
+  addUiComponentTemplate: (templateId: ComponentTemplateId, parentId: string, x: number, y: number) => string
   moveUiWidget: (id: string, x: number, y: number) => void
   updateUiWidgetStyle: (id: string, partial: Partial<UiWidgetStyle>) => void
   updateUiWidgetText: (id: string, text: string) => void
@@ -711,8 +726,22 @@ interface StoreState {
       eventCallbackEnabled?: boolean
       eventCallbackTriggers?: string[]
       iconSymbol?: string | null
+      visibleWhenExpr?: string | null
     }
   ) => void
+  /** Sets/clears which project theme token (see UiThemeableStyleField) one of this widget's own
+   * color fields should track instead of its literal value — see lib/uiDesign/themes.ts. Passing
+   * `null` reverts that field to its plain literal value (unchanged, still whatever it was). */
+  setUiWidgetThemeToken: (id: string, field: UiThemeableStyleField, token: keyof UiThemeTokens | null) => void
+  /** Merges a Material Preset's style + state-style bundle (see lib/uiDesign/materialPresets.ts)
+   * into a widget — a starting point, not a locked mode; every field it sets stays editable
+   * afterward through the normal Appearance controls. */
+  applyMaterialPreset: (id: string, presetId: MaterialPresetId) => void
+  /** Project-level theme (see lib/uiDesign/themes.ts's UI_THEMES) — only visibly affects widgets
+   * that opted a color field into theming via setUiWidgetThemeToken; a project using no tokens at
+   * all sees zero visual change when this changes. */
+  setUiTheme: (theme: UiThemeId) => void
+  setUiCustomThemeTokens: (partial: Partial<UiThemeTokens>) => void
 
   // UI Design Mode — LVGL Code panel manual-edit override (see UiScreen.customCode in
   // types/uiDesign.ts and LvglCodePanel.tsx for the full picture).
@@ -769,6 +798,28 @@ interface StoreState {
   setRuntimeVariableValue: (name: string, value: string | number | boolean) => void
   resetRuntimeVariableValues: () => void
 
+  // UI Design Mode — Data Source Manager (see UiDataSource in types/uiDesign.ts). Same shape as
+  // the Variable Manager actions above: a declared/persisted model here, live row data in
+  // runtimeDataListItems below. Field CRUD mirrors the List Items editor's own
+  // add/update/delete/reorder shape (see addUiListItem etc. further down).
+  addUiDataSource: () => string
+  updateUiDataSource: (id: string, partial: Partial<Omit<UiDataSource, 'id'>>) => void
+  deleteUiDataSource: (id: string) => void
+  duplicateUiDataSource: (id: string) => string | null
+  addUiDataSourceField: (dataSourceId: string) => string
+  updateUiDataSourceField: (dataSourceId: string, fieldId: string, partial: Partial<Omit<UiDataSourceField, 'id'>>) => void
+  deleteUiDataSourceField: (dataSourceId: string, fieldId: string) => void
+  reorderUiDataSourceField: (dataSourceId: string, fromIndex: number, toIndex: number) => void
+  /** Live rows for a `dataList` widget while the script sandbox is running — keyed by WIDGET id
+   * (not data source id, since two Data Lists can share one source with independently-mutated
+   * runtime rows), same "separate from the persisted declaration, reset on Stop" contract as
+   * runtimeVariableValues above. Falls back to the assigned UiDataSource's own `sampleData`
+   * (JSON.parse'd) until a script action (setListItems/addListItem/...) writes here — see
+   * WidgetRenderer.tsx's Data List rendering and scriptLang/sandboxRuntime.ts. */
+  runtimeDataListItems: Record<string, unknown[]>
+  setRuntimeDataListItems: (widgetId: string, items: unknown[]) => void
+  resetRuntimeDataListItems: () => void
+
   /** Live, per-keyboard-widget interactive state for the running preview (typed text, cursor,
    * current language/case/page, last action/callback/character) — ephemeral like
    * runtimeVariableValues above, never persisted, reset on Stop the same way. See
@@ -812,6 +863,8 @@ interface StoreState {
   updateUiKeyboardCustomKey: (widgetId: string, keyId: string, partial: Partial<UiKeyboardCustomKey>) => void
   deleteUiKeyboardCustomKey: (widgetId: string, keyId: string) => void
   reorderUiKeyboardCustomKey: (widgetId: string, fromIndex: number, toIndex: number) => void
+  // Data List widget config (only meaningful for widget.type === 'dataList' — see UiDataListConfig).
+  updateUiDataListConfig: (widgetId: string, partial: Partial<UiDataListConfig>) => void
   // Custom LVGL fonts (project.uiDesign.customFonts — see UiCustomFont). declaredCodepoints is
   // parsed once here (see lib/uiDesign/fontImport.ts), not re-derived at render time.
   addUiCustomFont: (name: string, cSource: string) => string
@@ -841,6 +894,17 @@ interface StoreState {
    * project.uiDesign.display. */
   uiPreviewDisplayOverride: UiDisplaySettings | null
   setUiPreviewDisplayOverride: (display: UiDisplaySettings | null) => void
+  /** UI Design Mode's own "ESP32 Preview" — the LVGL-workspace equivalent of Eye Studio's
+   * esp32PreviewMode above (same ephemeral, never-persisted convention). Swaps the live canvas
+   * to render the way the exported LVGL firmware actually will: RGB565 color quantization (see
+   * lib/color.ts's quantizeToRgb565, the same helper Eye Studio's ESP32 Preview already uses),
+   * a single real shadow per widget instead of the richer multi-layer glow+shadow preview
+   * (LVGL only has one shadow per style part — see lib/export/lvglExport.ts's
+   * resolveEffectiveShadow, shared with the real exporter so this can't drift from what
+   * styleSetCalls() actually emits), and font sizes snapped to the nearest built-in Montserrat
+   * size instead of arbitrary CSS pixel sizes. */
+  uiEsp32PreviewMode: boolean
+  toggleUiEsp32Preview: () => void
 }
 
 function activeAnimationOf(project: Project, id: string): Animation | undefined {
@@ -1077,6 +1141,7 @@ export const useStore = create<StoreState>()(
     layerClipboard: null,
     selectedWidgetId: null,
     uiPreviewDisplayOverride: null,
+    uiEsp32PreviewMode: false,
 
     mode: 'design',
     playbackState: 'stopped',
@@ -3031,6 +3096,23 @@ export const useStore = create<StoreState>()(
       return widget.id
     },
 
+    addUiComponentTemplate: (templateId, parentId, x, y) => {
+      const { root, descendants } = createComponentTemplate(templateId)
+      root.parentId = parentId
+      root.style.x = x
+      root.style.y = y
+      set((s) => {
+        const parent = s.project.uiDesign.widgets[parentId]
+        if (!parent) return
+        s.project.uiDesign.widgets[root.id] = root
+        parent.childIds.push(root.id)
+        for (const d of descendants) s.project.uiDesign.widgets[d.id] = d
+        s.selectedWidgetId = root.id
+        s.dirty = true
+      })
+      return root.id
+    },
+
     moveUiWidget: (id, x, y) =>
       set((s) => {
         const w = s.project.uiDesign.widgets[id]
@@ -3151,6 +3233,47 @@ export const useStore = create<StoreState>()(
         if (partial.eventCallbackEnabled !== undefined) w.eventCallbackEnabled = partial.eventCallbackEnabled
         if (partial.eventCallbackTriggers !== undefined) w.eventCallbackTriggers = partial.eventCallbackTriggers
         if (partial.iconSymbol !== undefined) w.iconSymbol = partial.iconSymbol ?? undefined
+        if (partial.visibleWhenExpr !== undefined) w.visibleWhenExpr = partial.visibleWhenExpr ?? undefined
+        s.dirty = true
+      }),
+
+    setUiWidgetThemeToken: (id, field, token) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        if (!w) return
+        if (!w.themeTokens) w.themeTokens = {}
+        if (token) w.themeTokens[field] = token
+        else delete w.themeTokens[field]
+        s.dirty = true
+      }),
+
+    applyMaterialPreset: (id, presetId) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[id]
+        const preset = MATERIAL_PRESETS[presetId]
+        if (!w || !preset) return
+        Object.assign(w.style, preset.style)
+        for (const stateName of Object.keys(preset.states) as (keyof typeof preset.states)[]) {
+          const statePartial = preset.states[stateName]
+          if (!statePartial) continue
+          w.states[stateName] = { ...w.states[stateName], ...statePartial }
+        }
+        s.dirty = true
+      }),
+
+    setUiTheme: (theme) =>
+      set((s) => {
+        s.project.uiDesign.theme = theme
+        if (theme === 'custom' && !s.project.uiDesign.customThemeTokens) {
+          s.project.uiDesign.customThemeTokens = { ...DEFAULT_CUSTOM_THEME_TOKENS }
+        }
+        s.dirty = true
+      }),
+
+    setUiCustomThemeTokens: (partial) =>
+      set((s) => {
+        if (!s.project.uiDesign.customThemeTokens) s.project.uiDesign.customThemeTokens = { ...DEFAULT_CUSTOM_THEME_TOKENS }
+        Object.assign(s.project.uiDesign.customThemeTokens, partial)
         s.dirty = true
       }),
 
@@ -3363,6 +3486,95 @@ export const useStore = create<StoreState>()(
         s.runtimeVariableValues = {}
       }),
 
+    addUiDataSource: () => {
+      const id = nanoid(10)
+      set((s) => {
+        s.project.uiDesign.dataSources.push({
+          id,
+          name: `DataSource${s.project.uiDesign.dataSources.length + 1}`,
+          sourceKind: 'static',
+          fields: [],
+          keyFieldId: null,
+          sampleData: '[]'
+        })
+        s.dirty = true
+      })
+      return id
+    },
+
+    updateUiDataSource: (id, partial) =>
+      set((s) => {
+        const d = s.project.uiDesign.dataSources.find((d) => d.id === id)
+        if (d) Object.assign(d, partial)
+        s.dirty = true
+      }),
+
+    deleteUiDataSource: (id) =>
+      set((s) => {
+        s.project.uiDesign.dataSources = s.project.uiDesign.dataSources.filter((d) => d.id !== id)
+        s.dirty = true
+      }),
+
+    duplicateUiDataSource: (id) => {
+      const source = useStore.getState().project.uiDesign.dataSources.find((d) => d.id === id)
+      if (!source) return null
+      const newId = nanoid(10)
+      set((s) => {
+        s.project.uiDesign.dataSources.push({
+          ...source,
+          id: newId,
+          name: `${source.name} copy`,
+          fields: source.fields.map((f) => ({ ...f, id: nanoid(8) }))
+        })
+        s.dirty = true
+      })
+      return newId
+    },
+
+    addUiDataSourceField: (dataSourceId) => {
+      const id = nanoid(8)
+      set((s) => {
+        const d = s.project.uiDesign.dataSources.find((d) => d.id === dataSourceId)
+        if (d) d.fields.push({ id, name: `field${d.fields.length + 1}`, type: 'string' })
+        s.dirty = true
+      })
+      return id
+    },
+
+    updateUiDataSourceField: (dataSourceId, fieldId, partial) =>
+      set((s) => {
+        const d = s.project.uiDesign.dataSources.find((d) => d.id === dataSourceId)
+        const f = d?.fields.find((f) => f.id === fieldId)
+        if (f) Object.assign(f, partial)
+        s.dirty = true
+      }),
+
+    deleteUiDataSourceField: (dataSourceId, fieldId) =>
+      set((s) => {
+        const d = s.project.uiDesign.dataSources.find((d) => d.id === dataSourceId)
+        if (d) d.fields = d.fields.filter((f) => f.id !== fieldId)
+        s.dirty = true
+      }),
+
+    reorderUiDataSourceField: (dataSourceId, fromIndex, toIndex) =>
+      set((s) => {
+        const d = s.project.uiDesign.dataSources.find((d) => d.id === dataSourceId)
+        if (!d) return
+        const [moved] = d.fields.splice(fromIndex, 1)
+        if (moved) d.fields.splice(toIndex, 0, moved)
+        s.dirty = true
+      }),
+
+    runtimeDataListItems: {},
+    setRuntimeDataListItems: (widgetId, items) =>
+      set((s) => {
+        s.runtimeDataListItems[widgetId] = items
+      }),
+    resetRuntimeDataListItems: () =>
+      set((s) => {
+        s.runtimeDataListItems = {}
+      }),
+
     keyboardRuntime: {},
     setKeyboardRuntimeState: (widgetId, partial) =>
       set((s) => {
@@ -3547,6 +3759,14 @@ export const useStore = create<StoreState>()(
         s.dirty = true
       }),
 
+    updateUiDataListConfig: (widgetId, partial) =>
+      set((s) => {
+        const w = s.project.uiDesign.widgets[widgetId]
+        if (!w?.dataListConfig) return
+        Object.assign(w.dataListConfig, partial)
+        s.dirty = true
+      }),
+
     addUiKeyboardCustomKey: (widgetId) => {
       const id = nanoid(6)
       set((s) => {
@@ -3663,7 +3883,8 @@ export const useStore = create<StoreState>()(
       useStore.getState().setUiDisplaySettings({ width: preset.width, height: preset.height, shape: preset.shape })
     },
 
-    setUiPreviewDisplayOverride: (display) => set((s) => void (s.uiPreviewDisplayOverride = display))
+    setUiPreviewDisplayOverride: (display) => set((s) => void (s.uiPreviewDisplayOverride = display)),
+    toggleUiEsp32Preview: () => set((s) => void (s.uiEsp32PreviewMode = !s.uiEsp32PreviewMode))
   }))
 )
 

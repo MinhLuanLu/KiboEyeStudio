@@ -42,6 +42,9 @@ import type {
   UiCssRule,
   UiCustomFont,
   UiDesignProject,
+  UiDataListConfig,
+  UiDataSource,
+  UiDataSourceField,
   UiDisplayOrientation,
   UiDisplayRotation,
   UiDisplayShape,
@@ -53,9 +56,12 @@ import type {
   UiKeyboardEdgePadding,
   UiListItem,
   UiScreen,
+  UiThemeId,
+  UiThemeTokens,
   UiVariable,
   UiWidget
 } from '@/types'
+import { DEFAULT_CUSTOM_THEME_TOKENS } from '@/lib/uiDesign/themes'
 
 const LOCAL_STORAGE_KEY = 'kibo-eye-studio:autosave'
 const LOCAL_STORAGE_PATH_KEY = 'kibo-eye-studio:last-path'
@@ -478,6 +484,24 @@ function normalizeKeyboardConfig(raw: unknown): UiKeyboardConfig | undefined {
   }
 }
 
+const UI_DATA_LIST_RENDERING_MODES = new Set(['createAll'])
+
+function normalizeDataListConfig(raw: unknown): UiDataListConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Partial<UiDataListConfig> & Record<string, unknown>
+  return {
+    dataSourceId: typeof r.dataSourceId === 'string' ? r.dataSourceId : null,
+    emptyText: typeof r.emptyText === 'string' ? r.emptyText : 'No items',
+    loadingText: typeof r.loadingText === 'string' ? r.loadingText : 'Loading…',
+    errorText: typeof r.errorText === 'string' ? r.errorText : 'Something went wrong',
+    maxItems: typeof r.maxItems === 'number' ? r.maxItems : 0,
+    renderingMode: UI_DATA_LIST_RENDERING_MODES.has(r.renderingMode as string) ? (r.renderingMode as UiDataListConfig['renderingMode']) : 'createAll',
+    itemClickEnabled: r.itemClickEnabled !== false,
+    includeSampleDataInExport: Boolean(r.includeSampleDataInExport),
+    itemSpacing: typeof r.itemSpacing === 'number' ? r.itemSpacing : 4
+  }
+}
+
 function normalizeUiDesign(raw: unknown): UiDesignProject {
   if (!raw || typeof raw !== 'object') return createDefaultUiDesign()
   const r = raw as Partial<UiDesignProject> & Record<string, unknown>
@@ -510,7 +534,10 @@ function normalizeUiDesign(raw: unknown): UiDesignProject {
           ? wr.eventCallbackTriggers.filter((t): t is string => typeof t === 'string')
           : [],
         listItems: normalizeListItems(wr.listItems),
-        keyboardConfig: normalizeKeyboardConfig(wr.keyboardConfig)
+        keyboardConfig: normalizeKeyboardConfig(wr.keyboardConfig),
+        dataListConfig: normalizeDataListConfig(wr.dataListConfig),
+        visibleWhenExpr: typeof wr.visibleWhenExpr === 'string' ? wr.visibleWhenExpr : undefined,
+        themeTokens: wr.themeTokens && typeof wr.themeTokens === 'object' ? (wr.themeTokens as UiWidget['themeTokens']) : undefined
       }
     }
   }
@@ -589,6 +616,45 @@ function normalizeUiDesign(raw: unknown): UiDesignProject {
         }))
     : []
 
+  const UI_DATA_SOURCE_FIELD_TYPES = new Set(['int', 'double', 'bool', 'string'])
+  const UI_DATA_SOURCE_KINDS = new Set([
+    'static', 'cppArray', 'cppStructArray', 'stdArray', 'stdVector',
+    'jsonObject', 'jsonArray', 'httpResponse', 'mqttPayload', 'sensorValue',
+    'appVariable', 'callbackFunction', 'custom'
+  ])
+  const dataSources: UiDataSource[] = Array.isArray(r.dataSources)
+    ? (r.dataSources as unknown[])
+        .filter(
+          (d): d is Record<string, unknown> =>
+            !!d && typeof d === 'object' && typeof (d as Record<string, unknown>).id === 'string' && typeof (d as Record<string, unknown>).name === 'string'
+        )
+        .map((d) => {
+          const fields: UiDataSourceField[] = Array.isArray(d.fields)
+            ? (d.fields as unknown[])
+                .filter((f): f is Record<string, unknown> => !!f && typeof f === 'object' && typeof (f as Record<string, unknown>).id === 'string')
+                .map((f) => ({
+                  id: f.id as string,
+                  name: typeof f.name === 'string' ? f.name : 'field',
+                  type: (UI_DATA_SOURCE_FIELD_TYPES.has(f.type as string) ? f.type : 'string') as UiDataSourceField['type']
+                }))
+            : []
+          return {
+            id: d.id as string,
+            name: d.name as string,
+            sourceKind: UI_DATA_SOURCE_KINDS.has(d.sourceKind as string) ? (d.sourceKind as UiDataSource['sourceKind']) : 'static',
+            fields,
+            keyFieldId: typeof d.keyFieldId === 'string' ? d.keyFieldId : null,
+            sampleData: typeof d.sampleData === 'string' ? d.sampleData : '[]',
+            structNameOverride: typeof d.structNameOverride === 'string' ? d.structNameOverride : undefined
+          }
+        })
+    : []
+
+  const UI_THEME_IDS = new Set(['light', 'dark', 'amoled', 'material', 'fluent', 'apple', 'gaming', 'automotive', 'cyberpunk', 'custom'])
+  const theme: UiThemeId = UI_THEME_IDS.has(r.theme as string) ? (r.theme as UiThemeId) : 'dark'
+  const customThemeTokens: UiThemeTokens | null =
+    theme === 'custom' && r.customThemeTokens && typeof r.customThemeTokens === 'object' ? { ...DEFAULT_CUSTOM_THEME_TOKENS, ...(r.customThemeTokens as Partial<UiThemeTokens>) } : null
+
   return {
     widgets,
     screens,
@@ -597,7 +663,10 @@ function normalizeUiDesign(raw: unknown): UiDesignProject {
     assets,
     customFonts,
     variables,
+    dataSources,
     display: normalizeUiDisplay(r.display),
+    theme,
+    customThemeTokens,
     htmlSource: typeof r.htmlSource === 'string' ? r.htmlSource : '',
     cssSource: typeof r.cssSource === 'string' ? r.cssSource : '',
     script: typeof r.script === 'string' ? r.script : ''

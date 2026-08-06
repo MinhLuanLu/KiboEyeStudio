@@ -29,121 +29,145 @@ function err(errors: ScriptError[], node: Node, message: string, suggestion?: st
 
 const ASSIGNMENT_OPERATORS = new Set(['=', '+=', '-=', '*=', '/='])
 
+/** The expression half of the restricted-subset grammar — hoisted to module scope (was a closure
+ * nested inside checkRestrictedSubset) so a single standalone expression (not a whole program) can
+ * be validated too, e.g. a Data List `{{expr}}` binding — see checkExpressionSubset below and
+ * scriptLang/templateExpr.ts. `walkBlock`, when supplied, handles an arrow function's
+ * BlockStatement body (checkRestrictedSubset passes its own walkStatement here to preserve exact
+ * prior behavior); when omitted (the bare-expression entry point), a block-bodied arrow function
+ * is rejected outright — template-expression bindings are meant to stay "limited, predictable,
+ * easy to export to C++," not grow their own nested statement blocks. */
+export function walkExpressionSubset(node: Node | null | undefined, errors: ScriptError[], insideFunction: boolean, walkBlock?: (block: Node, insideFunction: boolean) => void): void {
+  const walkExpression = (n: Node | null | undefined, inside: boolean) => walkExpressionSubset(n, errors, inside, walkBlock)
+  if (!node) return
+  switch (node.type) {
+    case 'Literal':
+    case 'Identifier':
+    case 'ThisExpression':
+      return
+    case 'TemplateLiteral': {
+      const t = node as unknown as { expressions: Node[] }
+      for (const e of t.expressions) walkExpression(e, insideFunction)
+      return
+    }
+    case 'BinaryExpression':
+    case 'LogicalExpression': {
+      const b = node as unknown as { left: Node; right: Node }
+      walkExpression(b.left, insideFunction)
+      walkExpression(b.right, insideFunction)
+      return
+    }
+    case 'UnaryExpression': {
+      const u = node as unknown as { argument: Node; operator: string }
+      if (!['-', '+', '!'].includes(u.operator)) {
+        err(errors, node, `Unsupported unary operator "${u.operator}".`, 'Use -, +, or ! only.')
+        return
+      }
+      walkExpression(u.argument, insideFunction)
+      return
+    }
+    case 'ConditionalExpression': {
+      const c = node as unknown as { test: Node; consequent: Node; alternate: Node }
+      walkExpression(c.test, insideFunction)
+      walkExpression(c.consequent, insideFunction)
+      walkExpression(c.alternate, insideFunction)
+      return
+    }
+    case 'MemberExpression': {
+      const m = node as unknown as { object: Node; property: Node; computed: boolean }
+      if (m.computed && m.property.type !== 'Literal') {
+        err(errors, node, 'Dynamic property access (obj[expr]) is not supported.', 'Use a literal property/method name (obj.prop or obj["literal"]).')
+      }
+      walkExpression(m.object, insideFunction)
+      return
+    }
+    case 'CallExpression': {
+      const c = node as unknown as { callee: Node; arguments: Node[] }
+      walkExpression(c.callee, insideFunction)
+      for (const a of c.arguments) {
+        if (a.type === 'SpreadElement') {
+          err(errors, a, 'Spread arguments (...args) are not supported.', 'Pass arguments individually.')
+          continue
+        }
+        walkExpression(a, insideFunction)
+      }
+      return
+    }
+    case 'ArrowFunctionExpression': {
+      const f = node as unknown as { params: Node[]; body: Node }
+      for (const p of f.params) {
+        if (p.type !== 'Identifier') {
+          err(errors, p, 'Destructuring/default parameters are not supported.', 'Use plain parameter names (e.g. (direction) => ...).')
+        }
+      }
+      if (f.body.type === 'BlockStatement') {
+        if (walkBlock) walkBlock(f.body, true)
+        else err(errors, f.body, 'Arrow functions with a block body are not supported here.', 'Use a single expression body, e.g. () => value.')
+      } else walkExpression(f.body, true)
+      return
+    }
+    case 'ObjectExpression': {
+      const o = node as unknown as { properties: Node[] }
+      for (const p of o.properties) {
+        if (p.type !== 'Property') {
+          err(errors, p, 'Spread/computed object members are not supported.', 'Use plain key: value pairs.')
+          continue
+        }
+        const prop = p as unknown as { computed: boolean; value: Node; key: Node }
+        if (prop.computed) {
+          err(errors, p, 'Computed object keys are not supported.', 'Use a literal key name.')
+        }
+        walkExpression(prop.value, insideFunction)
+      }
+      return
+    }
+    case 'AssignmentExpression': {
+      const a = node as unknown as { left: Node; right: Node; operator: string }
+      if (!ASSIGNMENT_OPERATORS.has(a.operator)) {
+        err(errors, node, `Unsupported assignment operator "${a.operator}".`, 'Use =, +=, -=, *=, or /=.')
+      }
+      if (a.left.type !== 'Identifier' && a.left.type !== 'MemberExpression') {
+        err(errors, a.left, 'Unsupported assignment target.', 'Assign to a plain variable name.')
+      } else {
+        walkExpression(a.left, insideFunction)
+      }
+      walkExpression(a.right, insideFunction)
+      return
+    }
+    case 'UpdateExpression': {
+      const u = node as unknown as { argument: Node }
+      walkExpression(u.argument, insideFunction)
+      return
+    }
+    case 'ArrayExpression': {
+      const arr = node as unknown as { elements: (Node | null)[] }
+      for (const el of arr.elements) walkExpression(el, insideFunction)
+      return
+    }
+    default:
+      err(
+        errors,
+        node,
+        `"${node.type}" is not supported in the UI scripting language.`,
+        suggestionFor(node.type)
+      )
+  }
+}
+
+/** Validates a single standalone expression (not a whole program) against the same grammar —
+ * used for Data List `{{expr}}`/"Visible when" bindings (see scriptLang/templateExpr.ts), which
+ * have no statement/block context of their own. */
+export function checkExpressionSubset(node: Node): ScriptError[] {
+  const errors: ScriptError[] = []
+  walkExpressionSubset(node, errors, false)
+  return errors
+}
+
 export function checkRestrictedSubset(program: Program): SubsetCheckResult {
   const errors: ScriptError[] = []
 
   function walkExpression(node: Node | null | undefined, insideFunction: boolean): void {
-    if (!node) return
-    switch (node.type) {
-      case 'Literal':
-      case 'Identifier':
-      case 'ThisExpression':
-        return
-      case 'TemplateLiteral': {
-        const t = node as unknown as { expressions: Node[] }
-        for (const e of t.expressions) walkExpression(e, insideFunction)
-        return
-      }
-      case 'BinaryExpression':
-      case 'LogicalExpression': {
-        const b = node as unknown as { left: Node; right: Node }
-        walkExpression(b.left, insideFunction)
-        walkExpression(b.right, insideFunction)
-        return
-      }
-      case 'UnaryExpression': {
-        const u = node as unknown as { argument: Node; operator: string }
-        if (!['-', '+', '!'].includes(u.operator)) {
-          err(errors, node, `Unsupported unary operator "${u.operator}".`, 'Use -, +, or ! only.')
-          return
-        }
-        walkExpression(u.argument, insideFunction)
-        return
-      }
-      case 'ConditionalExpression': {
-        const c = node as unknown as { test: Node; consequent: Node; alternate: Node }
-        walkExpression(c.test, insideFunction)
-        walkExpression(c.consequent, insideFunction)
-        walkExpression(c.alternate, insideFunction)
-        return
-      }
-      case 'MemberExpression': {
-        const m = node as unknown as { object: Node; property: Node; computed: boolean }
-        if (m.computed && m.property.type !== 'Literal') {
-          err(errors, node, 'Dynamic property access (obj[expr]) is not supported.', 'Use a literal property/method name (obj.prop or obj["literal"]).')
-        }
-        walkExpression(m.object, insideFunction)
-        return
-      }
-      case 'CallExpression': {
-        const c = node as unknown as { callee: Node; arguments: Node[] }
-        walkExpression(c.callee, insideFunction)
-        for (const a of c.arguments) {
-          if (a.type === 'SpreadElement') {
-            err(errors, a, 'Spread arguments (...args) are not supported.', 'Pass arguments individually.')
-            continue
-          }
-          walkExpression(a, insideFunction)
-        }
-        return
-      }
-      case 'ArrowFunctionExpression': {
-        const f = node as unknown as { params: Node[]; body: Node }
-        for (const p of f.params) {
-          if (p.type !== 'Identifier') {
-            err(errors, p, 'Destructuring/default parameters are not supported.', 'Use plain parameter names (e.g. (direction) => ...).')
-          }
-        }
-        if (f.body.type === 'BlockStatement') walkStatement(f.body, true)
-        else walkExpression(f.body, true)
-        return
-      }
-      case 'ObjectExpression': {
-        const o = node as unknown as { properties: Node[] }
-        for (const p of o.properties) {
-          if (p.type !== 'Property') {
-            err(errors, p, 'Spread/computed object members are not supported.', 'Use plain key: value pairs.')
-            continue
-          }
-          const prop = p as unknown as { computed: boolean; value: Node; key: Node }
-          if (prop.computed) {
-            err(errors, p, 'Computed object keys are not supported.', 'Use a literal key name.')
-          }
-          walkExpression(prop.value, insideFunction)
-        }
-        return
-      }
-      case 'AssignmentExpression': {
-        const a = node as unknown as { left: Node; right: Node; operator: string }
-        if (!ASSIGNMENT_OPERATORS.has(a.operator)) {
-          err(errors, node, `Unsupported assignment operator "${a.operator}".`, 'Use =, +=, -=, *=, or /=.')
-        }
-        if (a.left.type !== 'Identifier' && a.left.type !== 'MemberExpression') {
-          err(errors, a.left, 'Unsupported assignment target.', 'Assign to a plain variable name.')
-        } else {
-          walkExpression(a.left, insideFunction)
-        }
-        walkExpression(a.right, insideFunction)
-        return
-      }
-      case 'UpdateExpression': {
-        const u = node as unknown as { argument: Node }
-        walkExpression(u.argument, insideFunction)
-        return
-      }
-      case 'ArrayExpression': {
-        const arr = node as unknown as { elements: (Node | null)[] }
-        for (const el of arr.elements) walkExpression(el, insideFunction)
-        return
-      }
-      default:
-        err(
-          errors,
-          node,
-          `"${node.type}" is not supported in the UI scripting language.`,
-          suggestionFor(node.type)
-        )
-    }
+    walkExpressionSubset(node, errors, insideFunction, walkStatement)
   }
 
   function walkStatement(node: Node, insideFunction: boolean): void {

@@ -1,5 +1,6 @@
-import type { UiCssRule, UiWidget, UiWidgetStyle } from '@/types'
+import type { UiCssRule, UiDesignProject, UiWidget, UiWidgetStyle } from '@/types'
 import { UI_WIDGET_TAG } from '@/types'
+import { resolveThemedStyle } from './themes'
 
 /** Does `selector` (one of the simple forms this pass supports — a bare tag name, `.class`, or
  * `#id`) match `widget`? No combinators/descendant selectors — see cssSync.ts's parser, which
@@ -28,7 +29,7 @@ function specificityRank(selector: string): number {
  * computed fresh on every render rather than cached/painted onto the widget, so it's
  * automatically live: editing a CSS rule, or a widget gaining/losing a class, takes effect
  * immediately with no separate "re-apply" step. */
-export function computeEffectiveStyle(widget: UiWidget, cssRules: UiCssRule[]): UiWidgetStyle {
+export function computeEffectiveStyle(widget: UiWidget, cssRules: UiCssRule[], theme?: Pick<UiDesignProject, 'theme' | 'customThemeTokens'>): UiWidgetStyle {
   const matching = cssRules.filter((r) => matchesSelector(widget, r.selector)).sort((a, b) => specificityRank(a.selector) - specificityRank(b.selector))
 
   const out: UiWidgetStyle = {}
@@ -40,6 +41,9 @@ export function computeEffectiveStyle(widget: UiWidget, cssRules: UiCssRule[]): 
     }
   }
   for (const rule of matching) applyDefined(rule.style)
-  applyDefined(widget.style)
+  // Theme-token resolution only ever applies to the widget's own local style (matching the LVGL
+  // exporter's identical choice — see lvglExport.ts's exportLvglStyles) — CSS-rule-sourced colors
+  // stay literal.
+  applyDefined(theme ? resolveThemedStyle(widget, theme) : widget.style)
   return out
 }

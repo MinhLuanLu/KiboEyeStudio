@@ -142,6 +142,46 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
     results.push({ category: 'UI styles', status, messages })
   }
 
+  // ---- Advanced style fidelity ----
+  // Flags style combinations from the Advanced Style System (glow/elevation/surfaceStyle — see
+  // UiWidgetStyle's own doc comments) that get approximated rather than reproduced exactly, per
+  // this feature's own "warn, never silently drop" rule (matching the established Sticker blur/
+  // blend-mode precedent). LVGL carries exactly one shadow per style part, so an explicit manual
+  // shadow, a glow, and an elevation-derived shadow all compete for the same lv_style_set_shadow_*
+  // calls (see lvglExport.ts's styleSetCalls) — only one wins, silently, unless flagged here.
+  {
+    const messages: string[] = []
+    let status: LvglValidationStatus = 'passed'
+    const shadowConflicts: string[] = []
+    const bevelApproximations: string[] = []
+    for (const w of widgets) {
+      const label = w.tagId ?? w.id
+      const styles = [w.style, ...Object.values(w.states).filter((s): s is NonNullable<typeof s> => !!s)]
+      for (const s of styles) {
+        const hasManualShadow = s.shadowWidth !== undefined || s.shadowColor !== undefined
+        const hasGlow = s.glowColor !== undefined || s.glowRadius !== undefined
+        const hasElevation = s.elevation !== undefined
+        const competing = [hasManualShadow, hasGlow, hasElevation].filter(Boolean).length
+        if (competing > 1 && !shadowConflicts.includes(label)) shadowConflicts.push(label)
+        if (s.surfaceStyle === 'bevel' && !bevelApproximations.includes(label)) bevelApproximations.push(label)
+      }
+    }
+    if (shadowConflicts.length > 0) {
+      status = 'warning'
+      messages.push(
+        `${shadowConflicts.length} widget(s) set more than one of Shadow/Glow/Elevation on the same style — LVGL only has one shadow per part, so only one wins (priority: Shadow > Glow > Elevation): ${shadowConflicts.join(', ')}.`
+      )
+    }
+    if (bevelApproximations.length > 0) {
+      status = status === 'warning' ? status : 'warning'
+      messages.push(`${bevelApproximations.length} widget(s) use the "Bevel" surface style — approximated with a single border color (LVGL has no true per-edge border color/highlight): ${bevelApproximations.join(', ')}.`)
+    }
+    if (shadowConflicts.length === 0 && bevelApproximations.length === 0) {
+      messages.push('No approximated advanced-style effects in this scope.')
+    }
+    results.push({ category: 'Advanced style fidelity', status, messages })
+  }
+
   // ---- UI assets ----
   // Covers both `src` (Image/Icon widgets) and `backgroundImage` (screen/container/button/...
   // backgrounds, including per-state variants and CSS rules that match a reachable widget) —

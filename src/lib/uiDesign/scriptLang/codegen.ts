@@ -1,9 +1,12 @@
+import * as acorn from 'acorn'
 import type { Node, Program } from 'acorn'
 import type { UiWidget } from '@/types'
 import { selectFirst } from '@/lib/uiDesign/selectors'
 import type { ScriptError } from './parser'
-import { ACTION_TABLE, CODEGEN_SPECIAL_METHODS, valueGetCall } from './actionTable'
+import { ACTION_TABLE, CODEGEN_SPECIAL_METHODS, currentValueExpr, emitIndicatorAnimStart, statusIndicatorApplyLines, valueGetCall } from './actionTable'
 import { walkAllNodes } from './astWalk'
+import { checkExpressionSubset } from './restrictedSubset'
+import { parseTemplateText } from './templateExpr'
 
 // Walks the (already restrictedSubset-validated) AST and emits equivalent LVGL C++ — the
 // "convert supported JavaScript-like behavior into native LVGL C++" half of this feature. Kept
@@ -34,6 +37,13 @@ export interface CodegenContext {
    * codegen, the same "generated from the structured list" pattern top-level let/const already
    * uses one level up). */
   identForVariableName: (name: string) => { getter: string; setter: string; type: ExprType } | undefined
+  /** Set ONLY while compiling a Data List item template's `{{expr}}`/"Visible when" bindings (see
+   * lvglExport.ts's buildDataListTemplateCodegenCtx) — resolves a bare field name (`{{title}}`,
+   * matching the spec's own literal examples) OR the explicit `item.<field>` form to the current
+   * row's real C++ struct member. undefined in every other codegen context, where these two forms
+   * behave exactly as they already did (a bare unknown identifier, an "unsupported member
+   * expression" error) before this field existed. */
+  templateItemFields?: Map<string, { ident: string; type: ExprType }>
 }
 
 export interface CodegenEventHandler {
@@ -268,6 +278,13 @@ class Emitter {
     return valueText
   }
 
+  /** Public entry point for compiling a single standalone expression outside any statement/event/
+   * timer context — used by compileTemplateExpr below (Data List `{{expr}}`/"Visible when"
+   * bindings), which have no widget-reference symbol table or `.on(...)` handler to set up first. */
+  renderStandaloneExpression(node: Node): RenderedExpr {
+    return this.renderExpr(node)
+  }
+
   private renderExpr(node: Node): RenderedExpr {
     switch (node.type) {
       case 'Literal': {
@@ -281,6 +298,19 @@ class Emitter {
       }
       case 'Identifier': {
         const name = (node as unknown as { name: string }).name
+        // Data List template bindings resolve a bare field name directly (`{{title}}`, matching
+        // the spec's own literal examples: "Item title: {{title}}") — `item.title` (handled by
+        // the MemberExpression case below) also works, for authors who prefer the explicit form.
+        // Only active when compiling inside a template (templateItemFields set); every other
+        // codegen context is completely unaffected by this branch.
+        if (this.ctx.templateItemFields) {
+          const info = this.ctx.templateItemFields.get(name)
+          if (info) return { text: `item.${info.ident}`, type: info.type }
+          if (name !== 'item' && name !== 'data') {
+            this.err(node, `"${name}" isn't a field on this Data List's data source.`, "Check the Data Source Manager's field list, or reference a Variable Manager entry via data.<name>.")
+            return { text: '0', type: 'unknown' }
+          }
+        }
         const widget = this.symbolTable.get(name)
         if (widget) return { text: this.ctx.varNameForWidget(widget), type: 'unknown' }
         return { text: cIdent(name), type: this.varTypes.get(name) ?? 'unknown' }
@@ -329,6 +359,15 @@ class Emitter {
         // expression — everything else (widget refs) only ever appears as the object of a
         // CallExpression, handled by renderCallExpr, not here.
         const m = node as unknown as { object: Node; property: Node; computed: boolean }
+        if (!m.computed && this.ctx.templateItemFields && m.object.type === 'Identifier' && (m.object as unknown as { name: string }).name === 'item' && m.property.type === 'Identifier') {
+          const fieldName = (m.property as unknown as { name: string }).name
+          const info = this.ctx.templateItemFields.get(fieldName)
+          if (!info) {
+            this.err(node, `item.${fieldName} isn't a field on this Data List's data source.`, "Check the Data Source Manager's field list.")
+            return { text: '0', type: 'unknown' }
+          }
+          return { text: `item.${info.ident}`, type: info.type }
+        }
         if (!m.computed && m.object.type === 'Identifier' && (m.object as unknown as { name: string }).name === 'data' && m.property.type === 'Identifier') {
           const varName = (m.property as unknown as { name: string }).name
           const info = this.ctx.identForVariableName(varName)
@@ -501,6 +540,25 @@ class Emitter {
       }
       return { text: `${fnName}(${restArgs.join(', ')});`, type: 'unknown' }
     }
+    if (method === 'setStatus') {
+      const nameNode = argNodes[0]
+      if (!nameNode || nameNode.type !== 'Literal' || typeof (nameNode as unknown as { value: unknown }).value !== 'string') {
+        this.err(node, 'setStatus(status) requires a literal status string for export.')
+        return { text: '', type: 'unknown' }
+      }
+      const status = (nameNode as unknown as { value: string }).value
+      return { text: statusIndicatorApplyLines(varName, status).join(' '), type: 'unknown' }
+    }
+    if (method === 'playIndicatorAnimation') {
+      if (widget.type !== 'bar' && widget.type !== 'slider' && widget.type !== 'arc' && widget.type !== 'gauge') {
+        this.err(node, `playIndicatorAnimation(...) doesn't apply to a ${widget.type} widget.`)
+        return { text: '', type: 'unknown' }
+      }
+      const args = this.renderActionArgs(method, argNodes)
+      const toExpr = args[0] ?? '0'
+      const fromExpr = currentValueExpr(varName, widget.type)
+      return { text: emitIndicatorAnimStart(varName, widget.type, widget, fromExpr, toExpr).join(' '), type: 'unknown' }
+    }
     if (method === 'bindText' || method === 'bindValue' || method === 'bindVisible') {
       const optionsNode = argNodes[1] && argNodes[1].type === 'ObjectExpression' ? argNodes[1] : undefined
       this.bindings.push({ receiverText: varName, varName, method, argNode: argNodes[0], optionsNode })
@@ -572,7 +630,11 @@ class Emitter {
     const varName = this.ctx.varNameForWidget(widget)
     const lines: string[] = []
     let duration = '300'
-    let easing: 'LV_ANIM_PATH_LINEAR' | 'LV_ANIM_PATH_EASE_OUT' | 'LV_ANIM_PATH_EASE_IN' | 'LV_ANIM_PATH_EASE_IN_OUT' = 'LV_ANIM_PATH_LINEAR'
+    // 'bounce'/'overshoot' are real LVGL v9 anim path functions (lv_anim_path_bounce/
+    // lv_anim_path_overshoot) — not a simulation of spring/elastic physics, an actual supported
+    // easing curve, which is what legitimately covers the "bounce"/"springy" asks from the
+    // Advanced Style System spec without faking anything LVGL can't really do.
+    let easingFn = 'lv_anim_path_linear'
     const targets: { setter: string; getter: string; value: string }[] = []
     for (const p of props.properties) {
       const key = p.key.name ?? String(p.key.value)
@@ -582,18 +644,43 @@ class Emitter {
       }
       if (key === 'easing') {
         const v = p.value.type === 'Literal' ? String((p.value as unknown as { value: unknown }).value) : 'linear'
-        easing = v === 'easeOut' ? 'LV_ANIM_PATH_EASE_OUT' : v === 'easeIn' ? 'LV_ANIM_PATH_EASE_IN' : v === 'easeInOut' ? 'LV_ANIM_PATH_EASE_IN_OUT' : 'LV_ANIM_PATH_LINEAR'
+        easingFn =
+          v === 'easeOut' ? 'lv_anim_path_ease_out'
+          : v === 'easeIn' ? 'lv_anim_path_ease_in'
+          : v === 'easeInOut' ? 'lv_anim_path_ease_in_out'
+          : v === 'bounce' ? 'lv_anim_path_bounce'
+          : v === 'overshoot' ? 'lv_anim_path_overshoot'
+          : 'lv_anim_path_linear'
         continue
       }
       const value = this.renderExpr(p.value).text
       if (key === 'x') targets.push({ setter: 'lv_obj_set_x', getter: 'lv_obj_get_x', value })
       else if (key === 'y') targets.push({ setter: 'lv_obj_set_y', getter: 'lv_obj_get_y', value })
       else if (key === 'opacity') targets.push({ setter: `__kibo_anim_set_opa_${varName}`, getter: '', value: `(int32_t)((${value}) * 255 / 100)` })
-      else this.err(node, `animate({ ${key}: ... }) — "${key}" isn't supported for export yet.`, 'Supported: x, y, opacity, duration, easing.')
+      // scale/rotation snap to their final value at export time (matching opacity's own
+      // existing "one-shot style set, not a true tween" precedent above) — LVGL's transform
+      // style setters (lv_obj_set_style_transform_scale/_angle) take a part argument, so they
+      // don't fit lv_anim's plain (obj, int32_t) exec-callback signature without a bespoke
+      // wrapper function; a real animated tween for these is a reasonable follow-up, not this
+      // pass's scope.
+      else if (key === 'scale') targets.push({ setter: `__kibo_anim_set_scale_${varName}`, getter: '', value: `(int32_t)((${value}) * 256)` })
+      else if (key === 'rotation') targets.push({ setter: `__kibo_anim_set_angle_${varName}`, getter: '', value: `(int32_t)((${value}) * 10)` })
+      else this.err(node, `animate({ ${key}: ... }) — "${key}" isn't supported for export yet.`, 'Supported: x, y, opacity, scale, rotation, duration, easing.')
     }
     for (const t of targets) {
       if (t.setter.startsWith('__kibo_anim_set_opa_')) {
         lines.push(`lv_obj_set_style_opa(${varName}, (lv_opa_t)(${t.value}), LV_PART_MAIN);`)
+        continue
+      }
+      if (t.setter.startsWith('__kibo_anim_set_scale_')) {
+        // LVGL v9 splits transform scale into separate X/Y style properties (no combined
+        // setter) — set both to the same factor for a uniform scale.
+        lines.push(`lv_obj_set_style_transform_scale_x(${varName}, (int16_t)(${t.value}), LV_PART_MAIN);`)
+        lines.push(`lv_obj_set_style_transform_scale_y(${varName}, (int16_t)(${t.value}), LV_PART_MAIN);`)
+        continue
+      }
+      if (t.setter.startsWith('__kibo_anim_set_angle_')) {
+        lines.push(`lv_obj_set_style_transform_rotation(${varName}, (int32_t)(${t.value}), LV_PART_MAIN);`)
         continue
       }
       lines.push(`{`)
@@ -602,7 +689,7 @@ class Emitter {
       lines.push(`  lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)${t.setter});`)
       lines.push(`  lv_anim_set_values(&a, ${t.getter}(${varName}), (int32_t)(${t.value}));`)
       lines.push(`  lv_anim_set_duration(&a, (uint32_t)(${duration}));`)
-      lines.push(`  lv_anim_set_path_cb(&a, ${easing.includes('LINEAR') ? 'lv_anim_path_linear' : easing.includes('EASE_OUT') ? 'lv_anim_path_ease_out' : easing.includes('EASE_IN_OUT') ? 'lv_anim_path_ease_in_out' : 'lv_anim_path_ease_in'});`)
+      lines.push(`  lv_anim_set_path_cb(&a, ${easingFn});`)
       lines.push(`  lv_anim_start(&a);`)
       lines.push(`}`)
     }
@@ -999,4 +1086,54 @@ export function generateScriptCpp(program: Program, source: string, ctx: Codegen
   }
 
   return emitter.run(program)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Data List `{{expr}}` / "Visible when" compilation — see scriptLang/templateExpr.ts for the
+// preview-side (real-JS) twin of this. `ctx` here is normally the result of lvglExport.ts's
+// buildDataListTemplateCodegenCtx (a shallow clone of the screen's own CodegenContext with
+// `templateItemFields` populated from the assigned data source's field list), so `data.<name>`
+// (Variable Manager) stays reachable inside a template expression for free alongside `item.<field>`.
+// ---------------------------------------------------------------------------------------------
+
+/** Parses and compiles a single bare expression (no statement/block wrapper) to a C++ expression
+ * string — used for both a `{{expr}}` part and a bare "Visible when" expression. Never throws:
+ * a parse or restricted-subset failure is returned as `errors`, with `text: '0'` as a safe
+ * placeholder the caller should not actually emit (surfaced instead via validateLvglExport.ts's
+ * "Data List bindings" category). */
+export function compileTemplateExpr(source: string, ctx: CodegenContext): { text: string; type: ExprType; errors: ScriptError[] } {
+  let node: Node
+  try {
+    node = acorn.parseExpressionAt(source, 0, { ecmaVersion: 2022, locations: true }) as unknown as Node
+  } catch (e) {
+    const loc = (e as SyntaxError & { loc?: { line: number; column: number } }).loc
+    return { text: '0', type: 'unknown', errors: [{ line: loc?.line ?? 1, message: e instanceof Error ? e.message.replace(/\s*\(\d+:\d+\)\s*$/, '') : String(e) }] }
+  }
+  const subsetErrors = checkExpressionSubset(node)
+  if (subsetErrors.length > 0) return { text: '0', type: 'unknown', errors: subsetErrors }
+  const emitter = new Emitter(ctx, source)
+  const rendered = emitter.renderStandaloneExpression(node)
+  return { text: rendered.text, type: rendered.type, errors: emitter.errors }
+}
+
+/** Compiles a full template-text field (literal text with zero or more `{{expr}}` parts) into one
+ * C++ string expression — e.g. `"Battery: " + item.battery + "%"` for `"Battery: {{battery}}%"`.
+ * A field with no `{{}}` at all compiles to a plain C string literal (no runtime concatenation),
+ * matching how every other static text field already emits today. */
+export function compileTemplateText(text: string, ctx: CodegenContext): { cppExpr: string; errors: ScriptError[] } {
+  const parts = parseTemplateText(text)
+  if (parts.every((p) => p.kind === 'literal')) return { cppExpr: escapeCString(text), errors: [] }
+  const errors: ScriptError[] = []
+  const rendered: string[] = []
+  for (const part of parts) {
+    if (part.kind === 'literal') {
+      if (part.text) rendered.push(escapeCString(part.text))
+      continue
+    }
+    const compiled = compileTemplateExpr(part.source, ctx)
+    errors.push(...compiled.errors)
+    rendered.push(compiled.type === 'String' || compiled.type === 'cstr' ? compiled.text : `String(${compiled.text})`)
+  }
+  if (rendered.length === 0) return { cppExpr: '""', errors }
+  return { cppExpr: `(${rendered.join(' + ')})`, errors }
 }

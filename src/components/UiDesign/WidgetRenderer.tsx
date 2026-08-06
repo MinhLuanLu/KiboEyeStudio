@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '@/state/store'
-import type { UiAsset, UiWidget, UiWidgetType } from '@/types'
+import type { UiAsset, UiDesignProject, UiWidget, UiWidgetType } from '@/types'
 import { computeEffectiveStyle } from '@/lib/uiDesign/cssCascade'
 import { clampRectToDisplayShape, rectFitsDisplayShape, uiDisplayShapeToDisplayShape } from '@/renderer/displayMask'
 import { dispatchWidgetEvent, isSandboxRunning, subscribeAffectedWidget } from '@/lib/uiDesign/scriptLang/sandboxRuntime'
@@ -15,11 +15,75 @@ import {
   type UiResolvedKeyboardKey
 } from '@/lib/uiDesign/keyboardLayouts'
 import { computeAdaptiveKeyboardRowLayout, findClippedKeys, type UiKeyboardRowLayout } from '@/lib/uiDesign/keyboardAdaptiveLayout'
+import { nearestMontserratSize, resolveEffectiveShadow } from '@/lib/export/lvglExport'
+import { quantizeToRgb565 } from '@/lib/color'
+import { STATUS_INDICATOR_PRESETS } from '@/lib/uiDesign/statusIndicatorPresets'
+import { dataListTemplateBounds } from '@/lib/uiDesign/dataListLayout'
+import { evalBooleanExprPreview, evalTemplateTextPreview, hasTemplateExpr } from '@/lib/uiDesign/scriptLang/templateExpr'
 
 const AFFECTED_HIGHLIGHT_MS = 400
 
 const LONG_PRESS_MS = 600
 const CLICK_MOVE_THRESHOLD = 4
+
+/** Applies an alpha channel to a `#rrggbb`/`#rgb` hex color, for the backgroundOpacity/
+ * borderOpacity fields (real, distinct LVGL bg_opa/border_opa setters — see lvglExport.ts's
+ * styleSetCalls — that CSS has no single-property equivalent for; the closest CSS mapping is
+ * baking the alpha into an rgba() color here). Falls back to the bare color unchanged when it
+ * isn't a recognizable hex (e.g. unset/named colors), matching colorLiteral()'s own leniency. */
+function withAlpha(hex: string | undefined, opacityPct: number | undefined): string | undefined {
+  if (!hex || opacityPct === undefined) return hex
+  const m = hex.trim().match(/^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$/)
+  if (!m) return hex
+  let h = m[1]
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('')
+  const r = parseInt(h.slice(0, 2), 16)
+  const g = parseInt(h.slice(2, 4), 16)
+  const b = parseInt(h.slice(4, 6), 16)
+  return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(100, opacityPct)) / 100})`
+}
+
+/** Quantizes a hex color to what the real RGB565 display can show, for "ESP32 Preview" mode —
+ * a no-op passthrough when that mode is off. Guards against non-hex input (free-typed CSS like
+ * `rgba(...)`/named colors in the color text field) the same leniently-ignore way colorLiteral()
+ * and withAlpha() above already do, rather than crashing on unexpected preview-only input. */
+function q(hex: string | undefined, esp32Preview: boolean): string | undefined {
+  if (!hex || !esp32Preview) return hex
+  return /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$/.test(hex.trim()) ? quantizeToRgb565(hex) : hex
+}
+
+/** Builds the live-preview box-shadow. In ESP32 Preview mode, resolves the exact same single
+ * winning shadow the real exporter would (see lvglExport.ts's resolveEffectiveShadow) instead of
+ * layering glow+shadow together — LVGL only has one shadow per style part, so this is what
+ * "genuinely shows what ships" means for this control. Off, it keeps the richer studio-only
+ * preview: layering a glow (colored, zero-offset — see UiWidgetStyle's glowColor/glowRadius doc
+ * comment) or an elevation-derived shadow alongside/on top of a manually authored shadow — real
+ * CSS supports multiple comma-separated box-shadow layers even though LVGL only carries one
+ * shadow per style part, so a widget with BOTH a manual shadow and a glow can show both here,
+ * while export (styleSetCalls) has to pick one and lets validateLvglExport.ts warn about the
+ * difference; documented, not a silent preview/export mismatch. */
+function computeBoxShadowCss(style: UiWidget['style'], esp32Preview: boolean): string | undefined {
+  if (esp32Preview) {
+    const shadow = resolveEffectiveShadow(style)
+    if (!shadow) return undefined
+    if (shadow.kind === 'shadow') return `${shadow.offsetX ?? 0}px ${shadow.offsetY ?? 0}px ${shadow.width}px ${q(shadow.color ?? '#000000', true)}`
+    if (shadow.kind === 'glow') return `0 0 ${shadow.width}px ${shadow.spread}px ${q(shadow.color ?? '#ffffff', true)}`
+    return `0 ${shadow.offsetY}px ${shadow.width}px rgba(0,0,0,${(shadow.opa255 / 255).toFixed(2)})`
+  }
+  const layers: string[] = []
+  if (style.shadowWidth !== undefined || style.shadowColor !== undefined) {
+    layers.push(`${style.shadowOffsetX ?? 0}px ${style.shadowOffsetY ?? 0}px ${style.shadowWidth ?? 0}px ${style.shadowColor ?? 'rgba(0,0,0,0.4)'}`)
+  }
+  if (style.glowColor !== undefined || style.glowRadius !== undefined) {
+    const r = style.glowRadius ?? 12
+    layers.push(`0 0 ${r}px ${Math.round(r / 3)}px ${style.glowColor ?? 'rgba(255,255,255,0.6)'}`)
+  }
+  if (layers.length === 0 && style.elevation !== undefined) {
+    const e = Math.max(0, Math.min(24, style.elevation))
+    layers.push(`0 ${Math.round(1 + e * 0.5)}px ${Math.round(4 + e * 1.4)}px rgba(0,0,0,${(0.2 + Math.min(e, 12) * 0.01).toFixed(2)})`)
+  }
+  return layers.length > 0 ? layers.join(', ') : undefined
+}
 
 function lengthToCss(v: UiWidget['style']['width']): string | undefined {
   if (v === undefined) return undefined
@@ -33,7 +97,7 @@ function lengthToCss(v: UiWidget['style']['width']): string | undefined {
  * browser form controls, so matching that here sidesteps almost all of Tailwind's preflight
  * leakage automatically and keeps the live preview's fidelity tied to *our* CSS mapping, not
  * the browser's native-control theming. */
-export function styleToCss(style: UiWidget['style']): React.CSSProperties {
+export function styleToCss(style: UiWidget['style'], esp32Preview = false): React.CSSProperties {
   const css: React.CSSProperties = {
     position: 'absolute',
     left: style.x ?? 0,
@@ -49,23 +113,20 @@ export function styleToCss(style: UiWidget['style']): React.CSSProperties {
     paddingBottom: style.paddingBottom,
     paddingLeft: style.paddingLeft,
     borderWidth: style.borderWidth,
-    borderColor: style.borderColor,
+    borderColor: withAlpha(q(style.borderColor, esp32Preview), style.borderOpacity),
     borderStyle: style.borderWidth ? 'solid' : undefined,
     borderRadius: style.borderRadius,
     background: style.backgroundGradient
-      ? `linear-gradient(${style.backgroundGradient.direction === 'horizontal' ? '90deg' : '180deg'}, ${style.background ?? 'transparent'}, ${style.backgroundGradient.to})`
-      : style.background,
+      ? `linear-gradient(${style.backgroundGradient.direction === 'horizontal' ? '90deg' : '180deg'}, ${withAlpha(q(style.background, esp32Preview), style.backgroundOpacity) ?? 'transparent'}, ${q(style.backgroundGradient.to, esp32Preview)})`
+      : withAlpha(q(style.background, esp32Preview), style.backgroundOpacity),
     opacity: style.opacity !== undefined ? style.opacity / 100 : undefined,
-    color: style.color,
+    color: q(style.color, esp32Preview),
     fontFamily: style.fontFamily,
-    fontSize: style.fontSize,
+    fontSize: esp32Preview && style.fontSize !== undefined ? nearestMontserratSize(style.fontSize) : style.fontSize,
     fontWeight: style.fontWeight,
     letterSpacing: style.letterSpacing,
     textAlign: style.textAlign,
-    boxShadow:
-      style.shadowWidth || style.shadowColor
-        ? `${style.shadowOffsetX ?? 0}px ${style.shadowOffsetY ?? 0}px ${style.shadowWidth ?? 0}px ${style.shadowColor ?? 'rgba(0,0,0,0.4)'}`
-        : undefined,
+    boxShadow: computeBoxShadowCss(style, esp32Preview),
     display: style.visible === false ? 'none' : style.flexDirection ? 'flex' : undefined,
     zIndex: style.zIndex,
     flexDirection: style.flexDirection,
@@ -144,17 +205,152 @@ export const DEFAULT_VISUAL_CSS: Partial<Record<UiWidgetType, React.CSSPropertie
   list: { background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: 4, display: 'flex', flexDirection: 'column', overflow: 'auto' },
   tabs: { background: 'transparent', display: 'flex', flexDirection: 'column' },
   spinner: { background: 'transparent' },
-  keyboard: { background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: 4, display: 'flex', flexDirection: 'column', gap: 2, padding: 3 }
+  keyboard: { background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: 4, display: 'flex', flexDirection: 'column', gap: 2, padding: 3 },
+  gauge: { background: 'transparent', borderRadius: '50%' },
+  led: { background: '#3a3b42', borderRadius: '50%' },
+  statusIndicator: { background: 'transparent', display: 'flex', alignItems: 'center', gap: 6 },
+  dataList: { background: 'transparent', display: 'flex', flexDirection: 'column', overflow: 'auto' }
 }
 
 // 'button' is included so an Icon widget (or anything else) can be placed inside a button
 // alongside its text label — reuses the existing generic child-widget system for "icon
 // buttons" instead of adding a dedicated buttonIcon property.
-export const CONTAINER_LIKE: ReadonlySet<UiWidgetType> = new Set(['screen', 'container', 'flex', 'tabs', 'button'])
+// 'dataList' is included so its item-template subtree (see UiDataListConfig's doc comment) can be
+// authored with the ordinary widget tools — dropped-in children render/select/drag normally here,
+// exactly like any other container. The row-repeat-per-data-row behavior is layered on top by the
+// dedicated 'dataList' case in WidgetInner below, not by this generic recursion.
+export const CONTAINER_LIKE: ReadonlySet<UiWidgetType> = new Set(['screen', 'container', 'flex', 'tabs', 'button', 'dataList'])
 
 function numProp(widget: UiWidget, key: string, fallback: number): number {
   const v = widget.props[key]
   return typeof v === 'number' ? v : fallback
+}
+
+/** Walks a widget's own ancestor chain looking for the nearest `dataList` — used to detect "am I
+ * a Data List item-template descendant" so WidgetRenderer can substitute `{{field}}` text for its
+ * own row-0 rendering (the real, editable template — see DataListRepeatedRows' doc comment for why
+ * rows 1..N-1 are a separate, read-only clone) using real sample/runtime data instead of showing
+ * the raw binding syntax on canvas. Returns null for any widget that isn't nested under a
+ * `dataList` at all (the overwhelmingly common case), so this is a no-op for every ordinary
+ * widget. */
+function findDataListAncestor(widgets: Record<string, UiWidget>, widget: UiWidget): UiWidget | null {
+  let cur: UiWidget | undefined = widget
+  while (cur?.parentId) {
+    const parent: UiWidget | undefined = widgets[cur.parentId]
+    if (!parent) return null
+    if (parent.type === 'dataList') return parent
+    cur = parent
+  }
+  return null
+}
+
+/** First resolved row (live sandbox row if present, else the bound Data Source's own sample
+ * data) for a Data List — the same resolution DataListRepeatedRows uses, just returning row 0
+ * instead of skipping it, so row-0's own template rendering and the read-only preview clones
+ * below it can never disagree about what "the first row's data" means. */
+function firstDataListRow(
+  dataListWidget: UiWidget,
+  dataSources: UiDesignProject['dataSources'],
+  runtimeDataListItems: Record<string, unknown[]>
+): Record<string, unknown> {
+  const runtimeItems = runtimeDataListItems[dataListWidget.id]
+  const dataSourceId = dataListWidget.dataListConfig?.dataSourceId ?? null
+  const dataSource = dataSourceId ? dataSources.find((d) => d.id === dataSourceId) : undefined
+  let rows: unknown[] = runtimeItems ?? []
+  if (!runtimeItems && dataSource) {
+    try {
+      const parsed = JSON.parse(dataSource.sampleData)
+      if (Array.isArray(parsed)) rows = parsed
+    } catch {
+      rows = []
+    }
+  }
+  const first = rows[0]
+  return (first && typeof first === 'object' ? first : {}) as Record<string, unknown>
+}
+
+/** A single non-interactive preview clone of a Data List's item template, positioned `offsetY`
+ * below the real (row 0) template — see UiDataListConfig's doc comment. Only walks DIRECT
+ * template children (not arbitrarily nested descendants) — a deliberate v1 simplification (row 0,
+ * the real editable template, still supports full nesting via the ordinary CONTAINER_LIKE
+ * recursion; only these read-only preview clones are flat-only). Each child's `text`/
+ * `visibleWhenExpr` is evaluated against `rowData` via the same templateExpr.ts functions the
+ * generated C++ compiles with (scriptLang/codegen.ts's compileTemplateText/compileTemplateExpr),
+ * so preview and export can't disagree about which syntax is supported — they just can't literally
+ * share code across the JS/C++ boundary. */
+function DataListRowPreview({ dataListWidget, offsetY, rowData }: { dataListWidget: UiWidget; offsetY: number; rowData: Record<string, unknown> }) {
+  const uiDesign = useStore((s) => s.project.uiDesign)
+  const esp32Preview = useStore((s) => s.uiEsp32PreviewMode)
+  const themeCtx = { theme: uiDesign.theme, customThemeTokens: uiDesign.customThemeTokens }
+  const assetsById = new Map(uiDesign.assets.map((a) => [a.id, a]))
+  const directChildren = dataListWidget.childIds.map((id) => uiDesign.widgets[id]).filter((w): w is UiWidget => !!w)
+
+  return (
+    <>
+      {directChildren.map((child) => {
+        if (!child.visible) return null
+        if (child.visibleWhenExpr && !evalBooleanExprPreview(child.visibleWhenExpr, rowData, {})) return null
+        const substitutedText = hasTemplateExpr(child.text) ? evalTemplateTextPreview(child.text as string, rowData, {}) : child.text
+        const substitutedWidget: UiWidget = { ...child, text: substitutedText }
+        const effectiveStyle = computeEffectiveStyle(child, uiDesign.css, themeCtx)
+        const css = mergeDefined(DEFAULT_VISUAL_CSS[child.type] ?? {}, {
+          ...styleToCss(effectiveStyle, esp32Preview),
+          ...backgroundImageCss(effectiveStyle, assetsById)
+        })
+        const topBase = typeof css.top === 'number' ? css.top : 0
+        return (
+          <div key={child.id} className={`kibo-ui-widget kibo-ui-widget--${child.type}`} style={{ ...css, position: 'absolute', top: topBase + offsetY, pointerEvents: 'none' }}>
+            <WidgetInner widget={substitutedWidget} />
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
+/** Resolves a Data List's rows (live sandbox rows if the script is running and has ever mutated
+ * this widget, else the bound Data Source's own sample data) and renders a `DataListRowPreview`
+ * clone for every row past the first — row 0 is already showing, rendered by the ordinary
+ * CONTAINER_LIKE recursion (the real, editable template — see WidgetRenderer's own
+ * findDataListAncestor-driven substitution for why it shows real row-0 data too, not the raw
+ * `{{field}}` syntax). */
+function DataListRepeatedRows({ dataListWidget }: { dataListWidget: UiWidget }) {
+  const uiDesign = useStore((s) => s.project.uiDesign)
+  const runtimeItems = useStore((s) => s.runtimeDataListItems[dataListWidget.id])
+  const dataSourceId = dataListWidget.dataListConfig?.dataSourceId ?? null
+  const dataSource = dataSourceId ? uiDesign.dataSources.find((d) => d.id === dataSourceId) : undefined
+
+  let rows: unknown[] = runtimeItems ?? []
+  if (!runtimeItems && dataSource) {
+    try {
+      const parsed = JSON.parse(dataSource.sampleData)
+      if (Array.isArray(parsed)) rows = parsed
+    } catch {
+      rows = []
+    }
+  }
+
+  const maxItems = dataListWidget.dataListConfig?.maxItems ?? 0
+  const limited = maxItems > 0 ? rows.slice(0, maxItems) : rows
+  if (limited.length <= 1) return null
+
+  const bounds = dataListTemplateBounds(uiDesign, dataListWidget)
+  // Matches the real exported LVGL row gap exactly — see lvglExport.ts's 'dataList'
+  // widgetCreateCalls case, which applies the same itemSpacing value via lv_obj_set_style_pad_row.
+  const rowStep = bounds.height + (dataListWidget.dataListConfig?.itemSpacing ?? 4)
+
+  return (
+    <>
+      {limited.slice(1).map((rowData, i) => (
+        <DataListRowPreview
+          key={i}
+          dataListWidget={dataListWidget}
+          offsetY={(i + 1) * rowStep}
+          rowData={(rowData && typeof rowData === 'object' ? rowData : {}) as Record<string, unknown>}
+        />
+      ))}
+    </>
+  )
 }
 
 /** Kind-specific inner content — thumbs/fills/ticks/etc — rendered inside the outer positioned
@@ -274,8 +470,102 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
         />
       )
     }
+    case 'gauge': {
+      // Reuses arc's conic-gradient ring technique for the tick/zone backdrop (real ticks/section
+      // colors are an export-time detail — see lvglExport.ts's real lv_scale_add_section/
+      // lv_scale_set_total_tick_count calls; this preview approximates them, same "structurally
+      // right, not pixel-identical" bar as every other DOM preview in this app) plus one rotated
+      // needle line, matching how real lv_scale_set_line_needle_value positions its needle.
+      const min = numProp(widget, 'min', 0)
+      const max = numProp(widget, 'max', 100)
+      const value = numProp(widget, 'value', min)
+      const angleRange = numProp(widget, 'angleRange', 270)
+      const rotation = numProp(widget, 'rotation', 135)
+      const frac = max > min ? (value - min) / (max - min) : 0
+      const needleDeg = rotation + frac * angleRange
+      return (
+        <>
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              borderRadius: '50%',
+              background: `conic-gradient(from ${rotation}deg, #2196f3 ${frac * angleRange}deg, #e2e8f0 ${frac * angleRange}deg ${angleRange}deg, transparent ${angleRange}deg)`,
+              mask: 'radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 6px))',
+              WebkitMask: 'radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 6px))'
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              width: '42%',
+              height: 2,
+              background: '#ef4444',
+              transformOrigin: '0% 50%',
+              transform: `rotate(${needleDeg}deg)`
+            }}
+          />
+          <div style={{ position: 'absolute', top: '50%', left: '50%', width: 6, height: 6, marginTop: -3, marginLeft: -3, borderRadius: '50%', background: '#ef4444' }} />
+        </>
+      )
+    }
+    case 'led': {
+      const color = typeof widget.props.ledColor === 'string' ? widget.props.ledColor : '#22C55E'
+      const brightness = numProp(widget, 'brightness', 100)
+      const state = typeof widget.props.state === 'string' ? widget.props.state : 'off'
+      const isLit = state !== 'off'
+      const anim = state === 'blink' ? 'kibo-ui-led-blink 1s steps(1) infinite' : state === 'flash' ? 'kibo-ui-led-blink 0.3s ease-in-out infinite' : state === 'pulse' ? 'kibo-ui-led-pulse 1.2s ease-in-out infinite' : undefined
+      return (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            borderRadius: '50%',
+            background: color,
+            opacity: isLit ? Math.max(0.15, brightness / 100) : 0.2,
+            boxShadow: isLit ? `0 0 6px 2px ${color}` : undefined,
+            animation: anim
+          }}
+        />
+      )
+    }
+    case 'statusIndicator': {
+      const status = typeof widget.props.status === 'string' ? widget.props.status : 'online'
+      const preset = STATUS_INDICATOR_PRESETS[status as keyof typeof STATUS_INDICATOR_PRESETS] ?? STATUS_INDICATOR_PRESETS.online
+      const symbol = lvglSymbolById(preset.icon)
+      return (
+        <>
+          <div
+            style={{
+              width: 12,
+              height: 12,
+              flexShrink: 0,
+              borderRadius: '50%',
+              background: preset.color,
+              boxShadow: preset.glow ? `0 0 6px 2px ${preset.color}` : undefined,
+              animation: preset.anim === 'pulse' ? 'kibo-ui-led-pulse 1.2s ease-in-out infinite' : preset.anim === 'spin' ? 'kibo-ui-spin 1s linear infinite' : undefined,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 8,
+              color: '#ffffff'
+            }}
+          >
+            {symbol && preset.anim !== 'spin' ? symbol.glyph : ''}
+          </div>
+          <span>{widget.text || preset.label}</span>
+        </>
+      )
+    }
     case 'checkbox': {
       const symbol = lvglSymbolById(widget.iconSymbol)
+      // 'indeterminate' is real in the editor/preview (useful for testing "what does my UI look
+      // like mid-way through a batch selection") but LVGL has no real tri-state checkbox — export
+      // approximates it as unchecked with an explicit validateLvglExport.ts warning, never silent.
+      const isIndeterminate = widget.props.checked === 'indeterminate'
+      const isChecked = widget.props.checked === true
       return (
         <>
           <div
@@ -283,11 +573,19 @@ export function WidgetInner({ widget, simFocusedKeyId }: { widget: UiWidget; sim
               width: 16,
               height: 16,
               flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
               border: '1.5px solid #2196f3',
               borderRadius: 3,
-              background: widget.props.checked ? '#2196f3' : 'transparent'
+              background: isChecked || isIndeterminate ? '#2196f3' : 'transparent',
+              color: '#ffffff',
+              fontSize: 11,
+              lineHeight: 1
             }}
-          />
+          >
+            {isIndeterminate ? '−' : ''}
+          </div>
           {symbol && <span style={{ marginRight: widget.text ? 4 : 0 }}>{symbol.glyph}</span>}
           <span>{widget.text}</span>
         </>
@@ -672,8 +970,16 @@ const MIN_WIDGET_SIZE = 8
 export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   const widget = useStore((s) => s.project.uiDesign.widgets[widgetId])
   const cssRules = useStore((s) => s.project.uiDesign.css)
+  const uiTheme = useStore((s) => s.project.uiDesign.theme)
+  const uiCustomThemeTokens = useStore((s) => s.project.uiDesign.customThemeTokens)
+  const themeCtx = { theme: uiTheme, customThemeTokens: uiCustomThemeTokens }
+  const esp32Preview = useStore((s) => s.uiEsp32PreviewMode)
   const assets = useStore((s) => s.project.uiDesign.assets)
   const assetsById = new Map(assets.map((a) => [a.id, a]))
+  // Data List template (row 0) substitution — see findDataListAncestor's own doc comment.
+  const allWidgets = useStore((s) => s.project.uiDesign.widgets)
+  const dataSources = useStore((s) => s.project.uiDesign.dataSources)
+  const runtimeDataListItems = useStore((s) => s.runtimeDataListItems)
   const uiDisplay = useStore((s) => s.uiPreviewDisplayOverride ?? s.project.uiDesign.display)
   const display = { width: uiDisplay.width, height: uiDisplay.height, shape: uiDisplayShapeToDisplayShape(uiDisplay.shape) }
   const selectedWidgetId = useStore((s) => s.selectedWidgetId)
@@ -734,7 +1040,7 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     // Background color/image DO apply here though (unlike position/size) — a screen's own
     // background is exactly what "every screen can have its own background image" means. Falls
     // through to transparent (showing Canvas.tsx's white box underneath) when unset.
-    const screenEffectiveStyle = computeEffectiveStyle(widget, cssRules)
+    const screenEffectiveStyle = computeEffectiveStyle(widget, cssRules, themeCtx)
     return (
       <div
         data-widget-id={widget.id}
@@ -744,8 +1050,8 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
           width: '100%',
           height: '100%',
           background: screenEffectiveStyle.backgroundGradient
-            ? `linear-gradient(${screenEffectiveStyle.backgroundGradient.direction === 'horizontal' ? '90deg' : '180deg'}, ${screenEffectiveStyle.background ?? 'transparent'}, ${screenEffectiveStyle.backgroundGradient.to})`
-            : screenEffectiveStyle.background,
+            ? `linear-gradient(${screenEffectiveStyle.backgroundGradient.direction === 'horizontal' ? '90deg' : '180deg'}, ${q(screenEffectiveStyle.background, esp32Preview) ?? 'transparent'}, ${q(screenEffectiveStyle.backgroundGradient.to, esp32Preview)})`
+            : q(screenEffectiveStyle.background, esp32Preview),
           opacity: screenEffectiveStyle.opacity !== undefined ? screenEffectiveStyle.opacity / 100 : undefined,
           ...backgroundImageCss(screenEffectiveStyle, assetsById)
         }}
@@ -759,6 +1065,15 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   }
 
   const isSelected = selectedWidgetId === widget.id
+  // A nested widget's style.x/y is relative to its own parent (a container/flex/tabs/button-label/
+  // dataList-template — see Canvas.tsx's own "position:absolute nesting, not display-global
+  // coordinates" comment on its drop-target math), not the display. The out-of-bounds indicator/
+  // snap-back-inside-display logic below must only ever run for a widget whose parent IS the
+  // screen root — otherwise a perfectly-placed nested widget (e.g. a Data List template child at
+  // x=4,y=4 relative to its own list) gets its small relative offset misread as an absolute
+  // display coordinate near the edge, silently "snapped" to a wrong, corrupted position the
+  // instant it's clicked.
+  const isTopLevelWidget = widget.parentId ? allWidgets[widget.parentId]?.type === 'screen' : true
   // "The focused key must have a visible focus style" (simulated rotary-encoder navigation — see
   // store.ts's simulateFocusNext/Previous/Press) — a distinct color from the design-time
   // selection outline above so the two never look ambiguous during a live-preview walkthrough.
@@ -853,7 +1168,7 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   // outside display" checkbox), so a deliberately-placed off-display widget is never yanked
   // back. See renderer/displayMask.ts's clampRectToDisplayShape for the actual geometry.
   const snapInsideDisplayIfNeeded = () => {
-    if (widget.allowOutsideBounds) return
+    if (!isTopLevelWidget || widget.allowOutsideBounds) return
     const rect = {
       x: typeof widget.style.x === 'number' ? widget.style.x : 0,
       y: typeof widget.style.y === 'number' ? widget.style.y : 0,
@@ -924,7 +1239,20 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     snapInsideDisplayIfNeeded()
   }
 
-  const effectiveStyle = computeEffectiveStyle(widget, cssRules)
+  // Data List template (row 0) text substitution — a widget nested under a `dataList` shows its
+  // real `{{field}}`-substituted text here (using the same first-row data the read-only preview
+  // clones below it use), not the raw binding syntax; the Properties panel's own Text field still
+  // shows/edits the raw `{{...}}` source untouched, since it reads widget.text directly.
+  let renderWidget = widget
+  if (hasTemplateExpr(widget.text)) {
+    const dataListAncestor = findDataListAncestor(allWidgets, widget)
+    if (dataListAncestor) {
+      const rowData = firstDataListRow(dataListAncestor, dataSources, runtimeDataListItems)
+      renderWidget = { ...widget, text: evalTemplateTextPreview(widget.text as string, rowData, {}) }
+    }
+  }
+
+  const effectiveStyle = computeEffectiveStyle(widget, cssRules, themeCtx)
   // Rotation/scale are scoped to image/icon widgets only (LVGL's lv_img_set_angle/lv_img_set_zoom)
   // — see UiWidgetStyle's own comments for why these aren't general widget transforms.
   const isImageLike = widget.type === 'image' || widget.type === 'icon'
@@ -932,7 +1260,7 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   if (isImageLike && effectiveStyle.rotation) transformParts.push(`rotate(${effectiveStyle.rotation}deg)`)
   if (isImageLike && effectiveStyle.scale !== undefined && effectiveStyle.scale !== 1) transformParts.push(`scale(${effectiveStyle.scale})`)
   const css = mergeDefined(DEFAULT_VISUAL_CSS[widget.type] ?? {}, {
-    ...styleToCss(effectiveStyle),
+    ...styleToCss(effectiveStyle, esp32Preview),
     ...backgroundImageCss(effectiveStyle, assetsById),
     transform: transformParts.length > 0 ? transformParts.join(' ') : undefined
   })
@@ -943,6 +1271,7 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   const isDisabled = Boolean(widget.props.disabled)
 
   const outOfBounds =
+    isTopLevelWidget &&
     !widget.allowOutsideBounds &&
     !rectFitsDisplayShape(display, {
       x: typeof widget.style.x === 'number' ? widget.style.x : 0,
@@ -982,8 +1311,9 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
 
   return (
     <div {...commonProps}>
-      <WidgetInner widget={widget} simFocusedKeyId={isSimFocused ? simulatedFocusKeyId : null} />
+      <WidgetInner widget={renderWidget} simFocusedKeyId={isSimFocused ? simulatedFocusKeyId : null} />
       {CONTAINER_LIKE.has(widget.type) && widget.childIds.map((id) => <WidgetRenderer key={id} widgetId={id} />)}
+      {widget.type === 'dataList' && <DataListRepeatedRows dataListWidget={widget} />}
       {isSelected &&
         !widget.locked &&
         RESIZE_HANDLES.map(({ handle, cursor, style }) => (

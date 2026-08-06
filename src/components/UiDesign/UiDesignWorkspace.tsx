@@ -13,10 +13,11 @@ import { AssetManagerPanel } from './AssetManagerPanel'
 import { DisplaySettingsPanel } from './DisplaySettingsPanel'
 import { LogicPanel } from './LogicPanel'
 import { VariableManagerPanel } from './VariableManagerPanel'
+import { DataSourceManagerPanel } from './DataSourceManagerPanel'
 import { LvglCodePanel } from './LvglCodePanel'
 
 type LeftTab = 'toolbox' | 'layers'
-type RightTab = 'properties' | 'html' | 'css' | 'assets' | 'display' | 'logic' | 'variables'
+type RightTab = 'properties' | 'html' | 'css' | 'assets' | 'display' | 'logic' | 'variables' | 'dataSources'
 
 const LEFT_TABS: { value: LeftTab; label: string }[] = [
   { value: 'toolbox', label: 'Toolbox' },
@@ -29,6 +30,7 @@ const RIGHT_TABS: { value: RightTab; label: string }[] = [
   { value: 'css', label: 'CSS' },
   { value: 'logic', label: 'Logic' },
   { value: 'variables', label: 'Variables' },
+  { value: 'dataSources', label: 'Data Sources' },
   { value: 'assets', label: 'Assets' },
   { value: 'display', label: 'Display' }
 ]
@@ -108,6 +110,7 @@ export function UiDesignWorkspace({ toolbarActions }: { toolbarActions: ToolbarA
                 {rightTab === 'css' && <CssEditor />}
                 {rightTab === 'logic' && <LogicPanel />}
                 {rightTab === 'variables' && <VariableManagerPanel />}
+                {rightTab === 'dataSources' && <DataSourceManagerPanel />}
                 {rightTab === 'assets' && <AssetManagerPanel />}
                 {rightTab === 'display' && <DisplaySettingsPanel />}
               </div>
