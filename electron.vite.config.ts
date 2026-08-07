@@ -26,6 +26,14 @@ export default defineConfig({
         '@': resolve(__dirname, 'src')
       }
     },
+    // This repo lives under OneDrive, which dehydrates some node_modules/.vite/deps chunk files to
+    // cloud-only, so Vite fails with "The file does not exist ... which is in the optimize deps
+    // directory". force:true re-optimizes deps on every dev start instead of trusting that cache,
+    // which self-heals the error. (Real fix: pin node_modules to "Always keep on this device", or
+    // move the repo out of OneDrive — see README / IMPORTANT notes.)
+    optimizeDeps: {
+      force: true
+    },
     build: {
       rollupOptions: {
         input: resolve(__dirname, 'index.html')
