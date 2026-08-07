@@ -3375,7 +3375,13 @@ inline LiveEye eyesMirroredEyelid(const LiveEye& e) {
 template <typename T>
 inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& left, const LiveEye& right, uint16_t bgColor,
                              const EyeColorSet& leftColors, const EyeColorSet& rightColors) {
-  int16_t half = (int16_t)(left.distance / 2);
+  // Per-eye spacing: each eye is placed using ITS OWN distance, exactly like the studio's
+  // faceRenderer.ts (halfLeft = params.distance/2 for the left eye, halfRight = rightParams.distance/2
+  // for the right). A single shared half taken from the left eye would misplace the RIGHT eye
+  // whenever left/right distance diverge (independent per-eye animation), producing a studio<->device
+  // eye-spacing mismatch. In the common case (both eyes share one distance) halfLeft == halfRight.
+  int16_t halfLeft  = (int16_t)(left.distance / 2);
+  int16_t halfRight = (int16_t)(right.distance / 2);
   unsigned long stickersMs = millis();
   const StickerDef* activeStickers = nullptr;
   uint8_t activeStickerCount = 0;
@@ -3395,8 +3401,8 @@ inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const Li
   // so this single runtime check correctly covers every export path (a single shared EyeFrame, a
   // shared frames array, and genuinely-diverged per-eye data) with no export-time special-casing.
   LiveEye rightForDraw = eyesEyelidFieldsMatch(left, right) ? eyesMirroredEyelid(right) : right;
-  eyesDrawEye(gfx, screenCx - half + (int16_t)left.eyePosX, screenCy + (int16_t)left.eyePosY, left, false, bgColor, leftColors);
-  eyesDrawEye(gfx, screenCx + half - (int16_t)right.eyePosX, screenCy + (int16_t)right.eyePosY, rightForDraw, true, bgColor, rightColors);
+  eyesDrawEye(gfx, screenCx - halfLeft + (int16_t)left.eyePosX, screenCy + (int16_t)left.eyePosY, left, false, bgColor, leftColors);
+  eyesDrawEye(gfx, screenCx + halfRight - (int16_t)right.eyePosX, screenCy + (int16_t)right.eyePosY, rightForDraw, true, bgColor, rightColors);
   eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
   eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
 }
