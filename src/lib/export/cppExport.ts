@@ -3231,7 +3231,21 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   // was carried through the keyframe data (EyeFrame.rotation) but dropped entirely by
   // eyesLerpFrame()/eyesLerpLive() before ever reaching a draw call, so a tilted eye in the
   // studio rendered upright on real hardware regardless of this field's value.
+  // Rotation cost guard. The per-pixel rotation path below runs cosf/sinf PER PIXEL. On a chip
+  // with a hardware FPU (ESP32-S3, classic ESP32) that's fine. On a SOFT-FLOAT chip (ESP32-C6/C3:
+  // RISC-V with no FPU) each rotated frame takes ~1.8 s in software-emulated float, which freezes
+  // the whole animation. So: auto-force rotation OFF on soft-float RISC-V (tiny visual cost — the
+  // eye just doesn't tilt), keep it ON everywhere with an FPU. Override with -DEYES_NO_ROTATION
+  // (always off) or -DEYES_FORCE_ROTATION (always on).
+#if defined(EYES_NO_ROTATION)
+  float rotRad = 0.0f;
+#elif defined(EYES_FORCE_ROTATION)
   float rotRad = e.rotation * (mirror ? -1.0f : 1.0f) * (float)PI / 180.0f;
+#elif defined(__riscv) && !defined(__riscv_flen)   // RISC-V, no hardware float => ESP32-C6/C3
+  float rotRad = 0.0f;
+#else
+  float rotRad = e.rotation * (mirror ? -1.0f : 1.0f) * (float)PI / 180.0f;
+#endif
 
   // Glow — a soft halo bleeding outward past the eye's own edge (and past the border ring
   // below), drawn first so everything else paints over it. See eyesFillGlow()'s own comment
