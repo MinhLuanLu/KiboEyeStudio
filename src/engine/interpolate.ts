@@ -1,5 +1,6 @@
-import type { Animation, EyeParams, EyeSide, Keyframe } from '@/types'
-import { PUPIL_TRACK_FIELDS, EYELID_TRACK_FIELDS, SHAPE_TRACK_FIELDS, keyframeParamsFor } from '@/types'
+import type { Animation, EyeColors, EyeParams, EyeSide, Keyframe } from '@/types'
+import { PUPIL_TRACK_FIELDS, EYELID_TRACK_FIELDS, SHAPE_TRACK_FIELDS, keyframeParamsFor, keyframeColors } from '@/types'
+import { mixColors } from '@/lib/color'
 import { applyEasing } from './easing'
 
 const EYE_PARAM_KEYS = [
@@ -41,6 +42,8 @@ const EYE_PARAM_KEYS = [
   'lowerEyelidSmoothness',
   'upperEyelidTension',
   'lowerEyelidTension',
+  'upperEyelidThickness',
+  'lowerEyelidThickness',
   'highlightX',
   'highlightY',
   'highlightSize',
@@ -193,6 +196,57 @@ export function sampleAnimationEye(anim: Animation, timeMs: number, eye: 'left' 
     for (const field of SHAPE_TRACK_FIELDS) (merged as unknown as Record<string, unknown>)[field] = (side.params as unknown as Record<string, unknown>)[field]
   }
   return merged
+}
+
+const COLOR_HEX_KEYS = ['sclera', 'iris', 'pupil', 'highlight', 'shadow', 'glow', 'border', 'upperEyelidColor', 'lowerEyelidColor'] as const satisfies readonly (keyof EyeColors)[]
+const COLOR_NUM_KEYS = ['shadowIntensity', 'glowIntensity', 'borderOpacity', 'borderWidth', 'pupilOpacity', 'eyeShapeOpacity', 'upperEyelidOpacity', 'lowerEyelidOpacity'] as const satisfies readonly (keyof EyeColors)[]
+
+/** Interpolates one EyeColors toward another: hex fields blend in RGB (mixColors), the numeric
+ * intensity/opacity/width fields lerp linearly, and the two boolean layer-state flags step at
+ * the midpoint (a boolean has no meaningful halfway value — same convention lerpParams() uses
+ * for its non-numeric fields). Only ever used by the studio preview; the firmware export keeps
+ * baking the single shared base palette (see Keyframe.colors' own note). */
+export function lerpColors(a: EyeColors, b: EyeColors, t: number): EyeColors {
+  const out = {} as EyeColors
+  for (const key of COLOR_HEX_KEYS) out[key] = mixColors(a[key], b[key], t)
+  for (const key of COLOR_NUM_KEYS) out[key] = a[key] + (b[key] - a[key]) * t
+  out.effectsVisible = t < 0.5 ? a.effectsVisible : b.effectsVisible
+  out.effectsLocked = t < 0.5 ? a.effectsLocked : b.effectsLocked
+  return out
+}
+
+/** Samples the pose ("Expression") track's per-keyframe colors at `timeMs`, interpolating
+ * between adjacent keyframes' effective palettes (each keyframe's own `colors`, or `base` when
+ * it has none — see keyframeColors()). Mirrors sampleTrack()'s segment/loop-back logic and
+ * honors each segment's easing, so color transitions animate in lock-step with the shape the
+ * same keyframes drive. Fast-paths to `base` when the track has no keyframes, or when NO
+ * keyframe carries its own colors — so every pre-existing animation (none of whose keyframes
+ * had a colors field) plays back with exactly the old flat base palette, unchanged. */
+export function sampleAnimationColors(anim: Animation, timeMs: number, base: EyeColors): EyeColors {
+  const kfs = anim.keyframes
+  if (kfs.length === 0 || !kfs.some((k) => k.colors)) return base
+  const at = (kf: Keyframe): EyeColors => keyframeColors(kf, base)
+  if (kfs.length === 1) return at(kfs[0])
+
+  const t = wrapMs(timeMs, anim.durationMs, anim.loop)
+  const last = kfs[kfs.length - 1]
+  if (t <= kfs[0].timeMs) return at(kfs[0])
+
+  for (let i = 0; i < kfs.length - 1; i++) {
+    const from = kfs[i]
+    const to = kfs[i + 1]
+    if (t <= to.timeMs) {
+      const span = Math.max(1, to.timeMs - from.timeMs)
+      const localT = Math.min(1, Math.max(0, (t - from.timeMs) / span))
+      return lerpColors(at(from), at(to), applyEasing(localT, from.easing, from.customBezier))
+    }
+  }
+
+  if (!anim.loop || anim.durationMs <= last.timeMs) return at(last)
+
+  const span = Math.max(1, anim.durationMs - last.timeMs)
+  const localT = Math.min(1, Math.max(0, (t - last.timeMs) / span))
+  return lerpColors(at(last), at(kfs[0]), applyEasing(localT, last.easing, last.customBezier))
 }
 
 /** Total playable duration of an animation in ms. Back-compat thin wrapper — `durationMs` is

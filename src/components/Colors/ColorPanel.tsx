@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { useStore } from '@/state/store'
-import { DEFAULT_EYE_COLORS, effectiveEyeColors, effectiveVisualReferenceColors, EYE_COLOR_RANGES } from '@/types'
+import { useStore, getActiveAnimation } from '@/state/store'
+import { DEFAULT_EYE_COLORS, effectiveEyeColors, effectiveVisualReferenceColors, keyframeColors, EYE_COLOR_RANGES } from '@/types'
 import type { EyeColors } from '@/types'
 import { ColorField } from '@/components/ui/ColorField'
 import { Slider } from '@/components/ui/Slider'
@@ -22,11 +22,37 @@ const COLOR_TABS: { value: ColorTab; label: string }[] = [
 export function ColorPanel({ editTarget = 'live' }: { editTarget?: 'live' | 'visual-reference' }) {
   const project = useStore((s) => s.project)
   const eyeTarget = useStore((s) => s.eyeTarget)
-  const colors = editTarget === 'visual-reference' ? effectiveVisualReferenceColors(project.visualReference, eyeTarget) : effectiveEyeColors(project, eyeTarget)
+  const mode = useStore((s) => s.mode)
+  const timelineSelection = useStore((s) => s.timelineSelection)
+  const anim = useStore(() => getActiveAnimation())
   const setColorLive = useStore((s) => s.setColor)
   const setVisualReferenceColor = useStore((s) => s.setVisualReferenceColor)
-  const setColor = editTarget === 'visual-reference' ? setVisualReferenceColor : setColorLive
+  const updateTrackKeyframeColors = useStore((s) => s.updateTrackKeyframeColors)
   const checkpoint = useStore((s) => s.checkpoint)
+
+  // Which single pose ("Expression") track keyframe (if any) the Timeline currently has
+  // selected — colors live only on the pose track (see Keyframe.colors), so a leftEye/pupils/
+  // eyelids/sticker selection doesn't route color here (it keeps editing the base palette, same
+  // as before). While one IS selected, every field below reads that keyframe's own palette and
+  // writes only to it via updateTrackKeyframeColors, so changing a color affects that keyframe
+  // alone instead of the whole project.
+  const selectedPoseKeyframe =
+    editTarget === 'live' && mode === 'animate' && timelineSelection.length === 1 && timelineSelection[0].kind === 'keyframe' && timelineSelection[0].trackId === 'pose' && anim
+      ? anim.keyframes.find((k) => k.id === timelineSelection[0].id)
+      : undefined
+
+  const colors: EyeColors =
+    editTarget === 'visual-reference'
+      ? effectiveVisualReferenceColors(project.visualReference, eyeTarget)
+      : selectedPoseKeyframe
+        ? keyframeColors(selectedPoseKeyframe, project.colors)
+        : effectiveEyeColors(project, eyeTarget)
+
+  const setColor = <K extends keyof EyeColors>(key: K, value: EyeColors[K]) => {
+    if (editTarget === 'visual-reference') setVisualReferenceColor(key, value)
+    else if (selectedPoseKeyframe) updateTrackKeyframeColors(selectedPoseKeyframe.id, { [key]: value } as Partial<EyeColors>)
+    else setColorLive(key, value)
+  }
 
   const [tab, setTab] = useState<ColorTab>('colors')
 
@@ -58,12 +84,22 @@ export function ColorPanel({ editTarget = 'live' }: { editTarget?: 'live' | 'vis
           <div className="text-xs bg-studio-accent/15 text-studio-accent border border-studio-accent/40 rounded-md px-2 py-1.5">
             Editing the Visual Reference's default colors — {eyeTarget === 'both' ? 'Both Eyes' : eyeTarget === 'left' ? 'Left Eye' : 'Right Eye'}
           </div>
+        ) : selectedPoseKeyframe ? (
+          <div className="flex flex-col gap-1">
+            <div className="text-xs bg-studio-accent/15 text-studio-accent border border-studio-accent/40 rounded-md px-2 py-1.5">
+              Editing selected keyframe color — {Math.round(selectedPoseKeyframe.timeMs)}ms
+            </div>
+            <p className="text-[11px] text-studio-muted">
+              Only this keyframe changes; the preview interpolates color between keyframes. Firmware export still uses the
+              project's base palette.
+            </p>
+          </div>
         ) : (
           <p className="text-xs text-studio-muted leading-relaxed">
             Customize every layer of the eye. Changes preview live on the round display.
           </p>
         )}
-        <EyeTargetSelector />
+        {!selectedPoseKeyframe && <EyeTargetSelector />}
       </div>
 
       <PanelTabs tabs={COLOR_TABS} active={tab} onChange={setTab} />

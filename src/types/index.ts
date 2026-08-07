@@ -130,6 +130,13 @@ export interface EyeParams {
    * center height (see eyelidTaper()'s `tension`). UI label "Tension". */
   upperEyelidTension: number
   lowerEyelidTension: number
+  /** 0-20px: optional soft rim/crease line stroked along each eyelid's curved edge (the lid's
+   * own Color, slightly darkened). 0 (default) = no rim, i.e. today's clean edge. Surfaced as the
+   * "Thickness" control in the simplified Upper/Lower Eyelid panels. Animatable/interpolated like
+   * every other eyelid field; studio preview only (the ESP32 export ignores it, same as the
+   * eyelid color/opacity — see cppExport.ts). */
+  upperEyelidThickness: number
+  lowerEyelidThickness: number
   /** Layers-panel visibility/lock for the Upper/Lower Eyelid layers — see the comment on
    * eyeShapeVisible above. visible=false renders as if this lid's coverage were 0 without
    * discarding the actual authored eyelid settings (a real, exported behavior). */
@@ -216,6 +223,19 @@ export interface EyeColors {
    * Stroke Color, which the Eye Shape panel surfaces from sclera/border directly). Pre-blended
    * against the background at export time, same pattern as pupilOpacity/borderOpacity. */
   eyeShapeOpacity: number
+  /** Per-eyelid fill color, surfaced in the simplified Upper/Lower Eyelid panels. The eyelid is
+   * an OCCLUDING fill (it hides the part of the eye it covers, which is what makes a blink read
+   * as the lid closing over the eye), so the default is `#000000` to match the display's black
+   * background — a lid at the default color simply blacks out what it covers, exactly like the
+   * old hardcoded fill did. Setting a non-background color makes a visibly-tinted lid; lowering
+   * `…Opacity` lets the covered eye show through. Studio preview only — the ESP32 export keeps
+   * drawing eyelids as pure background occlusion (see cppExport.ts), so these two aren't emitted. */
+  upperEyelidColor: string
+  lowerEyelidColor: string
+  /** 0-100 opacity for each eyelid's fill (and its Thickness rim). 100 = fully occluding (today's
+   * behavior). Studio preview only, same as the eyelid colors above. */
+  upperEyelidOpacity: number
+  lowerEyelidOpacity: number
   /** Layers-panel visibility/lock for the Effects layer (glow+shadow together) — see the comment
    * on EyeParams.eyeShapeVisible. visible=false renders as if glowIntensity/shadowIntensity were
    * 0 without discarding their actual values (composes with the existing "0 = off" convention
@@ -288,6 +308,8 @@ export const EYELID_TRACK_FIELDS: (keyof EyeParams)[] = [
   'lowerEyelidSmoothness',
   'upperEyelidTension',
   'lowerEyelidTension',
+  'upperEyelidThickness',
+  'lowerEyelidThickness',
   'upperEyelidVisible',
   'lowerEyelidVisible',
   'upperEyelidLocked',
@@ -346,6 +368,19 @@ export interface Keyframe {
    * Fields NOT listed here track the project's Visual Reference and get overwritten whenever
    * it's applied. See STYLE_EYE_PARAM_FIELDS and computeStyleOverrides below. */
   styleOverrides: string[]
+  /** Per-keyframe color palette, `null`/absent meaning "no color of its own, inherit the
+   * project's shared base palette (Project.colors)". Only meaningful on pose ("Expression")
+   * track keyframes — colors are a whole-eye concern, not split across the pupils/eyelids/
+   * left/right shape tracks, so those tracks never carry one. This is what lets a single
+   * keyframe hold "Color: Red" independently of its neighbors; the animation preview
+   * interpolates between adjacent keyframes' effective colors (see sampleAnimationColors in
+   * engine/interpolate.ts), while any keyframe left at `null` simply tracks the base palette.
+   * Deliberately optional so every pre-existing keyframe literal (builtin animations, older
+   * saved files) stays valid without a colors field — an absent value reads exactly like
+   * `null` everywhere via keyframeColors(). NOTE: the ESP32 C++ export still bakes the single
+   * shared base palette (colors were never exported per-keyframe); per-keyframe color animates
+   * in the studio preview only. */
+  colors?: EyeColors | null
   /** Set only on pose-track keyframes created by dragging a saved Expression onto the
    * Expression track. Identifies which Expression this clip represents; `linked: true` means
    * it's still considered a live reference to that Expression (Phase 2 provides a "refresh
@@ -624,7 +659,11 @@ export const STYLE_EYE_COLOR_FIELDS: (keyof EyeColors)[] = [
   'borderOpacity',
   'borderWidth',
   'pupilOpacity',
-  'eyeShapeOpacity'
+  'eyeShapeOpacity',
+  'upperEyelidColor',
+  'lowerEyelidColor',
+  'upperEyelidOpacity',
+  'lowerEyelidOpacity'
 ]
 
 export interface VisualReferenceStyle {
@@ -1015,6 +1054,8 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   lowerEyelidSmoothness: 70,
   upperEyelidTension: 30,
   lowerEyelidTension: 30,
+  upperEyelidThickness: 0,
+  lowerEyelidThickness: 0,
   upperEyelidVisible: true,
   lowerEyelidVisible: true,
   upperEyelidLocked: false,
@@ -1038,6 +1079,10 @@ export const DEFAULT_EYE_COLORS: EyeColors = {
   borderWidth: 3,
   pupilOpacity: 100,
   eyeShapeOpacity: 100,
+  upperEyelidColor: '#000000',
+  lowerEyelidColor: '#000000',
+  upperEyelidOpacity: 100,
+  lowerEyelidOpacity: 100,
   effectsVisible: true,
   effectsLocked: false
 }
@@ -1048,7 +1093,9 @@ export const EYE_COLOR_RANGES = {
   borderOpacity: [0, 100] as [number, number],
   borderWidth: [0, 12] as [number, number],
   pupilOpacity: [0, 100] as [number, number],
-  eyeShapeOpacity: [0, 100] as [number, number]
+  eyeShapeOpacity: [0, 100] as [number, number],
+  upperEyelidOpacity: [0, 100] as [number, number],
+  lowerEyelidOpacity: [0, 100] as [number, number]
 }
 
 export function defaultVisualReference(): VisualReferenceStyle {
@@ -1156,8 +1203,8 @@ export const EYE_PARAM_RANGES: Record<
   upperEyelidRightRoundness: [0, 100],
   lowerEyelidLeftRoundness: [0, 100],
   lowerEyelidRightRoundness: [0, 100],
-  upperEyelidStretchX: [0, 100],
-  lowerEyelidStretchX: [0, 100],
+  upperEyelidStretchX: [0, 200],
+  lowerEyelidStretchX: [0, 200],
   upperEyelidStretchY: [0, 200],
   lowerEyelidStretchY: [0, 200],
   upperEyelidSkew: [-100, 100],
@@ -1170,6 +1217,8 @@ export const EYE_PARAM_RANGES: Record<
   lowerEyelidSmoothness: [0, 100],
   upperEyelidTension: [0, 100],
   lowerEyelidTension: [0, 100],
+  upperEyelidThickness: [0, 20],
+  lowerEyelidThickness: [0, 20],
   highlightX: [-40, 40],
   highlightY: [-40, 40],
   highlightSize: [0, 60],
@@ -1302,6 +1351,15 @@ export function keyframeParamsFor(kf: Keyframe, side: EyeSide): EyeParams {
   if (side === 'left') return kf.leftParams ?? kf.params
   if (side === 'right') return kf.rightParams ?? kf.params
   return kf.params
+}
+
+/** Resolves a keyframe's effective color palette — its own per-keyframe `colors` when set,
+ * otherwise the shared base palette passed in (`Project.colors`). The one place the
+ * "null/absent means inherit base" convention for Keyframe.colors is spelled out, used by both
+ * the animation color sampler (sampleAnimationColors) and the Colors panel's read/write of a
+ * selected keyframe. */
+export function keyframeColors(kf: Keyframe, base: EyeColors): EyeColors {
+  return kf.colors ?? base
 }
 
 export function expressionLeftParams(e: Expression): EyeParams {

@@ -200,6 +200,8 @@ export function drawEye(
     lowerEyelidSmoothness,
     upperEyelidTension,
     lowerEyelidTension,
+    upperEyelidThickness,
+    lowerEyelidThickness,
     upperEyelidVisible,
     lowerEyelidVisible,
     highlightX,
@@ -418,7 +420,9 @@ export function drawEye(
   // whatever height the curve's own edge sits at — hard-coding them to yBase, like the old
   // formula could get away with, would draw a visible seam whenever an edge's roundness is
   // nonzero, since the curve would start partway up/down from where the wall left off.
-  ctx.fillStyle = '#000000'
+  // Per-lid Color + Opacity replace the old hardcoded '#000000' occlusion (default #000000/100%
+  // reproduces it exactly). The curved edge is drawn as a smooth Catmull-Rom spline (not straight
+  // lineTo segments) so it reads as one continuous arc with no visible facets at any openness.
   const lidMargin = (width + height) * 2 // generous: keeps the lid's flat sides covering fully even after a 45° shear
   const halfW = width / 2
   const curveSamples = Math.max(32, Math.ceil(width))
@@ -446,6 +450,74 @@ export function drawEye(
     }
   }
 
+  // Extends the current subpath through `pts` as a Catmull-Rom spline (converted to cubic
+  // Béziers) — passes exactly through every sampled taper point while staying C1-continuous, so
+  // the lid edge has no straight-segment facets even when few samples land inside the eye. The
+  // end points clamp their virtual neighbors so both ends stay smooth.
+  function curveThroughPoints(pts: [number, number][]) {
+    if (pts.length === 0) return
+    ctx.lineTo(pts[0][0], pts[0][1])
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i === 0 ? 0 : i - 1]
+      const p1 = pts[i]
+      const p2 = pts[i + 1]
+      const p3 = pts[i + 2 < pts.length ? i + 2 : pts.length - 1]
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6
+      const c1y = p1[1] + (p2[1] - p0[1]) / 6
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6
+      const c2y = p2[1] - (p3[1] - p1[1]) / 6
+      ctx.bezierCurveTo(c1x, c1y, c2x, c2y, p2[0], p2[1])
+    }
+  }
+
+  function drawEyelid(
+    sign: 1 | -1,
+    yBase: number,
+    curveOffset: number,
+    slope: number,
+    shape: EyelidCurveShape,
+    centerYPct: number,
+    thickness: number,
+    color: string,
+    opacityPct: number
+  ) {
+    const { pts, edgeYLeft, edgeYRight } = eyelidCurvePoints(yBase, curveOffset, sign, shape, centerYPct)
+    // Defensive fallbacks: a theme that predates the per-lid Color/Opacity fields (e.g. a project
+    // object still in memory from before those fields existed) would hand us `undefined`/`NaN`
+    // here, which would set fillStyle to nothing and globalAlpha to NaN — silently drawing no lid
+    // at all. Fall back to the original hardcoded occlusion (#000000, fully opaque) so the eyelid
+    // always renders, matching the pre-Color/Opacity behavior exactly.
+    const fillColor = typeof color === 'string' && color ? color : '#000000'
+    const alpha = Number.isFinite(opacityPct) ? Math.max(0, Math.min(1, opacityPct / 100)) : 1
+    const rim = Number.isFinite(thickness) ? thickness : 0
+    const wallY = sign === 1 ? -lidMargin : lidMargin
+    ctx.save()
+    ctx.transform(1, slope, 0, 1, 0, 0)
+    ctx.globalAlpha = alpha
+    ctx.fillStyle = fillColor
+    ctx.beginPath()
+    ctx.moveTo(-lidMargin, wallY)
+    ctx.lineTo(lidMargin, wallY)
+    ctx.lineTo(lidMargin, edgeYRight)
+    curveThroughPoints(pts)
+    ctx.lineTo(-lidMargin, edgeYLeft)
+    ctx.closePath()
+    ctx.fill()
+    // Optional soft rim/crease line along the curved edge (the lid's Thickness control).
+    if (rim > 0 && pts.length > 1) {
+      ctx.lineWidth = rim
+      ctx.lineJoin = 'round'
+      ctx.lineCap = 'round'
+      ctx.strokeStyle = shadeColor(fillColor, -35)
+      ctx.beginPath()
+      ctx.moveTo(pts[0][0], pts[0][1])
+      curveThroughPoints(pts)
+      ctx.stroke()
+    }
+    ctx.globalAlpha = 1
+    ctx.restore()
+  }
+
   if (upperEyelidVisible && upperEyelid > 0) {
     const coverage = (upperEyelid / 100) * height
     const yBase = -height / 2 + coverage
@@ -460,18 +532,7 @@ export function drawEye(
       smoothness: upperEyelidSmoothness,
       tension: upperEyelidTension
     }
-    const { pts, edgeYLeft, edgeYRight } = eyelidCurvePoints(yBase, curveOffset, 1, shape, upperEyelidCenterY)
-    ctx.save()
-    ctx.transform(1, slope, 0, 1, 0, 0)
-    ctx.beginPath()
-    ctx.moveTo(-lidMargin, -lidMargin)
-    ctx.lineTo(lidMargin, -lidMargin)
-    ctx.lineTo(lidMargin, edgeYRight)
-    for (const [x, y] of pts) ctx.lineTo(x, y)
-    ctx.lineTo(-lidMargin, edgeYLeft)
-    ctx.closePath()
-    ctx.fill()
-    ctx.restore()
+    drawEyelid(1, yBase, curveOffset, slope, shape, upperEyelidCenterY, upperEyelidThickness, theme.upperEyelidColor, theme.upperEyelidOpacity)
   }
   if (lowerEyelidVisible && lowerEyelid > 0) {
     const coverage = (lowerEyelid / 100) * height
@@ -487,18 +548,7 @@ export function drawEye(
       smoothness: lowerEyelidSmoothness,
       tension: lowerEyelidTension
     }
-    const { pts, edgeYLeft, edgeYRight } = eyelidCurvePoints(yBase, curveOffset, -1, shape, lowerEyelidCenterY)
-    ctx.save()
-    ctx.transform(1, slope, 0, 1, 0, 0)
-    ctx.beginPath()
-    ctx.moveTo(-lidMargin, lidMargin)
-    ctx.lineTo(lidMargin, lidMargin)
-    ctx.lineTo(lidMargin, edgeYRight)
-    for (const [x, y] of pts) ctx.lineTo(x, y)
-    ctx.lineTo(-lidMargin, edgeYLeft)
-    ctx.closePath()
-    ctx.fill()
-    ctx.restore()
+    drawEyelid(-1, yBase, curveOffset, slope, shape, lowerEyelidCenterY, lowerEyelidThickness, theme.lowerEyelidColor, theme.lowerEyelidOpacity)
   }
 
   ctx.restore()

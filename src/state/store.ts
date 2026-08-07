@@ -75,7 +75,7 @@ import { builtinAnimations } from '@/data/builtinAnimations'
 import { MATERIAL_PRESETS } from '@/lib/uiDesign/materialPresets'
 import { DEFAULT_CUSTOM_THEME_TOKENS } from '@/lib/uiDesign/themes'
 import { builtinExpressions } from '@/data/builtinExpressions'
-import { MIN_SEGMENT_MS, animationDuration, sampleAnimationEye, sampleTrack } from '@/engine/interpolate'
+import { MIN_SEGMENT_MS, animationDuration, sampleAnimationColors, sampleAnimationEye, sampleTrack } from '@/engine/interpolate'
 import { computeComboTimeline, loopCountForDuration } from '@/engine/comboPlayback'
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
 import { STICKER_PRESET_BUNDLES } from '@/data/stickerPresets'
@@ -338,6 +338,17 @@ interface StoreState {
    * frame-boundaries. Holding Alt during a drag disables snapping for that gesture only,
    * without touching this. Session-only, like the rest of this block. */
   snappingEnabled: boolean
+  /** Snap grid granularity in ms while snapping is enabled: 0 = snap to frame boundaries (the
+   * default), or a fixed interval (10/25/50/100ms) chosen from the Timeline's Snap menu. Clip/
+   * keyframe edges and the playhead are always snap targets on top of this; Alt still disables
+   * snapping for a single drag. Session-only, like snappingEnabled above. */
+  snapIntervalMs: number
+
+  /** 0-1 transient "blink preview" amount for Design mode only — the Eyelids panel's Preview
+   * Blink button animates this 0→1→0 and PreviewCanvas lerps both lids' coverage toward fully
+   * closed by this fraction WITHOUT mutating any params (purely a live preview, never saved,
+   * never in undo). 0 = show the real authored pose. Session-only, like the block above. */
+  eyelidPreviewClose: number
 
   /** Which eye(s) setEyeParam/setEyeParams/setColor currently write to. Switching this
    * alone never mutates the project — only a subsequent edit does. */
@@ -533,6 +544,8 @@ interface StoreState {
   toggleTimelineSelection: (item: SelectionItem, additive: boolean) => void
   clearTimelineSelection: () => void
   setSnappingEnabled: (enabled: boolean) => void
+  setSnapIntervalMs: (intervalMs: number) => void
+  setEyelidPreviewClose: (amount: number) => void
 
   /** Sets the active animation's total duration directly, clamping so it never cuts off
    * existing keyframes, sticker clips, or markers. This is the whole-timeline "ms" input
@@ -554,6 +567,12 @@ interface StoreState {
    * modes write through while a keyframe is selected — it never creates a new keyframe or
    * track; Both Eyes keeps writing straight to `params` via updateTrackKeyframeParams above. */
   updateTrackKeyframeEyeParams: (trackKind: KeyframeTrackKind, keyframeId: string, side: 'left' | 'right', partial: Partial<EyeParams>) => void
+  /** Writes into a pose ("Expression") track keyframe's own `colors` palette (see
+   * Keyframe.colors), lazy-cloning from the project's shared base palette on first use so an
+   * untouched keyframe starts from exactly what it was already showing. This is what the Colors
+   * panel writes through while a pose keyframe is selected, so changing color affects only that
+   * keyframe instead of the whole project. No-op for non-pose tracks (they carry no color). */
+  updateTrackKeyframeColors: (keyframeId: string, partial: Partial<EyeColors>) => void
   /** Continuous-drag primitive for a sticker clip's start/end handle. */
   resizeStickerClip: (stickerId: string, edge: 'start' | 'end', newMs: number) => void
   /** Continuous-drag primitive for a Combination clip's edge handle — the Timeline's combo-mode
@@ -1211,6 +1230,8 @@ export const useStore = create<StoreState>()(
     timelineSelection: [],
     timelineClipboard: [],
     snappingEnabled: true,
+    snapIntervalMs: 0,
+    eyelidPreviewClose: 0,
     eyeTarget: 'both',
 
     stickerScope: 'project',
@@ -2039,6 +2060,9 @@ export const useStore = create<StoreState>()(
           params: newParams,
           leftParams: null,
           rightParams: null,
+          // Inherit the neighboring keyframe's own color (if any) so an inserted keyframe keeps
+          // a color-animated segment continuous instead of snapping back to the base palette.
+          colors: prev?.colors ? { ...prev.colors } : null,
           styleOverrides: computeStyleOverrides(newParams, null, s.project.visualReference)
         }
         list.push(newKf)
@@ -2193,6 +2217,8 @@ export const useStore = create<StoreState>()(
       }),
 
     setSnappingEnabled: (enabled) => set((s) => void (s.snappingEnabled = enabled)),
+    setSnapIntervalMs: (intervalMs) => set((s) => void (s.snapIntervalMs = Math.max(0, intervalMs))),
+    setEyelidPreviewClose: (amount) => set((s) => void (s.eyelidPreviewClose = Math.max(0, Math.min(1, amount)))),
 
     setAnimationDuration: (durationMs) =>
       set((s) => {
@@ -2344,6 +2370,10 @@ export const useStore = create<StoreState>()(
             params: sample.params,
             leftParams: leftSample?.params ?? null,
             rightParams: rightSample?.params ?? null,
+            // Keep per-keyframe color continuous through a pose-track split — sample the
+            // interpolated palette at the split instant when any keyframe carries its own color,
+            // so splitting a color-animated segment doesn't snap it back to the base palette.
+            colors: trackKind === 'pose' && list.some((k) => k.colors) ? sampleAnimationColors(a, t, s.project.colors) : null,
             styleOverrides: computeStyleOverrides(sample.params, null, s.project.visualReference)
           }
           list.push(newKf)
@@ -2459,6 +2489,9 @@ export const useStore = create<StoreState>()(
           params,
           leftParams: null,
           rightParams: null,
+          // Match the color currently showing at this time (pose track only) so a new keyframe
+          // dropped into a color-animated stretch starts on-palette instead of snapping to base.
+          colors: trackKind === 'pose' && a.keyframes.some((k) => k.colors) ? sampleAnimationColors(a, clamped, s.project.colors) : null,
           styleOverrides: computeStyleOverrides(params, null, s.project.visualReference)
         }
         list.push(newKf)
@@ -2484,6 +2517,22 @@ export const useStore = create<StoreState>()(
         const key = side === 'left' ? 'leftParams' : 'rightParams'
         if (!kf[key]) kf[key] = { ...kf.params }
         Object.assign(kf[key]!, partial)
+        s.dirty = true
+      }),
+
+    updateTrackKeyframeColors: (keyframeId, partial) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        if (!a) return
+        // Color lives on the pose ("Expression") track only (see Keyframe.colors) — the other
+        // tracks carry no palette, so this is scoped to a.keyframes.
+        const kf = a.keyframes.find((k) => k.id === keyframeId)
+        if (!kf) return
+        // Lazy-clone from the shared base palette on first divergence, same pattern as
+        // updateTrackKeyframeEyeParams above: the first color edit snapshots the base palette the
+        // keyframe was already inheriting, then subsequent edits mutate that snapshot in place.
+        if (!kf.colors) kf.colors = { ...s.project.colors }
+        Object.assign(kf.colors, partial)
         s.dirty = true
       }),
 

@@ -1,6 +1,17 @@
 import { useState } from 'react'
 import type { Animation, TrackKind } from '@/types'
-import { msToFrame, MIN_PX_PER_MS, MAX_PX_PER_MS } from './timelineMath'
+import { msToFrame, steppedZoom, pxPerMsToPercent } from './timelineMath'
+
+/** The Snap menu's options — 'off' disables snapping, 'frame' snaps to frame boundaries (the
+ * default), and the numeric values snap to that fixed ms grid. */
+const SNAP_OPTIONS: { value: string; label: string }[] = [
+  { value: 'off', label: 'Snap: Off' },
+  { value: 'frame', label: 'Snap: Frame' },
+  { value: '10', label: 'Snap: 10ms' },
+  { value: '25', label: 'Snap: 25ms' },
+  { value: '50', label: 'Snap: 50ms' },
+  { value: '100', label: 'Snap: 100ms' }
+]
 
 const ADDABLE_FIXED_TRACKS: { kind: TrackKind; label: string }[] = [
   { kind: 'leftEye', label: 'Left Eye' },
@@ -25,7 +36,9 @@ interface TimelineToolbarProps {
   onZoomChange: (pxPerMs: number) => void
   onZoomToFit: () => void
   snappingEnabled: boolean
-  onToggleSnapping: () => void
+  snapIntervalMs: number
+  /** Called with the chosen Snap menu value ('off' | 'frame' | '10' | '25' | '50' | '100'). */
+  onSnapChange: (mode: string) => void
   /** Fixed track kinds already present on the active animation — hidden from the "+ Track"
    * menu so it only ever offers tracks that don't exist yet (each fixed kind is a singleton). */
   existingTrackKinds: Set<TrackKind>
@@ -62,7 +75,8 @@ export function TimelineToolbar({
   onZoomChange,
   onZoomToFit,
   snappingEnabled,
-  onToggleSnapping,
+  snapIntervalMs,
+  onSnapChange,
   existingTrackKinds,
   onAddTrack,
   onAddKeyframe,
@@ -229,26 +243,30 @@ export function TimelineToolbar({
       )}
 
       <div className="flex items-center gap-1.5">
-        <button
-          className={`studio-btn px-2 py-1 ${snappingEnabled ? 'text-studio-accent border-studio-accent' : ''}`}
-          onClick={onToggleSnapping}
-          title="Toggle snapping (hold Alt during a drag to disable temporarily)"
+        <select
+          className={`bg-studio-panel2 border rounded px-1.5 py-1 text-xs ${snappingEnabled ? 'text-studio-accent border-studio-accent' : 'border-studio-border text-studio-muted'}`}
+          value={snappingEnabled ? (snapIntervalMs > 0 ? String(snapIntervalMs) : 'frame') : 'off'}
+          onChange={(e) => onSnapChange(e.target.value)}
+          title="Snapping granularity (hold Alt during a drag to disable temporarily)"
         >
-          Snap
-        </button>
+          {SNAP_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
         <button className="studio-btn px-2 py-1" onClick={onZoomToFit} title="Zoom to fit">
           Fit
         </button>
-        <input
-          type="range"
-          className="studio-input-range w-24"
-          min={MIN_PX_PER_MS}
-          max={MAX_PX_PER_MS}
-          step={0.001}
-          value={pxPerMs}
-          onChange={(e) => onZoomChange(Number(e.target.value))}
-          title="Zoom"
-        />
+        <div className="flex items-center gap-0.5" title="Zoom (Ctrl + mouse wheel over the timeline)">
+          <button className="studio-btn px-2 py-1" onClick={() => onZoomChange(steppedZoom(pxPerMs, 'out'))} title="Zoom out">
+            −
+          </button>
+          <span className="font-mono text-studio-muted w-14 text-center tabular-nums">{pxPerMsToPercent(pxPerMs)}%</span>
+          <button className="studio-btn px-2 py-1" onClick={() => onZoomChange(steppedZoom(pxPerMs, 'in'))} title="Zoom in">
+            +
+          </button>
+        </div>
       </div>
     </div>
   )

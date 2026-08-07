@@ -243,6 +243,9 @@ function normalizeKeyframeList(raw: unknown, visualReference: VisualReferenceSty
       params,
       leftParams: normalizeEyeParamsOverride(k.leftParams as Partial<EyeParams> | null | undefined),
       rightParams: normalizeEyeParamsOverride(k.rightParams as Partial<EyeParams> | null | undefined),
+      // Per-keyframe color (pose track only). Absent in every pre-existing save — stays null
+      // (= inherit the shared base palette), so migrated projects animate exactly as before.
+      colors: normalizeEyeColorsOverride(k.colors as Partial<EyeColors> | null | undefined),
       styleOverrides
     }
     if (typeof k.sourceExpressionId === 'string') keyframe.sourceExpressionId = k.sourceExpressionId

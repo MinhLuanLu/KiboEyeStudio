@@ -1462,8 +1462,11 @@ inline float eyesEyelidTaper(float u, float leftRoundFrac, float rightRoundFrac,
                               float centerXFrac, float widthFrac, float smoothFrac, float tensionFrac) {
   float centerH = 1.0f - centerDepthFrac;
   float cx = centerXFrac * 0.9f;
+  // widthFrac can exceed 1.0 now (Curve Width up to 200%): flatFrac goes negative on purpose,
+  // pushing the transition shoulder past the eye edge for a broader, flatter-topped curve. Only
+  // the upper 0.85 cap remains (keeps the flat-shoulder side's transition zone nonzero); the old
+  // "flatFrac below 0 becomes 0" clamp is gone so this stays identical to eyelidCurve.ts.
   float flatFrac = 1.0f - widthFrac;
-  if (flatFrac < 0.0f) flatFrac = 0.0f;
   if (flatFrac > 0.85f) flatFrac = 0.85f;
 
   float uc = u < -1.0f ? -1.0f : (u > 1.0f ? 1.0f : u);
@@ -1880,7 +1883,9 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
 
   float leftRoundFrac = leftRoundnessPct < 0 ? 0 : (leftRoundnessPct > 100 ? 1.0f : leftRoundnessPct / 100.0f);
   float rightRoundFrac = rightRoundnessPct < 0 ? 0 : (rightRoundnessPct > 100 ? 1.0f : rightRoundnessPct / 100.0f);
-  float widthFrac = stretchXPct < 0 ? 0 : (stretchXPct > 100 ? 1.0f : stretchXPct / 100.0f);
+  // Curve Width is now 0..200 (see eyelidCurve.ts): >100 is intentionally NOT clamped here, so
+  // widthFrac can exceed 1.0 and eyesEyelidTaper()'s flatFrac goes negative (broader/flatter arc).
+  float widthFrac = stretchXPct < 0 ? 0 : stretchXPct / 100.0f;
   float skewFrac = skewPct < -100 ? -1.0f : (skewPct > 100 ? 1.0f : skewPct / 100.0f);
   float centerDepthFrac = centerDepthPct < 0 ? 0 : (centerDepthPct > 100 ? 1.0f : centerDepthPct / 100.0f);
   float smoothFrac = smoothnessPct < 0 ? 0 : (smoothnessPct > 100 ? 1.0f : smoothnessPct / 100.0f);
@@ -3804,7 +3809,7 @@ struct EyeFrame {
   int8_t upperEyelidCurvature, lowerEyelidCurvature; // -100 (inward) to 100 (outward), 0 = flat
   uint8_t upperEyelidLeftRoundness, upperEyelidRightRoundness; // 0-100 each, independent per end (see EyeParams.upperEyelidLeftRoundness's own comment in the studio)
   uint8_t lowerEyelidLeftRoundness, lowerEyelidRightRoundness; // 0-100 each
-  uint8_t upperEyelidStretchX, lowerEyelidStretchX; // 0-100
+  uint8_t upperEyelidStretchX, lowerEyelidStretchX; // 0-200 (Curve Width; >100 = broader/flatter arc; fits uint8_t)
   uint8_t upperEyelidStretchY, lowerEyelidStretchY; // 0-200
   int8_t upperEyelidSkew, lowerEyelidSkew; // -100..100, "Center Position X" — see eyesEyelidTaper()
   uint8_t upperEyelidCenterDepth, lowerEyelidCenterDepth; // 0-100

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useStore, getActiveAnimation, isComboTimelineActive } from '@/state/store'
 import type { KeyframeTrackKind } from '@/state/store'
 import type { Animation, SelectionItem, TrackKind } from '@/types'
@@ -8,11 +8,10 @@ import { TimelineRuler } from './TimelineRuler'
 import { TrackRow, type ComboClipLayout } from './TrackRow'
 import { TimelineInspector } from './TimelineInspector'
 import {
-  MIN_PX_PER_MS,
-  MAX_PX_PER_MS,
   TRACK_HEADER_WIDTH_PX,
   TRACK_ROW_HEIGHT_PX,
   computeFitPxPerMs,
+  clampPxPerMs,
   msToFrame,
   pxToMs,
   buildSnapCandidates,
@@ -21,6 +20,14 @@ import {
 
 const RULER_HEIGHT_PX = 24
 const SNAP_TOLERANCE_PX = 8
+/** Pixels the pointer must travel after pressing a keyframe/clip before it starts moving —
+ * a plain click (below this) only selects, so keyframes never shift when the user just meant
+ * to select one. */
+const DRAG_THRESHOLD_PX = 5
+/** Auto-scroll while dragging: how close (px) to the visible track area's left/right edge the
+ * pointer must get before the timeline starts scrolling, and the max scroll speed (px/frame). */
+const EDGE_SCROLL_ZONE_PX = 44
+const EDGE_SCROLL_MAX_PX = 22
 
 function keyframeListForKind(anim: Animation, trackKind: KeyframeTrackKind) {
   switch (trackKind) {
@@ -110,6 +117,14 @@ interface DragState {
   startClientX: number
   startClientY: number
   anchorTimeMs: number
+  /** False until the pointer has passed DRAG_THRESHOLD_PX — a move drag applies nothing (and
+   * takes no undo checkpoint) while unarmed, so a click that never crosses the threshold is a
+   * pure selection. Resize/marquee arm immediately (deliberate handle/box gestures). */
+  armed: boolean
+  /** Last committed snapped time for a multi-select move — moveSelectionByDelta is applied as
+   * the *increment* since this value (not the total since drag start), so repeated calls (incl.
+   * auto-scroll frames) never accumulate and relative spacing between keyframes is preserved. */
+  lastMs: number
   singleKeyframe?: { trackKind: KeyframeTrackKind; keyframeId: string }
   stickerId?: string
   comboClipId?: string
@@ -130,6 +145,7 @@ export function Timeline() {
   const selection = useStore((s) => s.timelineSelection)
   const clipboard = useStore((s) => s.timelineClipboard)
   const snappingEnabled = useStore((s) => s.snappingEnabled)
+  const snapIntervalMs = useStore((s) => s.snapIntervalMs)
   const fps = useStore((s) => s.project.display.fps)
   const playbackTimeMs = useStore((s) => s.playbackTimeMs)
   const mode = useStore((s) => s.mode)
@@ -149,6 +165,7 @@ export function Timeline() {
   const toggleTimelineSelection = useStore((s) => s.toggleTimelineSelection)
   const clearTimelineSelection = useStore((s) => s.clearTimelineSelection)
   const setSnappingEnabled = useStore((s) => s.setSnappingEnabled)
+  const setSnapIntervalMs = useStore((s) => s.setSnapIntervalMs)
   const setAnimationDuration = useStore((s) => s.setAnimationDuration)
   const setKeyframeTime = useStore((s) => s.setKeyframeTime)
   const moveSelectionByDelta = useStore((s) => s.moveSelectionByDelta)
@@ -175,8 +192,18 @@ export function Timeline() {
   const addAnimationComboClip = useStore((s) => s.addAnimationComboClip)
 
   const contentRef = useRef<HTMLDivElement>(null)
+  // The scrollable viewport around the ruler+tracks — used for Ctrl+wheel zoom-around-cursor
+  // and for auto-scrolling while a drag nears either edge.
+  const scrollRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<DragState | null>(null)
   const lastPrimaryRef = useRef<SelectionItem | null>(null)
+  // rAF handle for the active edge-auto-scroll loop, the pointer's last position (so the loop
+  // can keep the dragged item under the cursor as content scrolls), and a one-shot scrollLeft
+  // to apply right after a Ctrl+wheel zoom re-renders at the new pxPerMs (keeps the cursor's
+  // time fixed on screen).
+  const edgeRafRef = useRef<number | null>(null)
+  const lastPointerRef = useRef<{ clientX: number; altKey: boolean }>({ clientX: 0, altKey: false })
+  const pendingScrollRef = useRef<number | null>(null)
 
   const [pxPerMs, setPxPerMs] = useState(0.08)
   const [marqueeRect, setMarqueeRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
@@ -222,6 +249,47 @@ export function Timeline() {
     clearTimelineSelection()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [comboMode])
+
+  // Ctrl/Cmd + mouse wheel over the timeline zooms in/out around the cursor (keeping whatever
+  // time is under the pointer fixed on screen), while a plain wheel keeps scrolling normally.
+  // Attached natively with { passive: false } so preventDefault actually suppresses the browser
+  // zoom/scroll — React's synthetic onWheel can't guarantee a non-passive listener.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      e.preventDefault()
+      const rect = el.getBoundingClientRect()
+      const cursorViewportX = e.clientX - rect.left
+      const contentX = el.scrollLeft + cursorViewportX
+      const msAtCursor = pxToMs(contentX - TRACK_HEADER_WIDTH_PX, pxPerMs)
+      const factor = Math.exp(-e.deltaY * 0.0015)
+      const next = clampPxPerMs(pxPerMs * factor)
+      if (next === pxPerMs) return
+      // Keep msAtCursor under the same viewport x after the re-render at the new scale.
+      pendingScrollRef.current = TRACK_HEADER_WIDTH_PX + msAtCursor * next - cursorViewportX
+      setPxPerMs(next)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [pxPerMs])
+
+  // Apply the one-shot scrollLeft computed by a Ctrl+wheel zoom, after the re-render has laid
+  // out the content at the new width — so the zoom stays anchored on the cursor.
+  useLayoutEffect(() => {
+    if (pendingScrollRef.current != null && scrollRef.current) {
+      scrollRef.current.scrollLeft = Math.max(0, pendingScrollRef.current)
+      pendingScrollRef.current = null
+    }
+  }, [pxPerMs])
+
+  // Stop any in-flight edge auto-scroll loop if the Timeline unmounts mid-drag.
+  useEffect(() => {
+    return () => {
+      if (edgeRafRef.current != null) cancelAnimationFrame(edgeRafRef.current)
+    }
+  }, [])
 
   const isSelected = (kind: SelectionItem['kind'], trackId: string, id: string) => selection.some((i) => i.kind === kind && i.trackId === trackId && i.id === id)
 
@@ -280,8 +348,8 @@ export function Timeline() {
   // interaction in the Timeline.
   function snapHoverMs(rawMs: number, altKey: boolean): number {
     if (!snappingEnabled || altKey) return rawMs
-    const frameMs = 1000 / fps
-    return Math.round(rawMs / frameMs) * frameMs
+    const gridMs = snapIntervalMs > 0 ? snapIntervalMs : 1000 / fps
+    return Math.round(rawMs / gridMs) * gridMs
   }
 
   function handleContentMouseMove(e: React.MouseEvent) {
@@ -319,7 +387,9 @@ export function Timeline() {
     e.stopPropagation()
     updateSelectionOnClick(item, e)
     const resultingSelection = useStore.getState().timelineSelection
-    checkpoint()
+    // No checkpoint here — a move drag is only committed (and only checkpointed) once the
+    // pointer actually passes DRAG_THRESHOLD_PX (see handlePointerMove), so a plain click that
+    // just selects a keyframe never creates an undo entry or nudges its time.
     ;(e.target as Element).setPointerCapture(e.pointerId)
     const excludeKeys = new Set(resultingSelection.map(itemKey))
     const single = resultingSelection.length === 1 && resultingSelection[0].kind === 'keyframe' ? resultingSelection[0] : null
@@ -329,15 +399,18 @@ export function Timeline() {
             collectComboClipTimes(comboTimeline, new Set(resultingSelection.filter((i) => i.kind === 'comboClip').map((i) => i.id))),
             playheadMs,
             fps,
-            durationMs
+            durationMs,
+            snapIntervalMs
           )
-        : buildSnapCandidates(collectAllTimes(activeAnim, excludeKeys), playbackTimeMs, fps, durationMs)
+        : buildSnapCandidates(collectAllTimes(activeAnim, excludeKeys), playbackTimeMs, fps, durationMs, snapIntervalMs)
     dragRef.current = {
       kind: 'move',
       pointerId: e.pointerId,
       startClientX: e.clientX,
       startClientY: e.clientY,
       anchorTimeMs: currentTimeMs,
+      armed: false,
+      lastMs: currentTimeMs,
       singleKeyframe: single ? { trackKind: single.trackId as KeyframeTrackKind, keyframeId: single.id } : undefined,
       snapCandidates,
       marqueeOriginX: 0,
@@ -357,9 +430,11 @@ export function Timeline() {
       startClientX: e.clientX,
       startClientY: e.clientY,
       anchorTimeMs: currentTimeMs,
+      armed: true,
+      lastMs: currentTimeMs,
       stickerId,
       edge,
-      snapCandidates: buildSnapCandidates(collectAllTimes(activeAnim, new Set([itemKey(item)])), playbackTimeMs, fps, durationMs),
+      snapCandidates: buildSnapCandidates(collectAllTimes(activeAnim, new Set([itemKey(item)])), playbackTimeMs, fps, durationMs, snapIntervalMs),
       marqueeOriginX: 0,
       marqueeOriginY: 0
     }
@@ -381,9 +456,11 @@ export function Timeline() {
       startClientX: e.clientX,
       startClientY: e.clientY,
       anchorTimeMs: currentTimeMs,
+      armed: true,
+      lastMs: currentTimeMs,
       comboClipId: clipId,
       edge,
-      snapCandidates: comboTimeline ? buildSnapCandidates(collectComboClipTimes(comboTimeline, new Set([clipId])), playheadMs, fps, durationMs) : [],
+      snapCandidates: comboTimeline ? buildSnapCandidates(collectComboClipTimes(comboTimeline, new Set([clipId])), playheadMs, fps, durationMs, snapIntervalMs) : [],
       marqueeOriginX: 0,
       marqueeOriginY: 0
     }
@@ -402,6 +479,8 @@ export function Timeline() {
       startClientX: e.clientX,
       startClientY: e.clientY,
       anchorTimeMs: 0,
+      armed: true,
+      lastMs: 0,
       snapCandidates: [],
       marqueeOriginX: x,
       marqueeOriginY: y
@@ -447,6 +526,66 @@ export function Timeline() {
     setTimelineSelection(items)
   }
 
+  /** Applies one move/resize step at the given pointer X. Factored out so both live pointer
+   * moves and the edge auto-scroll rAF loop drive the drag through exactly the same math. */
+  function applyDragAt(clientX: number, altKey: boolean) {
+    const drag = dragRef.current
+    if (!drag || drag.kind === 'marquee') return
+    const deltaPx = clientX - drag.startClientX
+    const rawMs = drag.anchorTimeMs + pxToMs(deltaPx, pxPerMs)
+    const newMs = maybeSnap(rawMs, { altKey })
+    // The yellow line doubles as the drag's exact drop-position guide while moving/resizing —
+    // separate from the committed (orange) playhead, which doesn't move until the drag ends.
+    setHoverMs(Math.max(0, Math.min(durationMs, newMs)))
+    if (drag.kind === 'resize' && drag.stickerId && drag.edge) {
+      resizeStickerClip(drag.stickerId, drag.edge, newMs)
+    } else if (drag.kind === 'resize' && drag.comboClipId && drag.edge && combo) {
+      resizeComboClip(combo.id, drag.comboClipId, drag.edge, newMs)
+    } else if (drag.kind === 'move') {
+      if (drag.singleKeyframe) {
+        setKeyframeTime(drag.singleKeyframe.trackKind, drag.singleKeyframe.keyframeId, newMs)
+      } else {
+        // Apply only the increment since the last committed position (not the total since the
+        // grab) so repeated calls never accumulate — this keeps multi-select spacing exact and
+        // makes the auto-scroll loop's extra calls harmless.
+        moveSelectionByDelta(newMs - drag.lastMs)
+      }
+      drag.lastMs = newMs
+    }
+  }
+
+  /** Starts (if not already running) the rAF loop that scrolls the timeline while an armed
+   * move/resize drag holds the pointer near either edge of the visible track area, re-applying
+   * the drag each scrolled frame so the item keeps following the cursor across a long animation
+   * without the user having to stop and scroll by hand. Self-terminates when the drag ends. */
+  function ensureEdgeScroll() {
+    if (edgeRafRef.current != null) return
+    const step = () => {
+      const drag = dragRef.current
+      const el = scrollRef.current
+      if (!drag || drag.kind === 'marquee' || !drag.armed || !el) {
+        edgeRafRef.current = null
+        return
+      }
+      const rect = el.getBoundingClientRect()
+      const x = lastPointerRef.current.clientX
+      // The left EDGE_SCROLL_ZONE begins just past the sticky track-header column, which always
+      // overlays the viewport's left edge.
+      const leftBound = rect.left + TRACK_HEADER_WIDTH_PX + EDGE_SCROLL_ZONE_PX
+      const rightBound = rect.right - EDGE_SCROLL_ZONE_PX
+      let dx = 0
+      if (x < leftBound) dx = -Math.min(1, (leftBound - x) / EDGE_SCROLL_ZONE_PX) * EDGE_SCROLL_MAX_PX
+      else if (x > rightBound) dx = Math.min(1, (x - rightBound) / EDGE_SCROLL_ZONE_PX) * EDGE_SCROLL_MAX_PX
+      if (dx !== 0) {
+        const before = el.scrollLeft
+        el.scrollLeft = Math.max(0, Math.min(el.scrollWidth - el.clientWidth, el.scrollLeft + dx))
+        if (el.scrollLeft !== before) applyDragAt(x, lastPointerRef.current.altKey)
+      }
+      edgeRafRef.current = requestAnimationFrame(step)
+    }
+    edgeRafRef.current = requestAnimationFrame(step)
+  }
+
   function handlePointerMove(e: React.PointerEvent) {
     const drag = dragRef.current
     if (!drag) return
@@ -459,26 +598,24 @@ export function Timeline() {
       applyMarqueeSelection(drag.marqueeOriginX, drag.marqueeOriginY, x1, y1)
       return
     }
-    const deltaPx = e.clientX - drag.startClientX
-    const rawMs = drag.anchorTimeMs + pxToMs(deltaPx, pxPerMs)
-    const newMs = maybeSnap(rawMs, e)
-    // The yellow line doubles as the drag's exact drop-position guide while moving/resizing —
-    // separate from the committed (orange) playhead, which doesn't move until the drag ends.
-    setHoverMs(Math.max(0, Math.min(durationMs, newMs)))
-    if (drag.kind === 'resize' && drag.stickerId && drag.edge) {
-      resizeStickerClip(drag.stickerId, drag.edge, newMs)
-    } else if (drag.kind === 'resize' && drag.comboClipId && drag.edge && combo) {
-      resizeComboClip(combo.id, drag.comboClipId, drag.edge, newMs)
-    } else if (drag.kind === 'move') {
-      if (drag.singleKeyframe) {
-        setKeyframeTime(drag.singleKeyframe.trackKind, drag.singleKeyframe.keyframeId, newMs)
-      } else {
-        moveSelectionByDelta(newMs - drag.anchorTimeMs)
-      }
+    lastPointerRef.current = { clientX: e.clientX, altKey: e.altKey }
+    if (!drag.armed) {
+      // A move drag doesn't start until the pointer travels past the threshold — below it, the
+      // press was just a selection (already applied on pointer-down).
+      const dist = Math.hypot(e.clientX - drag.startClientX, e.clientY - drag.startClientY)
+      if (dist < DRAG_THRESHOLD_PX) return
+      drag.armed = true
+      checkpoint()
     }
+    ensureEdgeScroll()
+    applyDragAt(e.clientX, e.altKey)
   }
 
   function handlePointerUp() {
+    if (edgeRafRef.current != null) {
+      cancelAnimationFrame(edgeRafRef.current)
+      edgeRafRef.current = null
+    }
     dragRef.current = null
     setMarqueeRect(null)
   }
@@ -563,10 +700,18 @@ export function Timeline() {
         fps={fps}
         pxPerMs={pxPerMs}
         onDurationChange={(ms) => setAnimationDuration(ms)}
-        onZoomChange={(v) => setPxPerMs(Math.min(MAX_PX_PER_MS, Math.max(MIN_PX_PER_MS, v)))}
+        onZoomChange={(v) => setPxPerMs(clampPxPerMs(v))}
         onZoomToFit={zoomToFit}
         snappingEnabled={snappingEnabled}
-        onToggleSnapping={() => setSnappingEnabled(!snappingEnabled)}
+        snapIntervalMs={snapIntervalMs}
+        onSnapChange={(modeStr) => {
+          if (modeStr === 'off') {
+            setSnappingEnabled(false)
+          } else {
+            setSnappingEnabled(true)
+            setSnapIntervalMs(modeStr === 'frame' ? 0 : Number(modeStr))
+          }
+        }}
         existingTrackKinds={existingTrackKinds}
         onAddTrack={(kind) => addTrack(kind)}
         onAddKeyframe={handleAddKeyframeFromToolbar}
@@ -586,7 +731,7 @@ export function Timeline() {
         onToggleComboLoop={comboMode ? () => setComboPreviewLoop(!comboPreviewLoop) : undefined}
       />
 
-      <div className="flex-1 min-h-0 overflow-auto studio-panel">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto studio-panel">
         <div
           ref={contentRef}
           className="relative"

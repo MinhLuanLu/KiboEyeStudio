@@ -78,10 +78,16 @@ export function eyelidTaper(u: number, shape: EyelidCurveShape): number {
   const centerH = 1 - clamp01Pct(shape.centerDepth)
   // Kept away from the true edges (+-1) so both sides always retain a real, nonzero span.
   const cx = clampPmPct(shape.centerX) * 0.9
-  // How much of each side's own span stays flat at edge height before the transition begins —
-  // capped below 1 so the transition zone can never shrink to exactly zero width (which would
-  // otherwise be a real, literal jump whenever edge height != center height).
-  const flatFrac = Math.min(0.85, Math.max(0, 1 - clamp01Pct(shape.width)))
+  // How much of each side's own span stays flat at edge height before the transition begins.
+  // width now ranges 0..200: at <=100 this is the old behavior (flatFrac in [0, 0.85], a flat
+  // shoulder that shrinks as width grows). Above 100 flatFrac goes NEGATIVE, which pushes the
+  // transition's shoulder *past* the eye's own edge — so within the visible [-1,1] the curve is
+  // already partway up at each edge, lifting the edges toward the center and reading as a
+  // broader, flatter-topped arc instead of a single pinched peak. Still C1 everywhere (each
+  // side is one continuous eased transition meeting at the center with zero slope) and still
+  // capped at 0.85 on the flat-shoulder side so the transition zone never collapses to zero.
+  const widthFrac = Math.max(0, shape.width) / 100
+  const flatFrac = Math.min(0.85, 1 - widthFrac)
   const smooth = clamp01Pct(shape.smoothness)
   const tension = clamp01Pct(shape.tension)
 

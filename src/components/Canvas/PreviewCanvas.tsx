@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useStore, getActiveAnimation, isComboTimelineActive } from '@/state/store'
 import { renderFace } from '@/renderer/faceRenderer'
-import { sampleAnimationEye, sampleTrack, animationDuration, wrapTime } from '@/engine/interpolate'
+import { sampleAnimationEye, sampleAnimationColors, sampleTrack, animationDuration, wrapTime } from '@/engine/interpolate'
 import { computeComboTimeline, sampleCombo } from '@/engine/comboPlayback'
 import { IdleEngine } from '@/engine/idleEngine'
 import {
@@ -163,6 +163,19 @@ export function PreviewCanvas() {
         rightTheme = rightEyeColors(state.project)
         timeMs = 0
         activeExpression = state.project.expressions.find((e) => e.id === state.selectedExpressionId) ?? null
+        // Eyelids panel "Preview Blink": non-destructively lerp both lids toward fully closed by
+        // the transient eyelidPreviewClose amount (0 = authored pose). Never written back to the
+        // project — purely a live design-time preview of how the current lids close.
+        if (state.eyelidPreviewClose > 0) {
+          const c = state.eyelidPreviewClose
+          const close = (p: EyeParams): EyeParams => ({
+            ...p,
+            upperEyelid: p.upperEyelid + (100 - p.upperEyelid) * c,
+            lowerEyelid: p.lowerEyelid + (100 - p.lowerEyelid) * c
+          })
+          params = close(params)
+          rightParams = close(rightParams)
+        }
       } else if (state.mode === 'animate') {
         isAnimateScrub = true
         const anim = getActiveAnimation()
@@ -185,6 +198,13 @@ export function PreviewCanvas() {
           // new independently-timed tracks actually take effect during playback/scrubbing.
           params = sampleAnimationEye(anim, t, 'left')
           rightParams = sampleAnimationEye(anim, t, 'right')
+          // Per-keyframe color: interpolate the pose track's own keyframe palettes at the
+          // playhead (falls back to the shared base for any keyframe with no colors of its
+          // own, and to the plain base entirely when no keyframe carries color — so pre-
+          // existing animations look identical). Both eyes share the sampled palette; animation
+          // color has never diverged per eye (and the firmware export still bakes base colors).
+          theme = sampleAnimationColors(anim, t, state.project.colors)
+          rightTheme = theme
           frameIndex = sampleTrack(anim.keyframes, anim.loop, anim.durationMs, t)?.segmentIndex ?? 0
           timeMs = t
         }
