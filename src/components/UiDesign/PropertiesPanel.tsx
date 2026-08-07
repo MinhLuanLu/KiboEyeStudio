@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react'
 import * as acorn from 'acorn'
 import type { Node } from 'acorn'
 import { useStore } from '@/state/store'
-import { UI_BACKGROUND_IMAGE_WIDGETS, UI_ICON_TEXT_WIDGETS, UI_SRC_IMAGE_WIDGETS, UI_WIDGET_LABELS } from '@/types'
+import { UI_BACKGROUND_IMAGE_WIDGETS, UI_ICON_TEXT_WIDGETS, UI_SRC_IMAGE_WIDGETS, UI_TEXT_STYLE_WIDGETS, UI_WIDGET_LABELS } from '@/types'
 import { checkExpressionSubset } from '@/lib/uiDesign/scriptLang/restrictedSubset'
 import type { UiImageFit, UiIndicatorEasing, UiKeyboardCustomKey, UiLengthValue, UiListItem, UiThemeTokens, UiWidget, UiWidgetStateName, UiWidgetStyle } from '@/types'
 import { MATERIAL_PRESET_LABELS } from '@/lib/uiDesign/materialPresets'
@@ -1478,6 +1478,188 @@ function KeyboardFontPicker({ widget }: { widget: UiWidget }) {
   )
 }
 
+const SELECT_CLS = 'bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-full'
+
+function TypeToggle({ active, onClick, title, children }: { active: boolean; onClick: () => void; title: string; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      className={`w-9 h-8 rounded border text-sm ${active ? 'border-studio-accent text-studio-accent bg-studio-accent/10' : 'border-studio-border text-studio-muted bg-studio-panel2'}`}
+    >
+      {children}
+    </button>
+  )
+}
+
+/** CSS-like Typography controls for text-based widgets (see UI_TEXT_STYLE_WIDGETS). State-aware —
+ * `appearance`/`setAppearance` already point at the default style or the hover/pressed/... state
+ * being edited. All fields preview live on the canvas; the LVGL export maps them where LVGL can
+ * (see lib/export/lvglExport.ts), with weight/italic/justify preview-only and word-wrap/overflow/
+ * transform exported for `label` widgets. */
+function TypographySection({
+  widget,
+  appearance,
+  setAppearance,
+  stateTab
+}: {
+  widget: UiWidget
+  appearance: Partial<UiWidgetStyle>
+  setAppearance: (partial: Partial<UiWidgetStyle>) => void
+  stateTab: 'default' | UiWidgetStateName
+}) {
+  const customFonts = useStore((s) => s.project.uiDesign.customFonts)
+  const addUiCustomFont = useStore((s) => s.addUiCustomFont)
+  const setUiWidgetThemeToken = useStore((s) => s.setUiWidgetThemeToken)
+  const checkpoint = useStore((s) => s.checkpoint)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const importFile = async (file: File) => {
+    const text = await file.text()
+    checkpoint()
+    const id = addUiCustomFont(file.name.replace(/\.c$/i, ''), text)
+    setAppearance({ fontId: id })
+  }
+
+  return (
+    <div className="border-t border-studio-border pt-2.5 flex flex-col gap-2">
+      <span className="text-xs font-medium text-studio-text/80">Typography</span>
+
+      <div className="flex flex-col gap-1">
+        <span className="studio-label">Font Family</span>
+        <div className="flex items-center gap-1.5">
+          <select
+            className={`${SELECT_CLS} flex-1 min-w-0`}
+            value={appearance.fontId ?? ''}
+            onChange={(e) => setAppearance({ fontId: e.target.value || undefined })}
+          >
+            <option value="">Montserrat (built-in)</option>
+            {customFonts.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.name}
+              </option>
+            ))}
+          </select>
+          <button className="text-[11px] text-studio-accent hover:text-studio-text shrink-0" onClick={() => fileInputRef.current?.click()}>
+            Import .c…
+          </button>
+        </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".c,text/plain"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (file) void importFile(file)
+            e.target.value = ''
+          }}
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <NumberField label="Font Size" value={appearance.fontSize ?? 14} onChange={(v) => setAppearance({ fontSize: v })} />
+        <div className="flex flex-col gap-1">
+          <span className="studio-label">Font Weight</span>
+          <select className={SELECT_CLS} value={appearance.fontWeight === 'normal' ? 'regular' : appearance.fontWeight ?? 'regular'} onChange={(e) => setAppearance({ fontWeight: e.target.value as UiWidgetStyle['fontWeight'] })}>
+            <option value="thin">Thin</option>
+            <option value="light">Light</option>
+            <option value="regular">Regular</option>
+            <option value="medium">Medium</option>
+            <option value="semibold">SemiBold</option>
+            <option value="bold">Bold</option>
+            <option value="extrabold">ExtraBold</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <span className="studio-label">Style</span>
+        <div className="flex gap-1.5">
+          <TypeToggle active={appearance.fontStyle === 'italic'} onClick={() => setAppearance({ fontStyle: appearance.fontStyle === 'italic' ? 'normal' : 'italic' })} title="Italic">
+            <span className="italic">I</span>
+          </TypeToggle>
+          <TypeToggle active={!!appearance.underline} onClick={() => setAppearance({ underline: !appearance.underline })} title="Underline">
+            <span className="underline">U</span>
+          </TypeToggle>
+          <TypeToggle active={!!appearance.strikethrough} onClick={() => setAppearance({ strikethrough: !appearance.strikethrough })} title="Strikethrough">
+            <span className="line-through">S</span>
+          </TypeToggle>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <NumberField label="Letter Spacing" value={appearance.letterSpacing ?? 0} onChange={(v) => setAppearance({ letterSpacing: v })} />
+        <NumberField label="Line Height" value={appearance.lineHeight ?? 0} onChange={(v) => setAppearance({ lineHeight: v })} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex flex-col gap-1">
+          <span className="studio-label">Text Align</span>
+          <select className={SELECT_CLS} value={appearance.textAlign ?? 'left'} onChange={(e) => setAppearance({ textAlign: e.target.value as UiWidgetStyle['textAlign'] })}>
+            <option value="left">Left</option>
+            <option value="center">Center</option>
+            <option value="right">Right</option>
+            <option value="justify">Justify</option>
+          </select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="studio-label">Text Transform</span>
+          <select className={SELECT_CLS} value={appearance.textTransform ?? 'none'} onChange={(e) => setAppearance({ textTransform: e.target.value as UiWidgetStyle['textTransform'] })}>
+            <option value="none">None</option>
+            <option value="uppercase">Uppercase</option>
+            <option value="lowercase">Lowercase</option>
+            <option value="capitalize">Capitalize</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <ColorField
+          label="Text Color"
+          value={appearance.color ?? ''}
+          onChange={(v) => setAppearance({ color: v })}
+          themeToken={stateTab === 'default' ? widget.themeTokens?.color : undefined}
+          onThemeTokenChange={stateTab === 'default' ? (t) => setUiWidgetThemeToken(widget.id, 'color', t) : undefined}
+        />
+        <NumberField label="Text Opacity %" value={appearance.textOpacity ?? 100} onChange={(v) => setAppearance({ textOpacity: v })} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex flex-col gap-1">
+          <span className="studio-label">Word Wrap</span>
+          <select className={SELECT_CLS} value={appearance.wordWrap === false ? 'nowrap' : 'wrap'} onChange={(e) => setAppearance({ wordWrap: e.target.value === 'wrap' })}>
+            <option value="wrap">Wrap</option>
+            <option value="nowrap">No wrap</option>
+          </select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="studio-label">Text Overflow</span>
+          <select className={SELECT_CLS} value={appearance.textOverflow ?? 'clip'} onChange={(e) => setAppearance({ textOverflow: e.target.value as UiWidgetStyle['textOverflow'] })}>
+            <option value="clip">Clip</option>
+            <option value="ellipsis">Ellipsis</option>
+            <option value="scroll">Scroll</option>
+          </select>
+        </div>
+      </div>
+
+      <NumberField
+        label="Padding"
+        value={appearance.paddingTop ?? 0}
+        onChange={(v) => setAppearance({ paddingTop: v, paddingRight: v, paddingBottom: v, paddingLeft: v })}
+      />
+
+      {widget.type !== 'label' && (
+        <p className="text-[11px] text-studio-muted">
+          Word Wrap, Text Overflow &amp; Text Transform preview here but export to firmware for Label widgets only. Font Weight/Italic
+          need an imported custom font to reach firmware (built-in Montserrat has no variants).
+        </p>
+      )}
+    </div>
+  )
+}
+
 const KEYBOARD_LANGUAGES: { value: NonNullable<UiWidget['keyboardConfig']>['language']; label: string }[] = [
   { value: 'english', label: 'English' },
   { value: 'danish', label: 'Danish' },
@@ -2683,22 +2865,29 @@ export function PropertiesPanel() {
           />
           <NumberField label="Opacity %" value={appearance.opacity ?? 100} onChange={(v) => setAppearance({ opacity: v })} />
         </div>
-        <div className="grid grid-cols-2 gap-2">
-          <NumberField label="Font Size" value={appearance.fontSize ?? 14} onChange={(v) => setAppearance({ fontSize: v })} />
-          <div className="flex flex-col gap-1">
-            <span className="studio-label">Text Align</span>
-            <select
-              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
-              value={appearance.textAlign ?? 'left'}
-              onChange={(e) => setAppearance({ textAlign: e.target.value as 'left' | 'center' | 'right' })}
-            >
-              <option value="left">Left</option>
-              <option value="center">Center</option>
-              <option value="right">Right</option>
-            </select>
+        {/* Text widgets get the full Typography section below instead of these two generic
+            controls; non-text widgets (which can still carry a text label incidentally) keep the
+            minimal Font Size + Text Align here. */}
+        {!UI_TEXT_STYLE_WIDGETS.has(widget.type) && (
+          <div className="grid grid-cols-2 gap-2">
+            <NumberField label="Font Size" value={appearance.fontSize ?? 14} onChange={(v) => setAppearance({ fontSize: v })} />
+            <div className="flex flex-col gap-1">
+              <span className="studio-label">Text Align</span>
+              <select
+                className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+                value={appearance.textAlign ?? 'left'}
+                onChange={(e) => setAppearance({ textAlign: e.target.value as 'left' | 'center' | 'right' })}
+              >
+                <option value="left">Left</option>
+                <option value="center">Center</option>
+                <option value="right">Right</option>
+              </select>
+            </div>
           </div>
-        </div>
+        )}
       </div>
+
+      {UI_TEXT_STYLE_WIDGETS.has(widget.type) && <TypographySection widget={widget} appearance={appearance} setAppearance={setAppearance} stateTab={stateTab} />}
 
       <div className="border-t border-studio-border pt-2.5 grid grid-cols-2 gap-2">
         <div className="flex flex-col gap-1">

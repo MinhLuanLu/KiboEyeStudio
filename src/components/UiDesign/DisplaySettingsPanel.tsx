@@ -1,6 +1,7 @@
 import { useStore } from '@/state/store'
 import { UI_DISPLAY_PRESETS } from '@/types'
 import type { UiDisplayOrientation, UiDisplayRotation, UiDisplayShape } from '@/types'
+import { ColorField } from '@/components/ui/ColorField'
 
 const SHAPE_OPTIONS: { value: UiDisplayShape; label: string; disabled?: boolean }[] = [
   { value: 'round', label: 'Round' },
@@ -139,6 +140,17 @@ export function DisplaySettingsPanel() {
         </div>
       </div>
 
+      <div className="flex flex-col gap-1.5">
+        <span className="studio-label">Background Color</span>
+        <ColorField
+          label="Screen background"
+          value={display.backgroundColor}
+          onCommitStart={checkpoint}
+          onChange={(v) => setUiDisplaySettings({ backgroundColor: v })}
+        />
+        <p className="text-[11px] text-studio-muted">The screen surface behind all widgets — exported as the LVGL screen's own background color.</p>
+      </div>
+
       <div className="border-t border-studio-border pt-3 flex flex-col gap-1.5">
         <span className="studio-label">Preview As (doesn't change the project)</span>
         <div className="grid grid-cols-2 gap-1.5">
@@ -146,7 +158,7 @@ export function DisplaySettingsPanel() {
             <button
               key={preset.id}
               className="studio-btn text-xs px-2 py-1.5"
-              onClick={() => setUiPreviewDisplayOverride({ width: preset.width, height: preset.height, shape: preset.shape, orientation: display.orientation, rotation: display.rotation })}
+              onClick={() => setUiPreviewDisplayOverride({ width: preset.width, height: preset.height, shape: preset.shape, orientation: display.orientation, rotation: display.rotation, backgroundColor: display.backgroundColor })}
             >
               {preset.label}
             </button>

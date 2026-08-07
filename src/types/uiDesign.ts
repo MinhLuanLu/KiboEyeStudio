@@ -105,6 +105,46 @@ export const UI_SRC_IMAGE_WIDGETS: ReadonlySet<UiWidgetType> = new Set(['image',
  * size) and color (text color) through the same generic style pipeline every label uses, on top
  * of the position/size every widget already has. */
 export const UI_ICON_TEXT_WIDGETS: ReadonlySet<UiWidgetType> = new Set(['button', 'label', 'checkbox', 'icon'])
+/** Widget kinds that render a user-facing text string and therefore get the Typography section in
+ * the Properties panel (font/weight/style/spacing/decoration/transform/wrap/overflow/color). The
+ * label long-mode properties (wordWrap/textOverflow) and text-transform only affect the exported
+ * firmware for `label` widgets (LVGL's long-mode API is label-specific); on the others they still
+ * drive the live preview via CSS. */
+export const UI_TEXT_STYLE_WIDGETS: ReadonlySet<UiWidgetType> = new Set([
+  'label',
+  'button',
+  'checkbox',
+  'dropdown',
+  'roller',
+  'textarea',
+  'list',
+  'statusIndicator'
+])
+
+/** Maps a UiWidgetStyle.fontWeight (named CSS weight, plus the legacy 'normal'/'bold') to its
+ * numeric CSS value — shared by the canvas preview (WidgetRenderer.styleToCss) and any other
+ * consumer so the mapping lives in exactly one place. Returns undefined for an unset weight. */
+export function fontWeightToCss(weight: UiWidgetStyle['fontWeight']): number | undefined {
+  switch (weight) {
+    case 'thin':
+      return 100
+    case 'light':
+      return 300
+    case 'normal':
+    case 'regular':
+      return 400
+    case 'medium':
+      return 500
+    case 'semibold':
+      return 600
+    case 'bold':
+      return 700
+    case 'extrabold':
+      return 800
+    default:
+      return undefined
+  }
+}
 export const UI_BACKGROUND_IMAGE_WIDGETS: ReadonlySet<UiWidgetType> = new Set([
   'screen',
   'container',
@@ -187,11 +227,38 @@ export interface UiWidgetStyle {
   backgroundGradient?: { to: string; direction: 'horizontal' | 'vertical' } | null
   opacity?: number // 0-100
   color?: string // text color
+  /** 0-100: opacity of the TEXT only (LVGL lv_style_set_text_opa), independent of the widget's
+   * overall `opacity` above (which fades background/border/children too). CSS has no text-opacity,
+   * so the preview folds this into an rgba text color — see styleToCss(). */
+  textOpacity?: number
   fontFamily?: string
+  /** Custom font selection for text widgets: a `project.uiDesign.customFonts` id, or undefined for
+   * the built-in Montserrat (nearest size). When set, the LVGL export emits that font's real
+   * `lv_font` object (see collectCustomFontUsage/customFontStyleLine in lvglExport.ts) — the same
+   * imported-.c-font mechanism keyboards already use, now available on text widgets. Custom .c
+   * fonts can't be rendered in-browser, so the canvas preview falls back to the default face. */
+  fontId?: string
   fontSize?: number
-  fontWeight?: 'normal' | 'bold'
+  /** 'normal'/'bold' kept as legacy-valid aliases (no migration needed); the Typography UI writes
+   * the named CSS weights. LVGL's built-in Montserrat has no weight variants, so weight only
+   * reaches firmware through a chosen custom font — otherwise it's preview-only (see lvglExport). */
+  fontWeight?: 'normal' | 'thin' | 'light' | 'regular' | 'medium' | 'semibold' | 'bold' | 'extrabold'
+  /** Italic — preview + (via a chosen custom font) export; built-in Montserrat has no italic. */
+  fontStyle?: 'normal' | 'italic'
+  underline?: boolean
+  strikethrough?: boolean
   letterSpacing?: number
-  textAlign?: 'left' | 'center' | 'right'
+  /** Line height in px — maps to LVGL lv_style_set_text_line_space. */
+  lineHeight?: number
+  /** CSS text-transform. LVGL has no equivalent, so the export applies the transform to the
+   * emitted text string instead (label widgets). */
+  textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize'
+  /** false = no wrapping (single line). Maps to LVGL label long-mode (label widgets). */
+  wordWrap?: boolean
+  /** How overflowing text is handled — LVGL label long-mode: clip / dot(ellipsis) / scroll. */
+  textOverflow?: 'clip' | 'ellipsis' | 'scroll'
+  /** 'justify' is preview-only — LVGL text align has no justify (exports as LEFT + a note). */
+  textAlign?: 'left' | 'center' | 'right' | 'justify'
   shadowWidth?: number
   shadowColor?: string
   shadowOffsetX?: number
@@ -634,6 +701,11 @@ export interface UiDisplaySettings {
    * directly in `width`x`height` (the logical/design resolution); this just tells the exported
    * config which physical direction the panel should present that logical resolution in. */
   rotation: UiDisplayRotation
+  /** The display/screen background color (hex) — the surface every widget sits on. Shown behind
+   * the design canvas and exported as the LVGL screen's own bg_color (lv_obj_set_style_bg_color
+   * on the screen object) in every export mode. Defaults to white to match the LVGL default light
+   * theme the canvas has always shown. */
+  backgroundColor: string
 }
 
 export interface UiDisplayPreset {
@@ -658,7 +730,8 @@ export const DEFAULT_UI_DISPLAY: UiDisplaySettings = {
   height: 240,
   shape: 'round',
   orientation: 'portrait',
-  rotation: 0
+  rotation: 0,
+  backgroundColor: '#ffffff'
 }
 
 export type UiVariableType = 'number' | 'text' | 'boolean' | 'color' | 'list' | 'image' | 'object'

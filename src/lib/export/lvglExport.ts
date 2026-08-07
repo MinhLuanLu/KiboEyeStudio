@@ -290,6 +290,17 @@ export function colorLiteral(css: string | undefined): string | null {
   return null // named CSS colors ("white", "red", ...) aren't resolved here — Properties panel's color picker always writes hex, so this only matters for hand-edited CSS text.
 }
 
+/** LVGL lines that paint the whole screen object with the UI Design display's Background Color —
+ * emitted right after each `lv_obj_create(NULL)` (the screen variable is always named `screen` at
+ * every call site) so the exported screen starts on the same background the design canvas shows,
+ * instead of the LVGL default theme color. The root screen widget's own children are emitted on
+ * top, so any widget covering the screen still wins. Returns [] for an unresolvable color. */
+export function screenBackgroundSetupLines(backgroundColor: string | undefined, indent = '  '): string[] {
+  const c = colorLiteral(backgroundColor)
+  if (!c) return []
+  return [`${indent}lv_obj_set_style_bg_color(screen, ${c}, LV_PART_MAIN);`, `${indent}lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);`]
+}
+
 // Every built-in lv_font_montserrat_* size this export will ever reference — kept as one shared
 // list (not a duplicated literal) so styleSetCalls' font-size selection and generateLvConf's
 // "turn these on in lv_conf.h" step can never drift apart. Extends past the base ~20px text sizes
@@ -384,14 +395,28 @@ function styleSetCalls(varName: string, style: Partial<UiWidgetStyle>, identByAs
     const c = colorLiteral(style.color)
     if (c) set(`lv_style_set_text_color(&${varName}, ${c});`)
   }
-  if (style.fontSize !== undefined) {
+  if (style.textOpacity !== undefined) set(`lv_style_set_text_opa(&${varName}, ${Math.round((Math.max(0, Math.min(100, style.textOpacity)) / 100) * 255)});`)
+  // Font: a chosen custom font (style.fontId) is applied per-object via customFontStyleLine() and
+  // wins over any shared-style font, so skip the built-in Montserrat line here when one is set.
+  if (style.fontSize !== undefined && style.fontId === undefined) {
     const size = nearestMontserratSize(style.fontSize)
     set(`lv_style_set_text_font(&${varName}, &lv_font_montserrat_${size}); // nearest built-in LVGL font size to ${Math.round(style.fontSize)}px`)
   }
+  // Weight/Italic only reach firmware through a custom font — LVGL's built-in Montserrat has no
+  // weight or italic variants. Flag it so the generated code says why they didn't map.
+  if (style.fontId === undefined && ((style.fontWeight !== undefined && style.fontWeight !== 'normal' && style.fontWeight !== 'regular') || style.fontStyle === 'italic')) {
+    set(`// note: font weight/italic is preview-only here — LVGL's built-in Montserrat has no ${style.fontStyle === 'italic' ? 'italic/' : ''}weight variants; import a custom font (Properties > Typography > Font Family) for real weight/italic.`)
+  }
   if (style.letterSpacing !== undefined) set(`lv_style_set_text_letter_space(&${varName}, ${Math.round(style.letterSpacing)});`)
+  if (style.lineHeight !== undefined) set(`lv_style_set_text_line_space(&${varName}, ${Math.round(style.lineHeight)});`)
+  if (style.underline || style.strikethrough) {
+    const decor = [style.underline ? 'LV_TEXT_DECOR_UNDERLINE' : '', style.strikethrough ? 'LV_TEXT_DECOR_STRIKETHROUGH' : ''].filter(Boolean).join(' | ')
+    set(`lv_style_set_text_decor(&${varName}, ${decor});`)
+  }
   if (style.textAlign !== undefined) {
+    // LVGL text align has no 'justify' — falls back to LEFT (flagged so the code says why).
     const align = style.textAlign === 'center' ? 'LV_TEXT_ALIGN_CENTER' : style.textAlign === 'right' ? 'LV_TEXT_ALIGN_RIGHT' : 'LV_TEXT_ALIGN_LEFT'
-    set(`lv_style_set_text_align(&${varName}, ${align});`)
+    set(`lv_style_set_text_align(&${varName}, ${align});${style.textAlign === 'justify' ? " // 'justify' has no LVGL equivalent — using LEFT" : ''}`)
   }
   if (style.paddingTop !== undefined) set(`lv_style_set_pad_top(&${varName}, ${Math.round(style.paddingTop)});`)
   if (style.paddingBottom !== undefined) set(`lv_style_set_pad_bottom(&${varName}, ${Math.round(style.paddingBottom)});`)
@@ -684,6 +709,34 @@ function widgetTextLiteral(text: string | undefined): string {
   return JSON.stringify(text ?? '')
 }
 
+/** Applies the Typography section's Text Transform to a string at export time — LVGL has no
+ * text-transform style, so the exported firmware just ships the already-transformed text. */
+export function applyTextTransform(text: string, transform: UiWidget['style']['textTransform']): string {
+  switch (transform) {
+    case 'uppercase':
+      return text.toUpperCase()
+    case 'lowercase':
+      return text.toLowerCase()
+    case 'capitalize':
+      return text.replace(/\b\w/g, (c) => c.toUpperCase())
+    default:
+      return text
+  }
+}
+
+/** The `lv_label_set_long_mode()` line for the Typography section's Word Wrap / Text Overflow —
+ * label objects only (LVGL's long-mode API is label-specific). Text Overflow wins when set;
+ * otherwise Word Wrap picks wrap vs. clip. Returns [] when neither is configured (LVGL default). */
+export function labelLongModeLine(style: UiWidget['style'], labelVar: string, indent: string): string[] {
+  let mode: string | null = null
+  if (style.textOverflow === 'scroll') mode = 'LV_LABEL_LONG_SCROLL'
+  else if (style.textOverflow === 'ellipsis') mode = 'LV_LABEL_LONG_DOT'
+  else if (style.textOverflow === 'clip') mode = 'LV_LABEL_LONG_CLIP'
+  else if (style.wordWrap === false) mode = 'LV_LABEL_LONG_CLIP'
+  else if (style.wordWrap === true) mode = 'LV_LABEL_LONG_WRAP'
+  return mode ? [`${indent}lv_label_set_long_mode(${labelVar}, ${mode});`] : []
+}
+
 /** Like widgetTextLiteral, but prepends a built-in LVGL symbol-font macro when the widget has
  * one selected (UiWidget.iconSymbol, set via the Properties panel's Icon picker) — adjacent C
  * string literals concatenate, so `LV_SYMBOL_WIFI " Wi-Fi"` is one valid string, matching LVGL's
@@ -691,10 +744,11 @@ function widgetTextLiteral(text: string | undefined): string {
  * empty `""`); text with no icon falls back to plain widgetTextLiteral, unchanged from every
  * other text-bearing widget/call site. */
 export function widgetTextLiteralWithIcon(widget: UiWidget): string {
+  const text = applyTextTransform(widget.text ?? '', widget.style.textTransform)
   const symbol = lvglSymbolById(widget.iconSymbol)
-  if (!symbol) return widgetTextLiteral(widget.text)
-  if (!widget.text) return symbol.id
-  return `${symbol.id} ${JSON.stringify(' ' + widget.text)}`
+  if (!symbol) return widgetTextLiteral(text)
+  if (!text) return symbol.id
+  return `${symbol.id} ${JSON.stringify(' ' + text)}`
 }
 
 /** Emits the LVGL creation call(s) for one widget kind — position/size + kind-specific setup.
@@ -735,11 +789,13 @@ function widgetCreateCalls(widget: UiWidget, varName: string, parentVar: string,
       // initial text.
       lines.push(`${indent}${varName}_label = lv_label_create(${varName});`)
       if (widget.text || widget.iconSymbol) lines.push(`${indent}lv_label_set_text(${varName}_label, ${widgetTextLiteralWithIcon(widget)});`)
+      lines.push(...labelLongModeLine(widget.style, `${varName}_label`, indent))
       lines.push(`${indent}lv_obj_center(${varName}_label);`)
       break
     case 'label':
       lines.push(`${indent}${varName} = lv_label_create(${parentVar});`)
       lines.push(`${indent}lv_label_set_text(${varName}, ${widgetTextLiteralWithIcon(widget)});`)
+      lines.push(...labelLongModeLine(widget.style, varName, indent))
       break
     case 'image': {
       const fit: UiImageFit = widget.style.imageFit ?? 'contain'
@@ -2732,13 +2788,25 @@ function customFontFileBaseName(font: UiCustomFont): string {
 function collectCustomFontUsage(uiDesign: UiDesignProject, widgets: UiWidget[]): Map<string, CustomFontUsage> {
   const byWidgetId = new Map<string, CustomFontUsage>()
   for (const w of widgets) {
-    if (w.type !== 'keyboard' || !w.keyboardConfig?.customFontId) continue
-    const font = uiDesign.customFonts.find((f) => f.id === w.keyboardConfig!.customFontId)
-    if (!font) continue
-    const usage: CustomFontUsage = { font, varName: customFontVarName(font) }
-    byWidgetId.set(w.id, usage)
-    if (w.keyboardConfig.targetTextareaId) byWidgetId.set(w.keyboardConfig.targetTextareaId, usage)
-    if (w.keyboardConfig.debugLabelId) byWidgetId.set(w.keyboardConfig.debugLabelId, usage)
+    if (w.type === 'keyboard' && w.keyboardConfig?.customFontId) {
+      const font = uiDesign.customFonts.find((f) => f.id === w.keyboardConfig!.customFontId)
+      if (font) {
+        const usage: CustomFontUsage = { font, varName: customFontVarName(font) }
+        byWidgetId.set(w.id, usage)
+        if (w.keyboardConfig.targetTextareaId) byWidgetId.set(w.keyboardConfig.targetTextareaId, usage)
+        if (w.keyboardConfig.debugLabelId) byWidgetId.set(w.keyboardConfig.debugLabelId, usage)
+      }
+      continue
+    }
+    // Text widgets: a custom font chosen in the Typography section (Properties > Typography >
+    // Font Family). Reuses the exact same per-object lv_obj_set_style_text_font() line keyboards
+    // already emit (customFontStyleLine), so the imported .c font is declared/embedded once and
+    // applied to this widget.
+    const fontId = w.style.fontId
+    if (fontId) {
+      const font = uiDesign.customFonts.find((f) => f.id === fontId)
+      if (font) byWidgetId.set(w.id, { font, varName: customFontVarName(font) })
+    }
   }
   return byWidgetId
 }
@@ -3472,6 +3540,7 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
   // its focused-style border, not an incidental side effect of creation order.
   c.push(`  lv_group_focus_freeze(${focusGroupVarName}, true);`)
   c.push('  lv_obj_t* screen = lv_obj_create(NULL);')
+  c.push(...screenBackgroundSetupLines(uiDesign.display.backgroundColor))
   c.push(...bodyBuffer)
   for (const info of dataListInfoByWidgetId.values()) {
     if (info.sampleSetupLines.length === 0) continue
@@ -3941,6 +4010,7 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
   // the first widget, not an incidental side effect of creation order.
   out.push(`  lv_group_focus_freeze(${focusGroupVarName}, true);`)
   out.push('  lv_obj_t* screen = lv_obj_create(NULL);')
+  out.push(...screenBackgroundSetupLines(uiDesign.display.backgroundColor))
   out.push(...bodyBuffer)
   for (const info of dataListInfoByWidgetId.values()) {
     if (info.sampleSetupLines.length === 0) continue
@@ -5046,6 +5116,7 @@ function generateKiboUIParts(
     core.push(`  if (${activeGroupVar} == nullptr) { ${activeGroupVar} = lv_group_create(); }`)
     core.push(`  lv_group_focus_freeze(${activeGroupVar}, true);`)
     core.push('  lv_obj_t* screen = lv_obj_create(NULL);')
+    core.push(...screenBackgroundSetupLines(uiDesign.display.backgroundColor))
     core.push(...bodyBuffer)
     for (const [widgetId, info] of dataListInfoByWidgetId) {
       if (dataListOwnerScreenId.get(widgetId) !== screen.id || info.sampleSetupLines.length === 0) continue

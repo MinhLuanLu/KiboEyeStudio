@@ -27,8 +27,11 @@ const STYLE_FIELDS: [keyof UiWidgetStyle, string, FieldKind][] = [
   ['fontFamily', 'font-family', 'string'],
   ['fontSize', 'font-size', 'px'],
   ['fontWeight', 'font-weight', 'string'],
+  ['fontStyle', 'font-style', 'string'],
   ['letterSpacing', 'letter-spacing', 'px'],
+  ['lineHeight', 'line-height', 'px'],
   ['textAlign', 'text-align', 'string'],
+  ['textTransform', 'text-transform', 'string'],
   ['zIndex', 'z-index', 'number'],
   ['gap', 'gap', 'px'],
   ['overflow', 'overflow', 'string']

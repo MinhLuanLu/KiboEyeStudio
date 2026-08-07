@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useStore } from '@/state/store'
 import type { UiSnapGuide } from '@/state/store'
 import type { UiAsset, UiDesignProject, UiImageFit, UiWidget, UiWidgetType, UiWorkspaceViewSettings } from '@/types'
+import { fontWeightToCss } from '@/types'
 import { computeFitWidthOrHeightRect } from '@/lib/uiDesign/imageFit'
 import { applySnap, computeSpacingIndicators, type SnapContext, type SnapRect } from '@/lib/uiDesign/snapEngine'
 import { computeEffectiveStyle } from '@/lib/uiDesign/cssCascade'
@@ -125,12 +126,19 @@ export function styleToCss(style: UiWidget['style'], esp32Preview = false): Reac
       ? `linear-gradient(${style.backgroundGradient.direction === 'horizontal' ? '90deg' : '180deg'}, ${withAlpha(q(style.background, esp32Preview), style.backgroundOpacity) ?? 'transparent'}, ${q(style.backgroundGradient.to, esp32Preview)})`
       : withAlpha(q(style.background, esp32Preview), style.backgroundOpacity),
     opacity: style.opacity !== undefined ? style.opacity / 100 : undefined,
-    color: q(style.color, esp32Preview),
+    // CSS has no separate text-opacity, so fold textOpacity into the text color's alpha channel.
+    color: withAlpha(q(style.color, esp32Preview), style.textOpacity),
     fontFamily: style.fontFamily,
     fontSize: esp32Preview && style.fontSize !== undefined ? nearestMontserratSize(style.fontSize) : style.fontSize,
-    fontWeight: style.fontWeight,
+    fontWeight: fontWeightToCss(style.fontWeight),
+    fontStyle: style.fontStyle,
+    textDecorationLine: [style.underline ? 'underline' : '', style.strikethrough ? 'line-through' : ''].filter(Boolean).join(' ') || undefined,
+    lineHeight: style.lineHeight !== undefined ? `${style.lineHeight}px` : undefined,
     letterSpacing: style.letterSpacing,
+    textTransform: style.textTransform === 'none' ? undefined : style.textTransform,
     textAlign: style.textAlign,
+    whiteSpace: style.wordWrap === false || style.textOverflow === 'ellipsis' ? 'nowrap' : undefined,
+    textOverflow: style.textOverflow === 'ellipsis' ? 'ellipsis' : undefined,
     boxShadow: computeBoxShadowCss(style, esp32Preview),
     display: style.visible === false ? 'none' : style.flexDirection ? 'flex' : undefined,
     zIndex: style.zIndex,
@@ -144,7 +152,8 @@ export function styleToCss(style: UiWidget['style'], esp32Preview = false): Reac
           : style.justifyContent,
     alignItems: style.alignItems === 'start' ? 'flex-start' : style.alignItems === 'end' ? 'flex-end' : style.alignItems,
     gap: style.gap,
-    overflow: style.overflow
+    // Ellipsis needs a clipping box; otherwise honor the widget's own overflow setting.
+    overflow: style.textOverflow === 'ellipsis' ? 'hidden' : style.overflow
     // No `objectFit` here — this function builds the OUTER positioned <div>'s style, and
     // `object-fit` only has any effect on a replaced element (<img>/<video>), never a plain
     // <div>. The Image widget's actual fit mode is applied directly to its own <img> element in

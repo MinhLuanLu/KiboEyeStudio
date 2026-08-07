@@ -187,7 +187,7 @@ export function Canvas() {
             width: display.width,
             height: display.height,
             borderRadius,
-            background: '#ffffff',
+            background: display.backgroundColor ?? '#ffffff',
             overflow: 'hidden',
             boxShadow: '0 0 0 1px rgba(255,255,255,0.08), 0 8px 24px rgba(0,0,0,0.4)',
             // Explicit reset so descendants inherit a clean baseline instead of the app's own

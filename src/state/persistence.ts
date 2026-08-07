@@ -713,7 +713,8 @@ function normalizeUiDisplay(raw: unknown): UiDisplaySettings {
     height: typeof r.height === 'number' && r.height > 0 ? r.height : DEFAULT_UI_DISPLAY.height,
     shape: UI_DISPLAY_SHAPES.includes(r.shape as UiDisplayShape) ? (r.shape as UiDisplayShape) : DEFAULT_UI_DISPLAY.shape,
     orientation: UI_DISPLAY_ORIENTATIONS.includes(r.orientation as UiDisplayOrientation) ? (r.orientation as UiDisplayOrientation) : DEFAULT_UI_DISPLAY.orientation,
-    rotation: UI_DISPLAY_ROTATIONS.includes(r.rotation as UiDisplayRotation) ? (r.rotation as UiDisplayRotation) : DEFAULT_UI_DISPLAY.rotation
+    rotation: UI_DISPLAY_ROTATIONS.includes(r.rotation as UiDisplayRotation) ? (r.rotation as UiDisplayRotation) : DEFAULT_UI_DISPLAY.rotation,
+    backgroundColor: typeof r.backgroundColor === 'string' ? r.backgroundColor : DEFAULT_UI_DISPLAY.backgroundColor
   }
 }
 
