@@ -367,7 +367,7 @@ function exportAnimationCombos(project: Project): string {
   lines.push(' *')
   lines.push(' * Play:')
   lines.push(' *')
-  lines.push(' *   Combo(IdleSequence);   // loop defaults to false -- see the Quick Reference at the')
+  lines.push(' *   Combo(<yourCombo>);   // loop defaults to false -- see the Quick Reference at the')
   lines.push(' *                          // top of this file for the optional loop argument')
   lines.push(' *')
   lines.push(' * Stop:')
@@ -486,6 +486,8 @@ function exportColors(project: Project): string {
   const same = JSON.stringify(left) === JSON.stringify(right)
   const lines = [
     `#define EYE_COLOR_BACKGROUND ${toRgb565Hex(display.backgroundColor)} // RGB565 — Display panel's background color`,
+    `#define EYE_DISPLAY_WIDTH  ${display.width}  // Display panel size (studio's Display panel) — used to center the eyes`,
+    `#define EYE_DISPLAY_HEIGHT ${display.height}`,
     ``,
     `// sclera, iris, pupil, highlight, shadow, glow, border, borderWidth, shadowIntensity,`,
     `// glowIntensity, scleraTop, scleraBottom, irisLight, irisDark, highlightBlend — see the`,
@@ -2731,9 +2733,9 @@ inline void StopCombo() {
 // Plays an exported AnimationCombo. \`loop\` overrides the combo's own baked
 // AnimationCombo::loop for this playback — pass true to repeat it forever, or omit/pass false to
 // play it once and stop (ComboFinished() then reports true). Examples:
-//   Combo(IdleSequence);          // Play once (default)
-//   Combo(IdleSequence, true);    // Loop forever
-//   Combo(IdleSequence, false);   // Play once (explicit)
+//   Combo(<yourCombo>);          // Play once (default)
+//   Combo(<yourCombo>, true);    // Loop forever
+//   Combo(<yourCombo>, false);   // Play once (explicit)
 inline void Combo(const AnimationCombo& combo, bool loop = false) {
   eyesPlayer.combo = &combo;
   eyesPlayer.comboPlaying = true;
@@ -3447,6 +3449,100 @@ private:
 };
 #endif // __has_include(<Adafruit_GC9A01A.h>)
 
+#if defined(EYES_USE_LVGL)
+// ==========================================================================================
+//  LVGL INTEGRATION  (see "TWO WAYS TO USE THESE EYES" at the top of this file)
+//  ----------------------------------------------------------------------------------------
+//  Render these eyes as an ordinary LVGL object (an lv_canvas) so they coexist with an LVGL
+//  UI — e.g. the Kibo "UI/UX Design (LVGL)" export — on the SAME physical display, with no
+//  conflict. Turn this on with:   #define EYES_USE_LVGL   BEFORE you #include this header.
+//
+//  In this mode the header deliberately declares NO 'tft', NO setup()/loop(), and NO SPI/panel
+//  init. LVGL exclusively owns the display, the main loop, and the refresh pipeline; the eyes
+//  are just content it composites and flushes. That is precisely what removes the "two systems
+//  fighting over one screen" problem: no double lv_init, no duplicate 'tft'/setup()/loop(), no
+//  loop that never pumps the other system, and no full-frame blit clobbering LVGL's dirty-region
+//  redraws or getting wiped when LVGL switches screens.
+//
+//  The eyes attach to lv_layer_top() by default — a PERSISTENT layer, not a screen — so they
+//  survive UI.showXScreen() (UI exporters like Kibo's rebuild/delete screens on every switch,
+//  which would delete a screen-parented eye canvas with them). Show()/Hide() flips eyes vs. UI.
+// ==========================================================================================
+#include <lvgl.h>
+#include <Adafruit_GFX.h>  // GFXcanvas16 — a RAM canvas the eyes render into; LVGL then shows it
+
+namespace EyesLvgl {
+
+// The eyes draw into this Adafruit_GFX RGB565 RAM canvas. The lv_canvas object points straight
+// at the SAME buffer (zero-copy), so LVGL composites/flushes it through its own single pipeline
+// — we never touch the panel directly. 'static' file scope, matching this header's eyesPlayer.
+static GFXcanvas16* s_canvas = nullptr;
+static lv_obj_t*    s_obj    = nullptr;
+static lv_timer_t*  s_timer  = nullptr;
+
+// Draws one eye frame into the canvas and marks it dirty for LVGL. Runs from an lv_timer (i.e.
+// from inside your own lv_timer_handler() call), so it is cooperative with the rest of the UI.
+inline void Render() {
+  if (!s_canvas || !s_canvas->getBuffer()) return;   // canvas allocation failed — see Attach()
+  LiveEye live      = UpdateEyes();
+  LiveEye liveRight = UpdateEyesRight();
+  s_canvas->fillScreen(EYE_COLOR_BACKGROUND);
+  eyesDrawEyePair(*s_canvas, s_canvas->width() / 2, s_canvas->height() / 2, live, liveRight,
+                  EYE_COLOR_BACKGROUND, eyesPlayer.colorsLeft, eyesPlayer.colorsRight);
+#if defined(EYES_LVGL_BYTESWAP)
+  // If the eyes' colors look byte-swapped, add:  #define EYES_LVGL_BYTESWAP  before including
+  // this header (Adafruit's GFXcanvas16 and LVGL's RGB565 can disagree on byte order on some
+  // builds). Alternatively build LVGL with LV_COLOR_16_SWAP, or set your display driver's swap.
+  s_canvas->byteSwap();
+#endif
+  if (s_obj) lv_obj_invalidate(s_obj);
+}
+
+static void EyesLvglTimerCb(lv_timer_t*) { Render(); }
+
+// The lv_canvas object the eyes live on (nullptr until Attach()).
+inline lv_obj_t* Object() { return s_obj; }
+// Show/hide the eyes overlay. Hide() reveals whatever LVGL screen is underneath; Show() brings
+// the eyes back. They keep animating while hidden (cheap), so Show() is instant.
+inline void Show() { if (s_obj) lv_obj_remove_flag(s_obj, LV_OBJ_FLAG_HIDDEN); }
+inline void Hide() { if (s_obj) lv_obj_add_flag(s_obj, LV_OBJ_FLAG_HIDDEN); }
+
+// Create the eyes and start animating. Call ONCE, in setup(), AFTER LVGL exists (after your
+// lv_init()/display init — e.g. after InitializeLVGL() in the Complete-Project entry sketch).
+// 'parent' DEFAULTS to lv_layer_top(): a persistent display layer (NOT a screen), so the eyes
+// float above every screen and survive UI.showXScreen(), which rebuilds/deletes screens —
+// parenting them to a screen would delete the eye canvas along with it. Use Show()/Hide() to
+// flip between "eyes" and "UI". Returns the lv_canvas (sized to the studio's display, centred).
+// Switch looks anytime with SetExpression()/PlayAnimation()/Combo() — identical to standalone
+// mode. 'updateMs' = redraw period (default = the studio's FPS).
+inline lv_obj_t* Attach(lv_obj_t* parent = nullptr, uint32_t updateMs = EYE_FRAME_DELAY_MS) {
+  if (s_obj) return s_obj;  // idempotent — attach once
+  if (!parent) parent = lv_layer_top();
+  s_canvas = new GFXcanvas16(EYE_DISPLAY_WIDTH, EYE_DISPLAY_HEIGHT);
+  // ~EYE_DISPLAY_WIDTH*EYE_DISPLAY_HEIGHT*2 bytes of heap (e.g. ~115 KB at 240x240). On a
+  // RAM-tight board this can fail; getBuffer()==nullptr means it did — prefer PSRAM or a smaller
+  // display size in that case. Returning nullptr here is safer than a null-pointer draw crash.
+  if (!s_canvas || !s_canvas->getBuffer()) { delete s_canvas; s_canvas = nullptr; return nullptr; }
+
+  s_obj = lv_canvas_create(parent);
+  lv_canvas_set_buffer(s_obj, s_canvas->getBuffer(), EYE_DISPLAY_WIDTH, EYE_DISPLAY_HEIGHT, LV_COLOR_FORMAT_RGB565);
+  lv_obj_center(s_obj);
+
+  Render();  // draw the first frame now, so the eyes appear before the first timer tick
+  s_timer = lv_timer_create(EyesLvglTimerCb, updateMs, nullptr);
+  return s_obj;
+}
+
+// Remove the eyes and free the canvas (rarely needed — usually you attach once at startup).
+inline void Detach() {
+  if (s_timer)  { lv_timer_delete(s_timer);  s_timer  = nullptr; }
+  if (s_obj)    { lv_obj_delete(s_obj);       s_obj    = nullptr; }
+  if (s_canvas) { delete s_canvas;            s_canvas = nullptr; }
+}
+
+} // namespace EyesLvgl
+#endif // EYES_USE_LVGL
+
 #endif // EYES_EYE_PLAYER_H
 `
 
@@ -3469,9 +3565,9 @@ function exportQuickReference(project: Project): string {
   lines.push('//')
   if ((project.animationCombos ?? []).length > 0) {
     lines.push('// Animation Combinations:')
-    lines.push('//   Combo(IdleSequence);          // Play once (default)')
-    lines.push('//   Combo(IdleSequence, true);    // Loop forever')
-    lines.push('//   Combo(IdleSequence, false);   // Play once (explicit)')
+    lines.push('//   Combo(<yourCombo>);          // Play once (default)')
+    lines.push('//   Combo(<yourCombo>, true);    // Loop forever')
+    lines.push('//   Combo(<yourCombo>, false);   // Play once (explicit)')
     for (const combo of project.animationCombos) lines.push(`//   Combo(${toIdentifier(combo.name)});`)
   } else {
     lines.push('// Animation Combinations: (this project has none yet)')
@@ -3677,7 +3773,93 @@ export function generateCppHeader(project: Project): string {
  * This file is plug-and-play: it also bundles the "player" (easing, interpolation, and
  * drawing) as inline functions, so you don't need a separate companion file — including a
  * high-level SetExpression()/PlayAnimation()/UpdateEyes() API, so changing what's on screen
- * is exactly one line of code, from anywhere in your own sketch. Minimal usage:
+ * is exactly one line of code, from anywhere in your own sketch.
+ *
+ * ============================ TWO WAYS TO USE THESE EYES ============================
+ *
+ * WAY 1 — STANDALONE (no LVGL): this file owns the whole sketch. You declare a display object
+ *   ('tft'), init it in setup(), and draw a full frame every loop(). Use this when the eyes are
+ *   the ONLY thing on the screen. This is the example shown just below (and the ready-to-flash
+ *   EYES_ENABLE_DEMO sketch further down).
+ *
+ * WAY 2 — INSIDE AN LVGL PROJECT (recommended when you ALSO ship an LVGL UI — e.g. Kibo's
+ *   "UI/UX Design (LVGL)" export, with its ui.h / UI.begin() / UI.showXScreen()): the eyes
+ *   become a normal LVGL object (an lv_canvas) so both share one display with NO conflict. Do
+ *   NOT use WAY 1's 'tft' / setup() / loop() here — LVGL already owns the display, the loop, and
+ *   lv_timer_handler(). Wire it up in your MAIN sketch (the .ino that has setup()/loop()):
+ *     1. Put   #define EYES_USE_LVGL   ABOVE every #include (or pass -DEYES_USE_LVGL as a build
+ *        flag), and #include this header BEFORE any of your own headers that use its API
+ *        (SetExpression/PlayAnimation/Combo/EyesLvgl/...):
+ *          #define EYES_USE_LVGL
+ *          ... your #includes ...   (put  #include "eyes.h"  before ui.h / encoder.h / etc.)
+ *        WHY above every include: eyes.h has an include guard, so if ANY header (e.g. an
+ *        encoder/input helper) #includes eyes.h FIRST while EYES_USE_LVGL is still undefined, the
+ *        guard latches the NON-LVGL build and EyesLvgl / Combo / SetExpression never get declared
+ *        — you'd get confusing errors like "'EyesLvgl' was not declared" or "'<yourCombo>' was
+ *        not declared". Defining it above all includes avoids that entirely.
+ *     2. In setup(), AFTER LVGL is up (after your lv_init()/display init — e.g. right after the
+ *        generated InitializeLVGL(); UI.begin()/UI.showMainScreen() may come before or after),
+ *        add ONE line:
+ *          EyesLvgl::Attach();        // eyes as a persistent overlay on lv_layer_top()
+ *     3. loop() needs NOTHING new — the eyes redraw from their own lv_timer, which your existing
+ *        UI.update() / lv_timer_handler() already pumps.
+ *     4. Switch looks from anywhere (a button callback, a sensor, a serial command):
+ *          SetExpression(Expr_Happy);   PlayAnimation(Anim_Idle);   Combo(...);
+ *        No fillScreen / present / delay of your own.
+ *     5. The eyes float ABOVE your UI screens (top layer) and survive UI.showScreen(...), which
+ *        rebuilds screens. Flip between "eyes" and "UI" with:
+ *          EyesLvgl::Hide();   // reveal the LVGL screen underneath
+ *          EyesLvgl::Show();   // bring the eyes back
+ *   Full API + notes (why the top layer, canvas memory, and an EYES_LVGL_BYTESWAP knob if colors
+ *   look byte-swapped) are in the "LVGL INTEGRATION" block guarded by EYES_USE_LVGL below.
+ *
+ *   ---------------------------------------------------------------------------------------
+ *   WAY 2 COPY-PASTE EXAMPLE — this is a normal LVGL "Complete Project" sketch (the kind the
+ *   UI/UX Design (LVGL) export generates as <YourProject>.ino) with ONLY the 4 eye lines added,
+ *   each marked  // <== EYES .  Add just those 4 lines to YOUR existing generated .ino; keep the
+ *   rest (tft, ui_disp_flush, InitializeDisplay/LVGL, UI.*) exactly as it already is — do NOT
+ *   add a second lv_init(), display, tft, setup(), or loop().
+ *   ---------------------------------------------------------------------------------------
+ *
+ *     #define EYES_USE_LVGL                   // <== EYES  define ABOVE every #include (see step 1)
+ *
+ *     #include <lvgl.h>
+ *     #include <Adafruit_GFX.h>
+ *     #include <Adafruit_GC9A01A.h>          // (your display driver)
+ *     #include "eyes.h"                       // <== EYES  BEFORE ui.h / any header that uses its API
+ *     #include "ui.h"                         // your generated LVGL UI (UI.begin(), UI.showXScreen(), ...)
+ *
+ *     // ... your generated tft, ui_disp_flush(), InitializeDisplay(), InitializeLVGL() stay
+ *     //     here UNCHANGED — the eyes reuse all of it, they don't create their own ...
+ *
+ *     void setup() {
+ *       InitializeDisplay();                  // your existing display init  (unchanged)
+ *       InitializeLVGL();                     // your existing lv_init()/display (unchanged)
+ *       UI.begin();                           // your existing UI build       (unchanged)
+ *       UI.showMainScreen();                  // your existing first screen    (unchanged)
+ *
+ *       EyesLvgl::Attach();                   // <== EYES  eyes overlay on lv_layer_top()
+ *       PlayAnimation(Anim_Idle);             // <== EYES  start a look (any Anim_/Expr_ name below)
+ *     }
+ *
+ *     void loop() {
+ *       UI.update();                          // your existing lv_timer_handler() pump — also
+ *                                             // drives the eyes; nothing eye-specific goes here
+ *     }
+ *
+ *   Then change what's showing from ANYWHERE (a button callback, a sensor, a serial command):
+ *     SetExpression(Expr_Happy);              // switch expression   (use YOUR real Expr_ name)
+ *     PlayAnimation(Anim_Blink);              // play an animation   (use YOUR real Anim_ name)
+ *     Combo(<yourCombo>);                     // play a combination  (use YOUR real combo name)
+ *     EyesLvgl::Hide();                       // reveal your LVGL UI underneath the eyes
+ *     EyesLvgl::Show();                       // bring the eyes back on top
+ *   Every valid Expr_/Anim_/combo name for THIS project is listed in the "Quick Reference"
+ *   section below — copy those exact names (Expr_Happy/Anim_Blink/<yourCombo> here are only
+ *   illustrative placeholders and may not exist in your project).
+ *
+ * ===================================================================================
+ *
+ * WAY 1 (standalone) minimal usage:
  *
  *   #include <SPI.h>
  *   #include <Adafruit_GC9A01A.h>  // <- put both of these BEFORE the line below, in your
