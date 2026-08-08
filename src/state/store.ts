@@ -941,6 +941,12 @@ interface StoreState {
    * size instead of arbitrary CSS pixel sizes. */
   uiEsp32PreviewMode: boolean
   toggleUiEsp32Preview: () => void
+  /** Which widget state the canvas simulates for the SELECTED widget, so the user can preview
+   * hover/pressed/disabled/focused before exporting. 'default' = normal. Ephemeral (never
+   * persisted), same convention as uiEsp32PreviewMode. The Properties panel's state tab is bound
+   * to this, so switching the tab you edit also renders that state on the canvas. */
+  uiPreviewState: 'default' | UiWidgetStateName
+  setUiPreviewState: (state: 'default' | UiWidgetStateName) => void
 
   // UI Design Mode — canvas zoom/pan/rulers/snap/grid preferences (UiWorkspaceViewSettings,
   // see its own doc comment in types/uiDesign.ts for why this lives in EditorState/here rather
@@ -1241,6 +1247,7 @@ export const useStore = create<StoreState>()(
     selectedWidgetId: null,
     uiPreviewDisplayOverride: null,
     uiEsp32PreviewMode: false,
+    uiPreviewState: 'default',
     uiWorkspaceView: defaultUiWorkspaceView(),
     uiDragPreview: null,
     uiCanvasViewportSize: null,
@@ -4038,6 +4045,7 @@ export const useStore = create<StoreState>()(
 
     setUiRevealWidgetId: (id) => set((s) => void (s.uiRevealWidgetId = id)),
     toggleUiEsp32Preview: () => set((s) => void (s.uiEsp32PreviewMode = !s.uiEsp32PreviewMode)),
+    setUiPreviewState: (state) => set((s) => void (s.uiPreviewState = state)),
 
     updateUiWorkspaceView: (partial) => set((s) => void Object.assign(s.uiWorkspaceView, partial)),
     setUiDragPreview: (preview) => set((s) => void (s.uiDragPreview = preview)),

@@ -1088,6 +1088,7 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
   const uiDisplay = useStore((s) => s.uiPreviewDisplayOverride ?? s.project.uiDesign.display)
   const display = { width: uiDisplay.width, height: uiDisplay.height, shape: uiDisplayShapeToDisplayShape(uiDisplay.shape) }
   const selectedWidgetId = useStore((s) => s.selectedWidgetId)
+  const uiPreviewState = useStore((s) => s.uiPreviewState)
   const simulatedFocusWidgetId = useStore((s) => s.simulatedFocusWidgetId)
   const simulatedFocusKeyId = useStore((s) => s.simulatedFocusKeyId)
   const selectUiWidget = useStore((s) => s.selectUiWidget)
@@ -1475,7 +1476,11 @@ export function WidgetRenderer({ widgetId }: { widgetId: string }) {
     }
   }
 
-  const effectiveStyle = computeEffectiveStyle(widget, cssRules, themeCtx)
+  // State preview: only the SELECTED widget renders in the simulated state (hover/pressed/disabled/
+  // focused) chosen in the Properties panel's state tab; every other widget stays default — matching
+  // how one real widget at a time is in a given state on the device.
+  const previewState = widget.id === selectedWidgetId && uiPreviewState !== 'default' ? uiPreviewState : undefined
+  const effectiveStyle = computeEffectiveStyle(widget, cssRules, themeCtx, previewState)
   // Rotation/scale are scoped to image/icon widgets only (LVGL's lv_img_set_angle/lv_img_set_zoom)
   // — see UiWidgetStyle's own comments for why these aren't general widget transforms.
   const isImageLike = widget.type === 'image' || widget.type === 'icon'

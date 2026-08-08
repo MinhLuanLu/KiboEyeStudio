@@ -2530,7 +2530,10 @@ export function PropertiesPanel() {
   const checkpoint = useStore((s) => s.checkpoint)
   const selectUiWidget = useStore((s) => s.selectUiWidget)
   const updateUiWorkspaceView = useStore((s) => s.updateUiWorkspaceView)
-  const [stateTab, setStateTab] = useState<StateTab>('default')
+  // The state tab lives in the store (uiPreviewState) so the canvas can simulate the selected
+  // state on the selected widget — switching the tab you edit also previews it live.
+  const stateTab = useStore((s) => s.uiPreviewState)
+  const setStateTab = useStore((s) => s.setUiPreviewState)
 
   if (!selectedWidgetId || !widget) {
     return <div className="p-3 text-sm text-studio-muted">Select a widget on the canvas to edit its properties.</div>

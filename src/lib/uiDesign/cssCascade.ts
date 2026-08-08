@@ -1,4 +1,4 @@
-import type { UiCssRule, UiDesignProject, UiWidget, UiWidgetStyle } from '@/types'
+import type { UiCssRule, UiDesignProject, UiWidget, UiWidgetStyle, UiWidgetStateName } from '@/types'
 import { UI_WIDGET_TAG } from '@/types'
 import { resolveThemedStyle } from './themes'
 
@@ -29,7 +29,7 @@ function specificityRank(selector: string): number {
  * computed fresh on every render rather than cached/painted onto the widget, so it's
  * automatically live: editing a CSS rule, or a widget gaining/losing a class, takes effect
  * immediately with no separate "re-apply" step. */
-export function computeEffectiveStyle(widget: UiWidget, cssRules: UiCssRule[], theme?: Pick<UiDesignProject, 'theme' | 'customThemeTokens'>): UiWidgetStyle {
+export function computeEffectiveStyle(widget: UiWidget, cssRules: UiCssRule[], theme?: Pick<UiDesignProject, 'theme' | 'customThemeTokens'>, state?: UiWidgetStateName): UiWidgetStyle {
   const matching = cssRules.filter((r) => matchesSelector(widget, r.selector)).sort((a, b) => specificityRank(a.selector) - specificityRank(b.selector))
 
   const out: UiWidgetStyle = {}
@@ -45,5 +45,14 @@ export function computeEffectiveStyle(widget: UiWidget, cssRules: UiCssRule[], t
   // exporter's identical choice — see lvglExport.ts's exportLvglStyles) — CSS-rule-sourced colors
   // stay literal.
   applyDefined(theme ? resolveThemedStyle(widget, theme) : widget.style)
+  // Optional state overlay for previewing hover/pressed/disabled/focused: layer the matching CSS
+  // rules' state partials (low-to-high specificity), then the widget's own local state partial last
+  // — exactly the order the LVGL exporter emits (rule state styles, then the widget-local state
+  // style, applied over LV_STATE_DEFAULT). This keeps the Studio's state preview pixel-consistent
+  // with what the exported C++ renders when the real widget enters that state.
+  if (state) {
+    for (const rule of matching) applyDefined(rule.states?.[state])
+    applyDefined(widget.states?.[state])
+  }
   return out
 }
