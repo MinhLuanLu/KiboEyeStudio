@@ -5314,6 +5314,31 @@ function generateMainEntry(mainShowFnName: string | null, target: ExportTarget, 
   const macroPrefix = macroPrefixFor(ns)
   const di = generateDisplayInitCode(target, macroPrefix)
   const idLiteral = JSON.stringify(exampleWidgetId ?? 'yourWidgetId')
+  const isArduino = target.format === 'arduino'
+  const configLoc = isArduino ? 'project root' : 'include/'
+  const libList = requiredLibraries(target)
+    .map((l) => `//   - ${l}`)
+    .join('\n')
+  const boardName = boardLabel(target)
+  const compileTargetLines = isArduino
+    ? [
+        '// ESP32 build settings — Arduino IDE -> Tools menu:',
+        `//   - Board:            ${boardName}`,
+        '//   - Flash Size:       4MB  (or whatever your board actually has)',
+        '//   - Partition Scheme: "Huge APP (3MB No OTA/1MB SPIFFS)"',
+        '//       LVGL + fonts easily exceed the DEFAULT ~1.3 MB app partition. The symptom is',
+        '//       "Sketch too big" / "text section exceeds available space in board" at upload time.',
+        '//       Huge APP gives the sketch a 3 MB slot; pick any scheme whose APP slot is larger',
+        '//       than your compiled binary.',
+        '//   - PSRAM:            enable it if your board has PSRAM and you enlarge the LVGL buffers.'
+      ].join('\n')
+    : [
+        '// ESP32 build settings — platformio.ini:',
+        `//   - board is already set for ${boardName}.`,
+        '//   - If the firmware overflows the default app partition (LVGL + fonts are large), add:',
+        '//         board_build.partitions = huge_app.csv',
+        '//     to your [env] section (symptom without it: "text section exceeds available space").'
+      ].join('\n')
   return `/*
  * ${entryFilename}
  *
@@ -5322,21 +5347,57 @@ function generateMainEntry(mainShowFnName: string | null, target: ExportTarget, 
  * ${target.displayModel === 'gc9a01a' ? 'InitializeDisplay()/ui_disp_flush() below are real, working code for the GC9A01A preset.' : 'You WILL need to fill in the TODO sections below (ui_disp_flush/InitializeDisplay) for your display driver — see config.h and README.md.'}
  * Everything else (UI.*, declared in ui.h) is generated and works as-is.
  *
+ * This file is split into labeled sections so it stays readable when you reopen it later or drop
+ * it into another ESP32 project:
+ *     COMPILE SETUP        - libraries + IDE/memory settings to get right BEFORE building
+ *     LVGL SETUP           - generated display + LVGL init (leave as-is unless noted)
+ *     EYE EXPRESSION SETUP - OPTIONAL: how to add eyes.h from the Eye Expression Designer
+ *     USER SETUP / LOOP    - your code goes here; preserved across re-exports
+ *
  * Required libraries: LVGL ${LVGL_VERSION}${di.requiredLibs}.
  */
+
+// ============================================================
+// COMPILE SETUP  (do this BEFORE your first build)
+// ============================================================
+// Required libraries — install these first (Arduino IDE: Sketch -> Include Library -> Manage
+// Libraries... ; PlatformIO: already listed in platformio.ini's lib_deps):
+${libList}
+//
+// Generated config files (already set up for you — edit config.h to match your wiring):
+//   - lv_conf.h  (${configLoc})  LVGL library configuration. Only the font sizes this UI actually
+//       uses are enabled, to save flash. If you switch a label to a new size and hit an
+//       "undeclared lv_font_montserrat_NN" error, set that LV_FONT_MONTSERRAT_NN to 1 in lv_conf.h.
+//   - config.h   (${configLoc})  display width/height, rotation, color depth, and pin numbers.
+//
+${compileTargetLines}
+//
+// GOLDEN RULE: keep loop() NON-BLOCKING (no long delay()/while waits). LVGL — and Eye Expressions,
+// if you add them — need frequent updates or animations stutter. See USER LOOP at the bottom.
+
 #include <lvgl.h>
 ${di.includes.join('\n')}
 #include "ui.h"
 #include "config.h"
 
+// ============================================================
+// LVGL SETUP  (generated — you normally don't edit this section)
+// ============================================================
+
+// Draw buffer(s) LVGL renders into before the flush callback pushes them to the panel.
 static lv_color_t s_buf1[${macroPrefix}_DISPLAY_WIDTH * ${macroPrefix}_DRAW_BUFFER_LINES];
 ${di.secondBuffer ? `static lv_color_t s_buf2[${macroPrefix}_DISPLAY_WIDTH * ${macroPrefix}_DRAW_BUFFER_LINES]; // 2nd buffer: lets rendering pipeline against the DMA transfer\n` : ''}static uint32_t s_lastTickMs = 0;
 ${di.globals.length > 0 ? `\n${di.globals.join('\n')}` : ''}
 
+// [GENERATED] LVGL calls this automatically whenever it needs to push pixels to the panel — you
+// do NOT call it yourself.
 ${di.flushFn.join('\n')}
 
+// [GENERATED] Brings up the display panel. Call ONCE from setup() (already wired below).
 ${di.initDisplayFn.join('\n')}
 
+// [GENERATED] Initializes LVGL, its draw buffer(s), and the flush callback above. Call ONCE from
+// setup(), AFTER InitializeDisplay() (already wired below).
 void InitializeLVGL() {
   lv_init();
 
@@ -5351,28 +5412,78 @@ void InitializeLVGL() {
   s_lastTickMs = millis();
 }
 
+// ============================================================
+// EYE EXPRESSION SETUP  (OPTIONAL)
+// ============================================================
+// Only needed if you are adding eyes exported from the Eye Expression Designer (eyes.h). This
+// LVGL export contains NO eye code — skip this whole section if you're not using expressions.
+//
+// How it fits together: the eyes render as an LVGL OVERLAY (an lv_canvas on lv_layer_top()), so
+// they SHARE this file's single lv_display and ui_disp_flush. There is only ONE renderer (LVGL) —
+// you do NOT create a second display or flush for the eyes. That shared setup is exactly what
+// prevents flicker and stops one renderer from overwriting the other.
+//
+//   1) At the VERY TOP of this file, BEFORE #include "ui.h" and before including eyes.h, add:
+//          #define EYES_USE_LVGL      // build eyes.h's LVGL-overlay path (not the standalone one)
+//          #define EYES_NO_ROTATION   // REQUIRED on FPU-less chips (e.g. ESP32-C6) or eyes freeze
+//          #include "eyes.h"
+//
+//   2) In setup() (inside the USER CODE region), AFTER UI.begin():
+//          EyesLvgl::Attach();        // place the eye overlay on top (survives UI screen switches)
+//          Combo(Idle, true);         // start an expression/animation (see eyes.h Quick Reference)
+//
+//   3) In loop(): nothing extra to call — the eyes redraw from their OWN lv_timer, driven by the
+//      same LVGL tick that UI.update() already pumps. Just keep loop() non-blocking.
+//
+//   4) Switching between an LVGL screen and the eyes (show ONE at a time, never both fighting for
+//      the top layer):
+//          EyesLvgl::Pause();  UI.showScreen("Main");  // hide+stop the eyes, let the screen draw
+//          EyesLvgl::Resume();                          // bring the eyes back on top (screen stays under)
+//      Change expressions anytime: SetExpression(Expr_Neutral);  PlayAnimation(Anim_Blink);  Combo(Idle);
+//
+// Display-conflict rules: one display + one flush (never init a separate driver for the eyes);
+// show EITHER an LVGL screen OR the eye overlay as the top layer; and no blocking in loop().
+
+// ============================================================
+// USER SETUP  (your code — safe to edit)
+// ============================================================
+// Runs once at boot. The generated init calls below must stay; add your own setup inside the
+// USER CODE markers so it survives a re-export.
 void setup() {
   Serial.begin(115200); // always on — generated event callbacks and hardware-navigation code
                          // (e.g. encoder helpers) call Serial.println() unconditionally, so this
                          // needs to run unconditionally too, or that output silently goes nowhere.
   Serial.println("UI starting...");
 
-  InitializeDisplay();
-  InitializeLVGL();
+  InitializeDisplay();   // [GENERATED] bring up the panel (see LVGL SETUP above)
+  InitializeLVGL();      // [GENERATED] start LVGL + draw buffers + flush callback
 
-  UI.begin();
-  ${mainShowFnName ? `UI.${mainShowFnName.charAt(0).toLowerCase()}${mainShowFnName.slice(1)}();` : '// (no screens yet — add one in UI/UX Design Mode)'}
+  UI.begin();            // [GENERATED] build every screen, widget, and style (from ui.cpp)
+  ${mainShowFnName ? `UI.${mainShowFnName.charAt(0).toLowerCase()}${mainShowFnName.slice(1)}();   // [GENERATED] show the start screen` : '// (no screens yet — add one in UI/UX Design Mode)'}
 
-  // Basic event callback example — see the *_clicked() stubs generated in each screen's file for
-  // any named button in your design; fill in their bodies with your own logic.
+  // Add your own initialization below (sensors, WiFi, Eye Expressions, ...). Anything between
+  // these markers is PRESERVED when you re-export (see "Regenerating safely" in README.md).
+  // USER CODE BEGIN UserSetup
+  // USER CODE END UserSetup
 }
 
+// ============================================================
+// USER LOOP  (your code — safe to edit)
+// ============================================================
+// Runs continuously. Keep it fast: no long delay()/while blocking, or LVGL and Eye Expression
+// animations stutter.
 void loop() {
   uint32_t now = millis();
-  lv_tick_inc(now - s_lastTickMs);
+  lv_tick_inc(now - s_lastTickMs);   // [GENERATED] give LVGL its time base
   s_lastTickMs = now;
 
-  UI.update();
+  UI.update();   // [GENERATED] pump LVGL: renders the UI and advances animations. Call every pass.
+
+  // Add your own per-frame logic below — e.g. read a sensor and UI.setText("label", ...), or tick
+  // Eye Expressions. Kept across re-exports.
+  // USER CODE BEGIN UserLoop
+  // USER CODE END UserLoop
+
   delay(1);   // tiny yield (RTOS idle task / WiFi / watchdog); lv_timer_handler() inside
               // UI.update() already paces the refresh, so no need to burn extra ms here.
 }
