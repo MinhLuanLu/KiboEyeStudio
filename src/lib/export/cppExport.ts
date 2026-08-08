@@ -3527,6 +3527,15 @@ inline lv_obj_t* Object() { return s_obj; }
 inline void Show() { if (s_obj) lv_obj_remove_flag(s_obj, LV_OBJ_FLAG_HIDDEN); }
 inline void Hide() { if (s_obj) lv_obj_add_flag(s_obj, LV_OBJ_FLAG_HIDDEN); }
 
+// Active-mode switch between the eyes and an LVGL UI screen. Pause() FULLY stops the eye renderer:
+// it hides the overlay AND pauses the redraw timer, so the eyes stop rastering/invalidating and the
+// LVGL screen underneath takes over the display with no interference. Resume() brings the eyes back
+// on top, restarts the timer, and draws one fresh frame immediately so no stale buffer flashes.
+// Unlike Show()/Hide() (which leave the timer running), these give a clean "one renderer at a time"
+// mode: call Pause() when switching to a UI screen, Resume() when switching back to the eyes.
+inline void Pause()  { Hide(); if (s_timer) lv_timer_pause(s_timer); }
+inline void Resume() { Show(); if (s_timer) lv_timer_resume(s_timer); Render(); }
+
 // Create the eyes and start animating. Call ONCE, in setup(), AFTER LVGL exists (after your
 // lv_init()/display init — e.g. after InitializeLVGL() in the Complete-Project entry sketch).
 // 'parent' DEFAULTS to lv_layer_top(): a persistent display layer (NOT a screen), so the eyes
