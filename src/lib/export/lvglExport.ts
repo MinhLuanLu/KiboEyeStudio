@@ -5190,34 +5190,93 @@ function generateKiboUIParts(
 // a real, compiling flush callback for the GC9A01A preset, TODO-stubbed for everything else.
 // ---------------------------------------------------------------------------------------------
 
-/** The GC9A01A preset gets a real, compiling flush implementation — plain Adafruit_GC9A01A +
- * Adafruit_GFX (not the Kibo firmware project's own GC9A01A_RoboEyesDisplay subclass, which is
- * specific to its RoboEyes rendering and irrelevant to a UI-only export), same pins/SPI-begin/
- * setRotation(0) shape as that project's own Display.h — the literal "reuse this project's
- * ... display settings, pin configuration, and initialization logic" deliverable this export
- * mode was asked for. Every other display model keeps the same TODO-stub shape "UI Screen Only"
- * mode's Example.ino already uses, just with a driver-appropriate example comment. */
-function generateDisplayInitCode(target: ExportTarget, macroPrefix: string): { includes: string[]; globals: string[]; flushFn: string[]; initDisplayFn: string[]; initLvglExtra: string[] } {
+/** The GC9A01A preset gets a real, compiling flush implementation using LovyanGFX (hardware SPI
+ * + asynchronous DMA). DMA matters: Adafruit_GC9A01A's drawRGBBitmap() blocks the loop for the
+ * whole 240x240 transfer every frame (~11-15 ms), which drops frames and makes animation stutter;
+ * LovyanGFX's pushImageDMA() returns immediately, so the loop keeps running during the transfer,
+ * and a second LVGL draw buffer lets the next chunk render while the previous one is still being
+ * sent. Every other display model keeps the same TODO-stub shape "UI Screen Only" mode's
+ * Example.ino already uses, just with a driver-appropriate example comment. */
+function generateDisplayInitCode(target: ExportTarget, macroPrefix: string): { includes: string[]; globals: string[]; flushFn: string[]; initDisplayFn: string[]; initLvglExtra: string[]; secondBuffer: boolean; requiredLibs: string } {
   if (target.displayModel === 'gc9a01a') {
     return {
-      includes: ['#include <SPI.h>', '#include <Adafruit_GFX.h>', '#include <Adafruit_GC9A01A.h>'],
-      globals: [`Adafruit_GC9A01A tft(${macroPrefix}_TFT_CS, ${macroPrefix}_TFT_DC, ${macroPrefix}_TFT_RST);`],
+      // LovyanGFX (hardware SPI + DMA), NOT Adafruit_GC9A01A: Adafruit's drawRGBBitmap() blocks the
+      // loop for the ENTIRE 240x240 transfer (~11-15 ms) every frame, which drops frames and makes
+      // animation stutter. LovyanGFX pushes over DMA asynchronously so the loop keeps running.
+      includes: ['#define LGFX_USE_V1', '#include <LovyanGFX.hpp>'],
+      globals: [
+        '// LovyanGFX panel definition for the GC9A01A (240x240 round SPI), hardware SPI + DMA. Pins',
+        '// come from config.h. spi_host = SPI2_HOST works on classic ESP32 (HSPI) and ESP32-S3/C3;',
+        '// dma_channel = SPI_DMA_CH_AUTO is what makes the flush non-blocking. Troubleshooting: if',
+        "// colors are photo-negative set cfg.invert=false; if red/blue swap set cfg.rgb_order=true;",
+        '// if it will not init try cfg.spi_host = SPI3_HOST; on long/noisy wiring drop freq_write to',
+        '// 40000000.',
+        'class LGFX : public lgfx::LGFX_Device {',
+        '  lgfx::Panel_GC9A01 _panel;',
+        '  lgfx::Bus_SPI      _bus;',
+        'public:',
+        '  LGFX() {',
+        '    {',
+        '      auto cfg = _bus.config();',
+        '      cfg.spi_host    = SPI2_HOST;',
+        '      cfg.spi_mode    = 0;',
+        '      cfg.freq_write  = 80000000;',
+        '      cfg.freq_read   = 16000000;',
+        '      cfg.spi_3wire   = false;',
+        '      cfg.use_lock    = true;',
+        '      cfg.dma_channel = SPI_DMA_CH_AUTO;',
+        `      cfg.pin_sclk    = ${macroPrefix}_TFT_SCLK;`,
+        `      cfg.pin_mosi    = ${macroPrefix}_TFT_MOSI;`,
+        '      cfg.pin_miso    = -1;',
+        `      cfg.pin_dc      = ${macroPrefix}_TFT_DC;`,
+        '      _bus.config(cfg);',
+        '      _panel.setBus(&_bus);',
+        '    }',
+        '    {',
+        '      auto cfg = _panel.config();',
+        `      cfg.pin_cs          = ${macroPrefix}_TFT_CS;`,
+        `      cfg.pin_rst         = ${macroPrefix}_TFT_RST;`,
+        '      cfg.pin_busy        = -1;',
+        `      cfg.panel_width     = ${macroPrefix}_DISPLAY_WIDTH;`,
+        `      cfg.panel_height    = ${macroPrefix}_DISPLAY_HEIGHT;`,
+        '      cfg.offset_x        = 0;',
+        '      cfg.offset_y        = 0;',
+        '      cfg.offset_rotation = 0;',
+        '      cfg.readable        = false;',
+        '      cfg.invert          = true;',
+        '      cfg.rgb_order       = false;',
+        '      cfg.dlen_16bit      = false;',
+        '      cfg.bus_shared      = false;',
+        '      _panel.config(cfg);',
+        '    }',
+        '    setPanel(&_panel);',
+        '  }',
+        '};',
+        '',
+        'LGFX tft;'
+      ],
       flushFn: [
         'static void ui_disp_flush(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {',
         '  uint32_t w = lv_area_get_width(area);',
         '  uint32_t h = lv_area_get_height(area);',
-        '  tft.drawRGBBitmap(area->x1, area->y1, (uint16_t*)px_map, w, h);',
+        '  // Asynchronous DMA push: returns immediately, so loop()/rendering keep running during the',
+        '  // ~11 ms transfer. With two draw buffers (below) LVGL renders the next chunk while this one',
+        '  // sends. If colors look swapped use (lgfx::swap565_t*).',
+        '  tft.pushImageDMA(area->x1, area->y1, w, h, reinterpret_cast<lgfx::rgb565_t*>(px_map));',
         '  lv_display_flush_ready(disp);',
         '}'
       ],
       initDisplayFn: [
         'void InitializeDisplay() {',
-        `  SPI.begin(${macroPrefix}_TFT_SCLK, -1, ${macroPrefix}_TFT_MOSI, ${macroPrefix}_TFT_CS);`,
-        '  tft.begin();',
+        '  tft.init();       // LovyanGFX brings up the SPI bus (with DMA) and the panel',
         '  tft.setRotation(0);',
+        '  tft.initDMA();    // arm the DMA engine',
+        '  tft.fillScreen(0);',
         '}'
       ],
-      initLvglExtra: []
+      initLvglExtra: [],
+      secondBuffer: true,
+      requiredLibs: ', LovyanGFX'
     }
   }
   const driverHint =
@@ -5245,7 +5304,9 @@ function generateDisplayInitCode(target: ExportTarget, macroPrefix: string): { i
       'void InitializeDisplay() {',
       '}'
     ],
-    initLvglExtra: []
+    initLvglExtra: [],
+    secondBuffer: false,
+    requiredLibs: ', plus whatever display-driver library matches your hardware'
   }
 }
 
@@ -5261,7 +5322,7 @@ function generateMainEntry(mainShowFnName: string | null, target: ExportTarget, 
  * ${target.displayModel === 'gc9a01a' ? 'InitializeDisplay()/ui_disp_flush() below are real, working code for the GC9A01A preset.' : 'You WILL need to fill in the TODO sections below (ui_disp_flush/InitializeDisplay) for your display driver — see config.h and README.md.'}
  * Everything else (UI.*, declared in ui.h) is generated and works as-is.
  *
- * Required libraries: LVGL ${LVGL_VERSION}${di.includes.length > 0 ? ', Adafruit_GFX, Adafruit_GC9A01A' : ', plus whatever display-driver library matches your hardware'}.
+ * Required libraries: LVGL ${LVGL_VERSION}${di.requiredLibs}.
  */
 #include <lvgl.h>
 ${di.includes.join('\n')}
@@ -5269,7 +5330,7 @@ ${di.includes.join('\n')}
 #include "config.h"
 
 static lv_color_t s_buf1[${macroPrefix}_DISPLAY_WIDTH * ${macroPrefix}_DRAW_BUFFER_LINES];
-static uint32_t s_lastTickMs = 0;
+${di.secondBuffer ? `static lv_color_t s_buf2[${macroPrefix}_DISPLAY_WIDTH * ${macroPrefix}_DRAW_BUFFER_LINES]; // 2nd buffer: lets rendering pipeline against the DMA transfer\n` : ''}static uint32_t s_lastTickMs = 0;
 ${di.globals.length > 0 ? `\n${di.globals.join('\n')}` : ''}
 
 ${di.flushFn.join('\n')}
@@ -5281,7 +5342,7 @@ void InitializeLVGL() {
 
   lv_display_t* disp = lv_display_create(${macroPrefix}_DISPLAY_WIDTH, ${macroPrefix}_DISPLAY_HEIGHT);
   lv_display_set_flush_cb(disp, ui_disp_flush);
-  lv_display_set_buffers(disp, s_buf1, NULL, sizeof(s_buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
+  lv_display_set_buffers(disp, s_buf1, ${di.secondBuffer ? 's_buf2' : 'NULL'}, sizeof(s_buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
   lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565); // matches ${macroPrefix}_LVGL_COLOR_DEPTH
 
   // TODO: register an input device here if your hardware has touch (lv_indev_create) — omitted
@@ -5312,7 +5373,8 @@ void loop() {
   s_lastTickMs = now;
 
   UI.update();
-  delay(5);
+  delay(1);   // tiny yield (RTOS idle task / WiFi / watchdog); lv_timer_handler() inside
+              // UI.update() already paces the refresh, so no need to burn extra ms here.
 }
 
 // =================================================================================================
@@ -5379,7 +5441,7 @@ void loop() {
 
 export function requiredLibraries(target: ExportTarget): string[] {
   const libs = ['lvgl (LVGL 9.5.0)']
-  if (target.displayModel === 'gc9a01a') libs.push('Adafruit GFX Library', 'Adafruit GC9A01A')
+  if (target.displayModel === 'gc9a01a') libs.push('LovyanGFX')
   else libs.push('(your display driver library — e.g. TFT_eSPI, LovyanGFX, Arduino_GFX)')
   return libs
 }
@@ -5399,7 +5461,7 @@ function generateLibrariesTxt(target: ExportTarget): string {
 
 function platformioLibDeps(target: ExportTarget): string[] {
   const deps = ['lvgl/lvgl@^9.5.0']
-  if (target.displayModel === 'gc9a01a') deps.push('adafruit/Adafruit GFX Library@^1.11.9', 'adafruit/Adafruit GC9A01A@^1.0.5')
+  if (target.displayModel === 'gc9a01a') deps.push('lovyan03/LovyanGFX@^1.1.16')
   return deps
 }
 
@@ -5631,7 +5693,7 @@ ${display.rotation}° rotation) — reflected in \`${configPath}\`, not \`lv_con
   tearing at the cost of RAM, lower it if you're memory-constrained.
 - **Draw buffer / flush callback**: see \`${entryFile}\`'s \`InitializeLVGL()\`/\`ui_disp_flush()\`.${
     target.displayModel === 'gc9a01a'
-      ? ' Already implemented for the GC9A01A preset — real, working code, using a plain Adafruit_GFX-based driver and the pin/init sequence for that panel.'
+      ? ' Already implemented for the GC9A01A preset — real, working code, using LovyanGFX (hardware SPI + asynchronous DMA) so the panel flush does not block the render loop, plus the pin/init sequence for that panel. Install the "LovyanGFX" library.'
       : ' The flush callback body is a TODO you must fill in for your specific display driver.'
   }
 - **Tick source**: LVGL 9 has no \`LV_TICK_CUSTOM\` config option — \`${entryFile}\`'s \`loop()\`
