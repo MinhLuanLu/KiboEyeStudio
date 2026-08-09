@@ -447,7 +447,29 @@ function BindingRow({
 function AutoEventCallbackSection({ widget }: { widget: UiWidget }) {
   const updateUiWidgetMeta = useStore((s) => s.updateUiWidgetMeta)
   const checkpoint = useStore((s) => s.checkpoint)
-  if (!EVENT_CAPABLE_WIDGET_TYPES.has(widget.type)) return null
+  if (!EVENT_CAPABLE_WIDGET_TYPES.has(widget.type)) {
+    // A Label can't receive encoder/keyboard focus in LVGL — focus groups are for interactive
+    // widgets only. Instead of silently showing nothing where the user looks for a focus/event
+    // control (which is how they end up with a screen that has "widgets but none focusable"),
+    // explain why and point at the correct pattern. Scoped to labels — the common "why won't my
+    // menu item focus / change color when selected?" case; other display widgets stay quiet.
+    if (widget.type === 'label') {
+      return (
+        <div className="border-t border-studio-border pt-2.5">
+          <div className="text-[11px] bg-yellow-500/10 border border-yellow-500/30 text-yellow-200 rounded px-2 py-1.5 flex flex-col gap-1">
+            <span className="font-semibold">Label cannot receive focus</span>
+            <span className="text-yellow-200/80 leading-snug">
+              Labels are non-interactive, so a rotary encoder or keyboard cannot focus them directly.
+              To make this item selectable, place it inside a <b>Button</b> (or a focusable container /
+              List item) and enable focus on that parent instead — the parent goes into the LVGL focus
+              group, not the label. The label can still change color from the parent&rsquo;s Focused state.
+            </span>
+          </div>
+        </div>
+      )
+    }
+    return null
+  }
 
   const enabled = widget.eventCallbackEnabled !== false
   const selected = widget.eventCallbackTriggers ?? []
