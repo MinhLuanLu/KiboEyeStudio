@@ -451,7 +451,11 @@ function BindingRow({
 function LabelFocusNotice({ widget }: { widget: UiWidget }) {
   const updateUiWidgetMeta = useStore((s) => s.updateUiWidgetMeta)
   const checkpoint = useStore((s) => s.checkpoint)
-  if (widget.type !== 'label') return null
+  const stateTab = useStore((s) => s.uiPreviewState)
+  // Only surfaced when the user opens the Focused state tab for a Label — that's the moment they're
+  // setting up focus/selection behaviour, so the "labels aren't focusable, enable it here" guidance
+  // is relevant. Hidden the rest of the time so it isn't noise on every label.
+  if (widget.type !== 'label' || stateTab !== 'focused') return null
   const focusable = widget.focusable === true
   return (
     <div className="flex flex-col gap-1.5">
@@ -478,8 +482,8 @@ function LabelFocusNotice({ widget }: { widget: UiWidget }) {
       {focusable && (
         <span className="text-[11px] text-studio-muted leading-snug">
           This label now joins the screen&rsquo;s focus group, so the encoder can land on it and its
-          <b> Focused</b>-state style applies — set a Focused text color in the state tabs below to
-          see it highlight. A focused label has no press action of its own, though: pressing does
+          <b> Focused</b>-state style applies — set its Text Color in the fields below to see it
+          highlight. A focused label has no press action of its own, though: pressing does
           nothing unless you give it one, so prefer a Button for clickable menu items.
         </span>
       )}
@@ -2702,8 +2706,6 @@ export function PropertiesPanel() {
 
       {widget.text !== undefined && <TemplateTextField widget={widget} allWidgets={allWidgets} />}
 
-      <LabelFocusNotice widget={widget} />
-
 
       {UI_ICON_TEXT_WIDGETS.has(widget.type) && (
         <IconPicker
@@ -2740,6 +2742,8 @@ export function PropertiesPanel() {
       {isOptionsSourceWidget(widget.type) && <OptionsSourceSection widget={widget} />}
       {isIndicatorWidget(widget.type) && <IndicatorSection widget={widget} />}
       {isDataListTemplateDescendant(allWidgets, widget.id) && <VisibleWhenField widget={widget} />}
+
+      <LabelFocusNotice widget={widget} />
 
       <div className="border-t border-studio-border pt-2.5 flex flex-col gap-2.5">
         <div className="flex bg-studio-panel2 rounded-md p-0.5 border border-studio-border">
