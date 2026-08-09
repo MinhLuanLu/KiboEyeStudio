@@ -4531,7 +4531,8 @@ function generateKiboUIParts(
     h.push('// ONE call navigates the active screen no matter which it is. PREFER these from encoder/')
     h.push('// button code: a hardcoded per-screen helper (e.g. Main_screen_focus_next()) only ever')
     h.push('// moves focus on its OWN screen, so a multi-screen project would otherwise navigate only')
-    h.push('// the first screen. Each forwards to the active screen\'s own keyboard-aware helper.')
+    h.push('// the first screen. These act on whichever screen\'s focus group is currently active, and')
+    h.push('// safely no-op on a screen that has no focusable widgets (e.g. one containing only labels).')
     h.push('void FocusNext();')
     h.push('void FocusPrevious();')
     h.push('void PressFocused();')
@@ -4794,24 +4795,24 @@ function generateKiboUIParts(
   core.push('}')
   core.push('')
 
-  // Active-screen-aware navigation: dispatches to the CURRENTLY-ACTIVE screen's own (keyboard-aware)
-  // focus helper, so a single call navigates whatever screen is showing. Hardware code (encoder/
-  // buttons) should call these — via UI.focusNext()/focusPrevious()/pressFocused() — instead of a
-  // hardcoded per-screen helper like Main_screen_focus_next(), which only ever moves focus on the
-  // Main screen. That hardcoding is the root cause of "the encoder only navigates one screen" in a
-  // multi-screen project. Each per-screen helper is itself keyboard-aware, so that's preserved here.
+  // Active-screen-aware navigation: operates on WHICHEVER screen's focus group is currently active
+  // (ActiveScreenFocusGroup()), so a single call navigates the screen that's showing — no matter
+  // which one. Hardware code (encoder/buttons) should call these via UI.focusNext()/focusPrevious()/
+  // pressFocused() instead of a hardcoded per-screen helper like Main_screen_focus_next(), which
+  // only ever moves focus on the Main screen — the root cause of "the encoder only navigates one
+  // screen" in a multi-screen project. Operating on the group directly (rather than calling the
+  // per-screen helpers) keeps this safe even for a screen with NO focusable widgets: its group is
+  // simply empty and these no-op, and there is no per-screen helper to be left undefined. For
+  // keyboard-specific key navigation, call that screen's own keyboard-aware *_screen_focus_next().
   if (screenFns.length > 0) {
-    const navDispatch = (fnName: string, perScreenFn: (name: string) => string) => {
-      core.push(`void ${ns}::${fnName}() {`)
-      core.push('  switch (ACTIVE_SCREEN) {')
-      for (const { screen } of screenFns) core.push(`    case ${screenEnumValue(screen.name)}: ${screenIdentBase(screen.name)}::${perScreenFn(screen.name)}(); break;`)
-      core.push('    default: break;')
-      core.push('  }')
-      core.push('}')
-    }
-    navDispatch('FocusNext', screenFocusNextFnName)
-    navDispatch('FocusPrevious', screenFocusPreviousFnName)
-    navDispatch('PressFocused', screenPressFnName)
+    core.push(`void ${ns}::FocusNext()     { lv_group_t* g = ActiveScreenFocusGroup(); if (g) lv_group_focus_next(g); }`)
+    core.push(`void ${ns}::FocusPrevious() { lv_group_t* g = ActiveScreenFocusGroup(); if (g) lv_group_focus_prev(g); }`)
+    core.push(`void ${ns}::PressFocused() {`)
+    core.push('  lv_group_t* g = ActiveScreenFocusGroup();')
+    core.push('  if (!g) return;')
+    core.push('  lv_obj_t* focused = lv_group_get_focused(g);')
+    core.push('  if (focused) lv_obj_send_event(focused, LV_EVENT_CLICKED, nullptr);')
+    core.push('}')
     core.push('')
   }
 
