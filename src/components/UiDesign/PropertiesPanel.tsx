@@ -444,49 +444,56 @@ function BindingRow({
  * below (or just a `default:` if none are checked — still real, compilable scaffolding). This is
  * independent of — and merges into the same function as — any script-authored `.on(...)` events
  * from the Logic tab or the "Events" list below; nothing here duplicates those. */
+/** Warning + opt-in shown at the TOP of the Properties panel when a Label is selected (so it's
+ * visible without scrolling): labels can't take encoder/keyboard focus by default, but the user can
+ * force it — the `focusable` flag adds the label to the screen's LVGL focus group and its
+ * Focused-state style then applies. The recommended path is still a Button / focusable container. */
+function LabelFocusNotice({ widget }: { widget: UiWidget }) {
+  const updateUiWidgetMeta = useStore((s) => s.updateUiWidgetMeta)
+  const checkpoint = useStore((s) => s.checkpoint)
+  if (widget.type !== 'label') return null
+  const focusable = widget.focusable === true
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="text-[11px] bg-yellow-500/10 border border-yellow-500/30 text-yellow-200 rounded px-2 py-1.5 flex flex-col gap-1">
+        <span className="font-semibold">Label cannot receive focus</span>
+        <span className="text-yellow-200/80 leading-snug">
+          Labels are non-interactive, so a rotary encoder/keyboard normally cannot focus them. The
+          proper way to make an item selectable is to put it inside a <b>Button</b> (or a focusable
+          container / List item) and focus the parent. If you just want the label to highlight when
+          the encoder lands on it, you can force it below.
+        </span>
+      </div>
+      <label className="flex items-center gap-1.5 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={focusable}
+          onChange={() => {
+            checkpoint()
+            updateUiWidgetMeta(widget.id, { focusable: !focusable })
+          }}
+        />
+        <span className="studio-label">Make focusable anyway (encoder/keyboard)</span>
+      </label>
+      {focusable && (
+        <span className="text-[11px] text-studio-muted leading-snug">
+          This label now joins the screen&rsquo;s focus group, so the encoder can land on it and its
+          <b> Focused</b>-state style applies — set a Focused text color in the state tabs below to
+          see it highlight. A focused label has no press action of its own, though: pressing does
+          nothing unless you give it one, so prefer a Button for clickable menu items.
+        </span>
+      )}
+    </div>
+  )
+}
+
 function AutoEventCallbackSection({ widget }: { widget: UiWidget }) {
   const updateUiWidgetMeta = useStore((s) => s.updateUiWidgetMeta)
   const checkpoint = useStore((s) => s.checkpoint)
-  if (!EVENT_CAPABLE_WIDGET_TYPES.has(widget.type)) {
-    // A Label can't receive encoder/keyboard focus in LVGL — focus groups are for interactive
-    // widgets only. Instead of silently showing nothing where the user looks for a focus/event
-    // control (which is how they end up with a screen that has "widgets but none focusable"),
-    // explain why and point at the correct pattern. Scoped to labels — the common "why won't my
-    // menu item focus / change color when selected?" case; other display widgets stay quiet.
-    if (widget.type === 'label') {
-      const focusable = widget.focusable === true
-      const toggleFocusable = () => {
-        checkpoint()
-        updateUiWidgetMeta(widget.id, { focusable: !focusable })
-      }
-      return (
-        <div className="border-t border-studio-border pt-2.5 flex flex-col gap-1.5">
-          <div className="text-[11px] bg-yellow-500/10 border border-yellow-500/30 text-yellow-200 rounded px-2 py-1.5 flex flex-col gap-1">
-            <span className="font-semibold">Label cannot receive focus</span>
-            <span className="text-yellow-200/80 leading-snug">
-              Labels are non-interactive, so a rotary encoder/keyboard normally cannot focus them. The
-              proper way to make an item selectable is to put it inside a <b>Button</b> (or a focusable
-              container / List item) and focus the parent. If you just want the label to highlight when
-              the encoder lands on it, you can force it below.
-            </span>
-          </div>
-          <label className="flex items-center gap-1.5 cursor-pointer">
-            <input type="checkbox" checked={focusable} onChange={toggleFocusable} />
-            <span className="studio-label">Make focusable anyway (encoder/keyboard)</span>
-          </label>
-          {focusable && (
-            <span className="text-[11px] text-studio-muted leading-snug">
-              This label now joins the screen&rsquo;s focus group, so the encoder can land on it and its
-              <b> Focused</b>-state style applies — set a Focused text color in the state tabs above to
-              see it highlight. A focused label has no press action of its own, though: pressing does
-              nothing unless you give it one, so prefer a Button for clickable menu items.
-            </span>
-          )}
-        </div>
-      )
-    }
-    return null
-  }
+  // Non-interactive widgets (labels, images, ...) have no auto event callback. The Label focus
+  // warning/opt-in used to live here but was moved to the TOP of the panel (see LabelFocusNotice)
+  // so it's visible without scrolling.
+  if (!EVENT_CAPABLE_WIDGET_TYPES.has(widget.type)) return null
 
   const enabled = widget.eventCallbackEnabled !== false
   const selected = widget.eventCallbackTriggers ?? []
@@ -2694,6 +2701,9 @@ export function PropertiesPanel() {
       )}
 
       {widget.text !== undefined && <TemplateTextField widget={widget} allWidgets={allWidgets} />}
+
+      <LabelFocusNotice widget={widget} />
+
 
       {UI_ICON_TEXT_WIDGETS.has(widget.type) && (
         <IconPicker
