@@ -23,7 +23,7 @@
 import type { Project, UiAsset, UiCssRule, UiCustomFont, UiDataListConfig, UiDataSource, UiDataSourceField, UiDesignProject, UiDisplaySettings, UiImageFit, UiKeyboardConfig, UiListItem, UiScreen, UiVariable, UiWidget, UiWidgetStateName, UiWidgetStyle, UiWidgetType } from '@/types'
 import { computeFitWidthOrHeightScale } from '@/lib/uiDesign/imageFit'
 import { isTopLevelUiWidget } from '@/lib/uiDesign/widgetGeometry'
-import { UI_WIDGET_LABELS } from '@/types'
+import { UI_WIDGET_LABELS, screenBackgroundColor, screenBackgroundOpacity } from '@/types'
 import { decodeDataUrlToRgba } from '@/lib/import/uiAssetImport'
 import { matchesSelector } from '@/lib/uiDesign/selectors'
 import { compileTemplateExpr, compileTemplateText, cppTypeFor, generateScriptCpp, type CodegenContext, type CodegenResult, type ExprType } from '@/lib/uiDesign/scriptLang/codegen'
@@ -295,10 +295,13 @@ export function colorLiteral(css: string | undefined): string | null {
  * every call site) so the exported screen starts on the same background the design canvas shows,
  * instead of the LVGL default theme color. The root screen widget's own children are emitted on
  * top, so any widget covering the screen still wins. Returns [] for an unresolvable color. */
-export function screenBackgroundSetupLines(backgroundColor: string | undefined, indent = '  '): string[] {
+export function screenBackgroundSetupLines(backgroundColor: string | undefined, indent = '  ', opacityPct = 100): string[] {
   const c = colorLiteral(backgroundColor)
   if (!c) return []
-  return [`${indent}lv_obj_set_style_bg_color(screen, ${c}, LV_PART_MAIN);`, `${indent}lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);`]
+  // opacityPct (0-100) -> LVGL 0-255. 100% stays LV_OPA_COVER exactly (the long-standing default),
+  // so untouched screens produce byte-identical output; a lower per-screen opacity maps linearly.
+  const opa = opacityPct >= 100 ? 'LV_OPA_COVER' : String(Math.max(0, Math.round((opacityPct / 100) * 255)))
+  return [`${indent}lv_obj_set_style_bg_color(screen, ${c}, LV_PART_MAIN);`, `${indent}lv_obj_set_style_bg_opa(screen, ${opa}, LV_PART_MAIN);`]
 }
 
 // Every built-in lv_font_montserrat_* size this export will ever reference — kept as one shared
@@ -3540,7 +3543,7 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
   // its focused-style border, not an incidental side effect of creation order.
   c.push(`  lv_group_focus_freeze(${focusGroupVarName}, true);`)
   c.push('  lv_obj_t* screen = lv_obj_create(NULL);')
-  c.push(...screenBackgroundSetupLines(uiDesign.display.backgroundColor))
+  c.push(...screenBackgroundSetupLines(screenBackgroundColor(screen, uiDesign.display), '  ', screenBackgroundOpacity(screen)))
   c.push(...bodyBuffer)
   for (const info of dataListInfoByWidgetId.values()) {
     if (info.sampleSetupLines.length === 0) continue
@@ -4010,7 +4013,7 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
   // the first widget, not an incidental side effect of creation order.
   out.push(`  lv_group_focus_freeze(${focusGroupVarName}, true);`)
   out.push('  lv_obj_t* screen = lv_obj_create(NULL);')
-  out.push(...screenBackgroundSetupLines(uiDesign.display.backgroundColor))
+  out.push(...screenBackgroundSetupLines(screenBackgroundColor(screen, uiDesign.display), '  ', screenBackgroundOpacity(screen)))
   out.push(...bodyBuffer)
   for (const info of dataListInfoByWidgetId.values()) {
     if (info.sampleSetupLines.length === 0) continue
@@ -4514,13 +4517,25 @@ function generateKiboUIParts(
   h.push('// to a different screen. This returns whichever screen is currently ACTIVE_SCREEN\'s own')
   h.push('// group — connect a keyboard/rotary encoder lv_indev_t to it via lv_indev_set_group() if you')
   h.push('// want LVGL\'s own input-device-driven navigation; most hardware code will instead just call')
-  h.push('// the *_screen_focus_next()/_previous()/_press() helpers directly (see ui.cpp).')
+  h.push('// UI.focusNext()/focusPrevious()/pressFocused() below, which navigate whatever screen is')
+  h.push('// currently active (that is what makes encoder navigation work across ALL screens).')
   h.push('lv_group_t* GetFocusGroup();')
   h.push('// Removes the focused-style border from whichever widget currently has it on the active')
   h.push('// screen, returning it to its no-focus default look — call this any time you want to hide')
   h.push('// focus again, e.g. after a period of no encoder input. The group still remembers which')
   h.push('// widget was focused, so the next real encoder input resumes navigation from the same place.')
   h.push('void ClearFocus();')
+  if (screenFns.length > 0) {
+    h.push('')
+    h.push('// Active-screen-aware navigation — dispatches to whichever screen is currently showing, so')
+    h.push('// ONE call navigates the active screen no matter which it is. PREFER these from encoder/')
+    h.push('// button code: a hardcoded per-screen helper (e.g. Main_screen_focus_next()) only ever')
+    h.push('// moves focus on its OWN screen, so a multi-screen project would otherwise navigate only')
+    h.push('// the first screen. Each forwards to the active screen\'s own keyboard-aware helper.')
+    h.push('void FocusNext();')
+    h.push('void FocusPrevious();')
+    h.push('void PressFocused();')
+  }
   if (uiDesign.variables.length > 0) {
     h.push('')
     h.push('// Variable Manager getters/setters (see the Variables tab) — data.<name> in the Logic tab\'s')
@@ -4583,7 +4598,14 @@ function generateKiboUIParts(
     h.push(`  void ${method}() { ${ns}::${showFnName}(); }`)
   }
   if (screenFns.length > 0) {
-    h.push('  // Per-screen hardware-navigation wrappers — see the namespaces above for details.')
+    h.push('  // Active-screen-aware navigation (RECOMMENDED for encoder/button code) — works on ANY')
+    h.push('  // screen; each call dispatches to whichever screen is currently active. Use these and')
+    h.push('  // your hardware navigation works across every screen with no per-screen wiring.')
+    h.push(`  void focusNext() { ${ns}::FocusNext(); }`)
+    h.push(`  void focusPrevious() { ${ns}::FocusPrevious(); }`)
+    h.push(`  void pressFocused() { ${ns}::PressFocused(); }`)
+    h.push('  // Per-screen hardware-navigation wrappers — for when you deliberately want to drive ONE')
+    h.push('  // specific screen\'s focus group regardless of which screen is active.')
     for (const { screen } of screenFns) {
       const base = screenIdentBase(screen.name)
       const nextFn = screenFocusNextFnName(screen.name)
@@ -4754,8 +4776,8 @@ function generateKiboUIParts(
     core.push('')
   }
   core.push('// Connect a keyboard/encoder lv_indev_t to this via lv_indev_set_group() if you want LVGL\'s')
-  core.push('// own input-device-driven navigation; most hardware code will instead call the per-screen')
-  core.push(`// *_screen_focus_next()/_previous()/_press() helpers directly. Call ${ns}::ClearFocus()`)
+  core.push('// own input-device-driven navigation; most hardware code will instead call the active-screen-')
+  core.push(`// aware ${ns}::FocusNext()/FocusPrevious()/PressFocused() (via UI.*) below. Call ${ns}::ClearFocus()`)
   core.push('// (or UI.clearFocus()) any time you want to hide the focused-style border without losing')
   core.push('// the active screen\'s own group\'s place.')
   core.push(`lv_group_t* ${ns}::GetFocusGroup() { return ${screenFns.length > 0 ? 'ActiveScreenFocusGroup()' : 'nullptr'}; }`)
@@ -4771,6 +4793,27 @@ function generateKiboUIParts(
   core.push('  if (focused) lv_obj_remove_state(focused, LV_STATE_FOCUSED);')
   core.push('}')
   core.push('')
+
+  // Active-screen-aware navigation: dispatches to the CURRENTLY-ACTIVE screen's own (keyboard-aware)
+  // focus helper, so a single call navigates whatever screen is showing. Hardware code (encoder/
+  // buttons) should call these — via UI.focusNext()/focusPrevious()/pressFocused() — instead of a
+  // hardcoded per-screen helper like Main_screen_focus_next(), which only ever moves focus on the
+  // Main screen. That hardcoding is the root cause of "the encoder only navigates one screen" in a
+  // multi-screen project. Each per-screen helper is itself keyboard-aware, so that's preserved here.
+  if (screenFns.length > 0) {
+    const navDispatch = (fnName: string, perScreenFn: (name: string) => string) => {
+      core.push(`void ${ns}::${fnName}() {`)
+      core.push('  switch (ACTIVE_SCREEN) {')
+      for (const { screen } of screenFns) core.push(`    case ${screenEnumValue(screen.name)}: ${screenIdentBase(screen.name)}::${perScreenFn(screen.name)}(); break;`)
+      core.push('    default: break;')
+      core.push('  }')
+      core.push('}')
+    }
+    navDispatch('FocusNext', screenFocusNextFnName)
+    navDispatch('FocusPrevious', screenFocusPreviousFnName)
+    navDispatch('PressFocused', screenPressFnName)
+    core.push('')
+  }
 
   // Widget object statics — every widget's lv_obj_t* lives here (not inside its own screen's
   // file) so the Logic tab's script (compiled to plain top-level C++ functions — event
@@ -5116,7 +5159,7 @@ function generateKiboUIParts(
     core.push(`  if (${activeGroupVar} == nullptr) { ${activeGroupVar} = lv_group_create(); }`)
     core.push(`  lv_group_focus_freeze(${activeGroupVar}, true);`)
     core.push('  lv_obj_t* screen = lv_obj_create(NULL);')
-    core.push(...screenBackgroundSetupLines(uiDesign.display.backgroundColor))
+    core.push(...screenBackgroundSetupLines(screenBackgroundColor(screen, uiDesign.display), '  ', screenBackgroundOpacity(screen)))
     core.push(...bodyBuffer)
     for (const [widgetId, info] of dataListInfoByWidgetId) {
       if (dataListOwnerScreenId.get(widgetId) !== screen.id || info.sampleSetupLines.length === 0) continue
