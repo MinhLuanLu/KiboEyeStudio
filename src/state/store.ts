@@ -35,6 +35,7 @@ import type {
   UiOptionsSourceConfig,
   UiListItem,
   UiThemeableStyleField,
+  UiScreenDisplayStyle,
   UiThemeId,
   UiThemeTokens,
   UiVariable,
@@ -759,6 +760,7 @@ interface StoreState {
       allowOutsideBounds?: boolean
       eventCallbackEnabled?: boolean
       eventCallbackTriggers?: string[]
+      focusable?: boolean
       iconSymbol?: string | null
       visibleWhenExpr?: string | null
     }
@@ -907,6 +909,26 @@ interface StoreState {
   renameUiCustomFont: (id: string, name: string) => void
   deleteUiCustomFont: (id: string) => void
   setUiActiveScreen: (screenId: string) => void
+  /** Remembered per-screen selection (screenId -> selectedWidgetId), so switching screen tabs
+   * restores whatever layer was selected on the screen you return to — session-only. */
+  uiScreenSelection: Record<string, string | null>
+  /** Creates a new empty screen (its own `screen`-type root widget), makes it active, returns its
+   * id. `name` defaults to a unique "Screen N". Caller checkpoint()s first. */
+  addUiScreen: (name?: string) => string
+  /** Renames a screen. The screen keeps its stable id; also rewrites `ui.showScreen("old")` script
+   * references to the new name so navigation survives the rename. */
+  renameUiScreen: (screenId: string, name: string) => void
+  /** Deep-clones a screen (its whole widget subtree, re-id'd) as a new screen right after it, makes
+   * the copy active, returns its id. Caller checkpoint()s first. */
+  duplicateUiScreen: (screenId: string) => string | null
+  /** Removes a screen and its entire widget subtree. No-op if it's the last remaining screen.
+   * Re-points activeScreenId if the deleted screen was active. */
+  deleteUiScreen: (screenId: string) => void
+  /** Reorders the screen tab list (drag-and-drop). Indices are into `uiDesign.screens`. */
+  reorderUiScreens: (fromIndex: number, toIndex: number) => void
+  /** Updates ONE screen's own visual display style (background color/opacity), independent per
+   * screen. Hardware/display config stays global in setUiDisplaySettings. Caller checkpoint()s. */
+  setUiScreenStyle: (screenId: string, partial: Partial<UiScreenDisplayStyle>) => void
   /** Direct, non-undoable overwrite of every screen's widget map + activeScreenId — used ONLY
    * to restore the pre-run snapshot when the script sandbox's Stop/Restart controls revert
    * whatever live mutations (progress values, disabled states, screen navigation, ...) a
@@ -1245,6 +1267,7 @@ export const useStore = create<StoreState>()(
     stickerClipboard: null,
     layerClipboard: null,
     selectedWidgetId: null,
+    uiScreenSelection: {},
     uiPreviewDisplayOverride: null,
     uiEsp32PreviewMode: false,
     uiPreviewState: 'default',
@@ -3382,6 +3405,7 @@ export const useStore = create<StoreState>()(
         if (partial.allowOutsideBounds !== undefined) w.allowOutsideBounds = partial.allowOutsideBounds
         if (partial.eventCallbackEnabled !== undefined) w.eventCallbackEnabled = partial.eventCallbackEnabled
         if (partial.eventCallbackTriggers !== undefined) w.eventCallbackTriggers = partial.eventCallbackTriggers
+        if (partial.focusable !== undefined) w.focusable = partial.focusable
         if (partial.iconSymbol !== undefined) w.iconSymbol = partial.iconSymbol ?? undefined
         if (partial.visibleWhenExpr !== undefined) w.visibleWhenExpr = partial.visibleWhenExpr ?? undefined
         s.dirty = true
@@ -3994,7 +4018,135 @@ export const useStore = create<StoreState>()(
     setUiActiveScreen: (screenId) =>
       set((s) => {
         const ud = s.project.uiDesign
-        if (ud.screens.some((sc) => sc.id === screenId)) ud.activeScreenId = screenId
+        if (!ud.screens.some((sc) => sc.id === screenId)) return
+        if (ud.activeScreenId === screenId) return
+        // Remember the selection on the screen we're leaving, then restore whatever was selected on
+        // the screen we switch to (validated against the current widget map so a stale remembered id
+        // never selects a deleted widget). Keeps each tab's "selected layer" intact.
+        if (ud.activeScreenId) s.uiScreenSelection[ud.activeScreenId] = s.selectedWidgetId
+        ud.activeScreenId = screenId
+        const remembered = s.uiScreenSelection[screenId] ?? null
+        s.selectedWidgetId = remembered && ud.widgets[remembered] ? remembered : null
+      }),
+
+    addUiScreen: (name) => {
+      const root = createWidget('screen')
+      const id = nanoid(10)
+      set((s) => {
+        const ud = s.project.uiDesign
+        const existing = new Set(ud.screens.map((sc) => sc.name))
+        let screenName = name?.trim() || ''
+        if (!screenName) {
+          let n = ud.screens.length + 1
+          while (existing.has(`Screen ${n}`)) n++
+          screenName = `Screen ${n}`
+        }
+        ud.widgets[root.id] = root
+        // New screen starts from the project's default background but owns it independently after.
+        ud.screens.push({ id, name: screenName, rootWidgetId: root.id, displayStyle: { backgroundColor: ud.display.backgroundColor } })
+        if (ud.activeScreenId) s.uiScreenSelection[ud.activeScreenId] = s.selectedWidgetId
+        ud.activeScreenId = id
+        s.selectedWidgetId = null
+        s.dirty = true
+      })
+      return id
+    },
+
+    renameUiScreen: (screenId, name) =>
+      set((s) => {
+        const ud = s.project.uiDesign
+        const sc = ud.screens.find((x) => x.id === screenId)
+        const trimmed = name.trim()
+        if (!sc || !trimmed || sc.name === trimmed) return
+        const oldName = sc.name
+        sc.name = trimmed
+        // Screens have a stable id, but the script navigation API addresses them by name
+        // (`ui.showScreen("Settings")`). Rewrite those refs to the new name so a rename never breaks
+        // an existing navigation call — matching a quoted screen name inside a showScreen(...) call
+        // only, preserving the quote style, so no other string literal is touched.
+        if (ud.script && ud.script.includes(oldName)) {
+          const esc = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          ud.script = ud.script.replace(new RegExp(`(showScreen\\s*\\(\\s*)(["'])${esc}\\2`, 'g'), (_m, pre, q) => `${pre}${q}${trimmed}${q}`)
+        }
+        s.dirty = true
+      }),
+
+    duplicateUiScreen: (screenId) => {
+      const ud = useStore.getState().project.uiDesign
+      const src = ud.screens.find((x) => x.id === screenId)
+      if (!src) return null
+      const widgets = ud.widgets
+      const clones: UiWidget[] = []
+      const cloneSubtree = (wid: string, newParentId: string | null): string => {
+        const node = widgets[wid]
+        const clone: UiWidget = JSON.parse(JSON.stringify(node))
+        clone.id = nanoid(10)
+        clone.parentId = newParentId
+        clone.childIds = node.childIds.map((childId) => cloneSubtree(childId, clone.id))
+        clones.push(clone)
+        return clone.id
+      }
+      const newRootId = cloneSubtree(src.rootWidgetId, null)
+      const newId = nanoid(10)
+      set((s) => {
+        const u = s.project.uiDesign
+        const existing = new Set(u.screens.map((sc) => sc.name))
+        let newName = `${src.name} copy`
+        let n = 2
+        while (existing.has(newName)) newName = `${src.name} copy ${n++}`
+        for (const clone of clones) u.widgets[clone.id] = clone
+        const idx = u.screens.findIndex((x) => x.id === screenId)
+        u.screens.splice(idx + 1, 0, { id: newId, name: newName, rootWidgetId: newRootId, displayStyle: src.displayStyle ? { ...src.displayStyle } : undefined })
+        if (u.activeScreenId) s.uiScreenSelection[u.activeScreenId] = s.selectedWidgetId
+        u.activeScreenId = newId
+        s.selectedWidgetId = null
+        s.dirty = true
+      })
+      return newId
+    },
+
+    deleteUiScreen: (screenId) =>
+      set((s) => {
+        const ud = s.project.uiDesign
+        if (ud.screens.length <= 1) return // a project always keeps at least one screen
+        const idx = ud.screens.findIndex((x) => x.id === screenId)
+        if (idx === -1) return
+        const screen = ud.screens[idx]
+        const removeSubtree = (wid: string) => {
+          const node = ud.widgets[wid]
+          if (!node) return
+          for (const childId of node.childIds) removeSubtree(childId)
+          delete ud.widgets[wid]
+        }
+        removeSubtree(screen.rootWidgetId)
+        ud.screens.splice(idx, 1)
+        delete s.uiScreenSelection[screenId]
+        if (ud.activeScreenId === screenId) {
+          const next = ud.screens[Math.min(idx, ud.screens.length - 1)]
+          ud.activeScreenId = next.id
+          const remembered = s.uiScreenSelection[next.id] ?? null
+          s.selectedWidgetId = remembered && ud.widgets[remembered] ? remembered : null
+        }
+        s.dirty = true
+      }),
+
+    reorderUiScreens: (fromIndex, toIndex) =>
+      set((s) => {
+        const scr = s.project.uiDesign.screens
+        if (fromIndex < 0 || fromIndex >= scr.length || toIndex < 0 || toIndex >= scr.length || fromIndex === toIndex) return
+        const [moved] = scr.splice(fromIndex, 1)
+        scr.splice(toIndex, 0, moved)
+        s.dirty = true
+      }),
+
+    setUiScreenStyle: (screenId, partial) =>
+      set((s) => {
+        const sc = s.project.uiDesign.screens.find((x) => x.id === screenId)
+        if (!sc) return
+        // Seed from the current global default the first time this screen gets its own style, so an
+        // untouched screen doesn't silently flip color when only (e.g.) opacity is set.
+        sc.displayStyle = { backgroundColor: s.project.uiDesign.display.backgroundColor, ...sc.displayStyle, ...partial }
+        s.dirty = true
       }),
 
     restoreUiRuntimeSnapshot: (widgets, activeScreenId) =>

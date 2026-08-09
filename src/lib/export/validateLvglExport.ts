@@ -2,6 +2,7 @@ import type { Project } from '@/types'
 import {
   allReachableWidgets,
   buildValidationCodegenContext,
+  EVENT_CAPABLE_WIDGET_TYPES,
   indicatorFunctionBaseName,
   indicatorScreenFunctionPrefix,
   INDICATOR_VALUE_WIDGET_TYPES,
@@ -120,6 +121,24 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
       if (emptyScreens.length > 0) {
         status = status === 'failed' ? status : 'warning'
         messages.push(`${emptyScreens.length} screen(s) have no widgets on them yet: ${emptyScreens.map((s) => s.name).join(', ')}.`)
+      }
+      // Screens that DO have widgets but none that can take focus: a rotary encoder / keyboard can't
+      // navigate them, because the exporter only adds focusable widgets to the screen's focus group
+      // (isFocusable = EVENT_CAPABLE_WIDGET_TYPES | keyboard | has-event-handler — see lvglExport.ts's
+      // emitWidget). A label-only screen compiles and shows, but lv_group_focus_next() has nothing to
+      // move to — the exact "encoder does nothing on this screen" symptom.
+      const noFocusScreens = scopedScreens.filter((s) => {
+        const root = uiDesign.widgets[s.rootWidgetId]
+        if (!root || root.childIds.length === 0) return false // already reported as empty above
+        return !reachableWidgetsForScreen(uiDesign, s).some((w) => EVENT_CAPABLE_WIDGET_TYPES.has(w.type) || w.type === 'keyboard' || w.eventCallbackEnabled === true || w.focusable === true)
+      })
+      if (noFocusScreens.length > 0) {
+        status = status === 'failed' ? status : 'warning'
+        messages.push(
+          `${noFocusScreens.length} screen(s) have widgets but none are focusable, so a rotary encoder/keyboard cannot navigate them: ${noFocusScreens
+            .map((s) => s.name)
+            .join(', ')}. Add a focusable widget (button, checkbox, switch, slider, dropdown, ...) to enable focus navigation on that screen.`
+        )
       }
       messages.push(scope?.mode === 'screen' ? `${widgets.length} widget(s) on this screen.` : `${widgets.length} widget(s) across ${scopedScreens.length} screen(s).`)
     }
@@ -424,8 +443,12 @@ export function validateLvglExport(project: Project, scope?: LvglExportScope): L
       // The hardware-navigation namespace/function names (Main, Main_screen_focus_next, ...) are
       // derived from screenIdentBase, not screenCreateFnName's own PascalCase — check it
       // separately since the two can diverge (screenIdentBase strips a trailing "Screen" word
-      // that screenCreateFnName instead guarantees is present).
-      const navBase = screenIdentBase(s.name).toLowerCase()
+      // that screenCreateFnName instead guarantees is present). Compared CASE-SENSITIVELY on
+      // purpose: screenIdentBase already returns a PascalCase identifier ("main" -> "Main"), which
+      // the generator emits verbatim (`namespace Main`, ShowMainScreen) — valid, since C++ is
+      // case-sensitive and those aren't keywords. The only real failure a screen name causes here
+      // is sanitizing to nothing (`!navBase`). Lower-casing false-flagged the DEFAULT "Main Screen".
+      const navBase = screenIdentBase(s.name)
       if (RESERVED_IDENTIFIERS.has(navBase) || !navBase) badIdentifiers.add(s.name)
     }
     for (const w of widgets) {

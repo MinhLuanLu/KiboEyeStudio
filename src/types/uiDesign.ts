@@ -627,6 +627,13 @@ export interface UiWidget {
    * array above — real bodies from either of those are folded into this same callback's switch
    * automatically, they never produce a second function. */
   eventCallbackEnabled?: boolean
+  /** Opt-in encoder/keyboard focusability for widgets that aren't interactive by type (notably a
+   * Label). Normally only EVENT_CAPABLE_WIDGET_TYPES / event-bearing widgets join a screen's LVGL
+   * focus group; setting this true adds THIS widget too, so an encoder can land on it and its
+   * Focused-state style (e.g. a color change) applies. Off/undefined = default (labels aren't
+   * focusable). The Properties panel warns before letting the user enable it — a focused label has
+   * no press action of its own, so a Button is usually the better choice. */
+  focusable?: boolean
   /** Which LVGL event codes the auto-generated callback's switch actually handles (see the
    * Properties panel's Events section) — empty/undefined means "no specific selection", which
    * still registers via LV_EVENT_ALL but only emits a `default:` case (fill in your own
@@ -661,10 +668,26 @@ export interface UiAsset {
   sourceFormat: string
 }
 
+/** Per-screen VISUAL display style — independent for each screen, so e.g. Screen 1 can have a red
+ * background and Screen 2 a black one. Distinct from UiDisplaySettings, which holds the GLOBAL,
+ * hardware-level display config (size/shape/rotation) shared by every screen on the one physical
+ * panel. Undefined / missing fields fall back to the project-level default in
+ * uiDesign.display.backgroundColor — see screenBackgroundColor()/screenBackgroundOpacity(). */
+export interface UiScreenDisplayStyle {
+  /** Background color (hex) for THIS screen only. Overrides uiDesign.display.backgroundColor. */
+  backgroundColor?: string
+  /** Background opacity 0-100 for this screen (100 = fully opaque / LV_OPA_COVER). */
+  backgroundOpacity?: number
+}
+
 export interface UiScreen {
   id: string
   name: string
   rootWidgetId: string
+  /** This screen's own visual display style (background, ...). Per-screen and independent — see
+   * UiScreenDisplayStyle. Absent on legacy projects, which transparently fall back to the global
+   * uiDesign.display.backgroundColor via the resolvers below. */
+  displayStyle?: UiScreenDisplayStyle
   /** Manually-edited override of the "LVGL Code" panel's live-generated text for this screen —
    * see LvglCodePanel.tsx. null/undefined = show the freshly generated code (today's default,
    * always-regenerated behavior). Once set (via that panel's "Apply Changes" button), the panel
@@ -732,6 +755,18 @@ export const DEFAULT_UI_DISPLAY: UiDisplaySettings = {
   orientation: 'portrait',
   rotation: 0,
   backgroundColor: '#ffffff'
+}
+
+/** The effective background color for a screen: its own per-screen override if set, otherwise the
+ * project-level default (uiDesign.display.backgroundColor). Single source of truth shared by the
+ * canvas, the preview, and the LVGL exporter so Studio and the device always agree. */
+export function screenBackgroundColor(screen: Pick<UiScreen, 'displayStyle'> | undefined, display: Pick<UiDisplaySettings, 'backgroundColor'>): string {
+  return screen?.displayStyle?.backgroundColor ?? display.backgroundColor
+}
+
+/** The effective background opacity (0-100) for a screen; defaults to 100 (fully opaque). */
+export function screenBackgroundOpacity(screen: Pick<UiScreen, 'displayStyle'> | undefined): number {
+  return screen?.displayStyle?.backgroundOpacity ?? 100
 }
 
 export type UiVariableType = 'number' | 'text' | 'boolean' | 'color' | 'list' | 'image' | 'object'

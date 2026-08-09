@@ -3409,7 +3409,7 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
     const varName = widgetVarName(widget)
     const ev = eventByWidgetId.get(widget.id)
     const isKeyboard = widget.type === 'keyboard' && !!widget.keyboardConfig
-    const isFocusable = EVENT_CAPABLE_WIDGET_TYPES.has(widget.type) || !!ev || isKeyboard
+    const isFocusable = EVENT_CAPABLE_WIDGET_TYPES.has(widget.type) || !!ev || isKeyboard || widget.focusable === true
     const itemVars = widget.type === 'list' ? listItemVarsByWidgetId.get(widget.id) : undefined
     const itemClickCb = listClickCallbackByWidgetId.get(widget.id)
     const kbVars = isKeyboard ? keyboardMapVarsByWidgetId.get(widget.id) : undefined
@@ -3932,7 +3932,7 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
     const varName = widgetVarName(widget)
     const ev = eventByWidgetId.get(widget.id)
     const isKeyboard = widget.type === 'keyboard' && !!widget.keyboardConfig
-    const isFocusable = EVENT_CAPABLE_WIDGET_TYPES.has(widget.type) || !!ev || isKeyboard
+    const isFocusable = EVENT_CAPABLE_WIDGET_TYPES.has(widget.type) || !!ev || isKeyboard || widget.focusable === true
     const itemVars = widget.type === 'list' ? listItemVarsByWidgetId.get(widget.id) : undefined
     const itemClickCb = listClickCallbackByWidgetId.get(widget.id)
     const kbVars = isKeyboard ? keyboardMapVarsByWidgetId.get(widget.id) : undefined
@@ -5072,7 +5072,7 @@ function generateKiboUIParts(
     const varName = widgetVarName(widget)
     const ev = eventByWidgetId.get(widget.id)
     const isKeyboard = widget.type === 'keyboard' && !!widget.keyboardConfig
-    const isFocusable = EVENT_CAPABLE_WIDGET_TYPES.has(widget.type) || !!ev || isKeyboard
+    const isFocusable = EVENT_CAPABLE_WIDGET_TYPES.has(widget.type) || !!ev || isKeyboard || widget.focusable === true
     const itemVars = widget.type === 'list' ? listItemVarsByWidgetId.get(widget.id) : undefined
     const itemClickCb = listClickCallbackByWidgetId.get(widget.id)
     const kbVars = isKeyboard ? keyboardMapVarsByWidgetId.get(widget.id) : undefined

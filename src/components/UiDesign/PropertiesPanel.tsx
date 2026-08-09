@@ -454,17 +454,34 @@ function AutoEventCallbackSection({ widget }: { widget: UiWidget }) {
     // explain why and point at the correct pattern. Scoped to labels — the common "why won't my
     // menu item focus / change color when selected?" case; other display widgets stay quiet.
     if (widget.type === 'label') {
+      const focusable = widget.focusable === true
+      const toggleFocusable = () => {
+        checkpoint()
+        updateUiWidgetMeta(widget.id, { focusable: !focusable })
+      }
       return (
-        <div className="border-t border-studio-border pt-2.5">
+        <div className="border-t border-studio-border pt-2.5 flex flex-col gap-1.5">
           <div className="text-[11px] bg-yellow-500/10 border border-yellow-500/30 text-yellow-200 rounded px-2 py-1.5 flex flex-col gap-1">
             <span className="font-semibold">Label cannot receive focus</span>
             <span className="text-yellow-200/80 leading-snug">
-              Labels are non-interactive, so a rotary encoder or keyboard cannot focus them directly.
-              To make this item selectable, place it inside a <b>Button</b> (or a focusable container /
-              List item) and enable focus on that parent instead — the parent goes into the LVGL focus
-              group, not the label. The label can still change color from the parent&rsquo;s Focused state.
+              Labels are non-interactive, so a rotary encoder/keyboard normally cannot focus them. The
+              proper way to make an item selectable is to put it inside a <b>Button</b> (or a focusable
+              container / List item) and focus the parent. If you just want the label to highlight when
+              the encoder lands on it, you can force it below.
             </span>
           </div>
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" checked={focusable} onChange={toggleFocusable} />
+            <span className="studio-label">Make focusable anyway (encoder/keyboard)</span>
+          </label>
+          {focusable && (
+            <span className="text-[11px] text-studio-muted leading-snug">
+              This label now joins the screen&rsquo;s focus group, so the encoder can land on it and its
+              <b> Focused</b>-state style applies — set a Focused text color in the state tabs above to
+              see it highlight. A focused label has no press action of its own, though: pressing does
+              nothing unless you give it one, so prefer a Button for clickable menu items.
+            </span>
+          )}
         </div>
       )
     }
