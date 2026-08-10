@@ -510,6 +510,31 @@ export interface Animation {
   stickers: StickerInstance[]
   /** Studio-only annotations — see Marker above. */
   markers: Marker[]
+  /** Animation-panel organization ONLY (VS Code Explorer-style folders — see AnimationFolder).
+   * The id this animation is filed under, or `null`/absent = the tree root. Purely a display/
+   * organization concern: it never affects playback or export (the C++/LVGL exporters read
+   * `project.animations` regardless of folder), and the animation's own `id` never changes when
+   * it's moved between folders — references (combos, etc.) stay valid. */
+  folderId?: string | null
+  /** Position among sibling animations that share the same `folderId` (0-based; folders render
+   * above animations within a parent). Absent on old projects — normalizeProject backfills it
+   * from array index. */
+  order?: number
+}
+
+/** A folder in the Animation panel's tree — an editor-only organization layer (VS Code Explorer
+ * style). Folders group animations for display; they carry no animation data and never affect
+ * playback/export. Nesting is via `parentId` (null = root). Persisted with the project so the tree,
+ * ordering, and expand state survive save/reopen. */
+export interface AnimationFolder {
+  id: string
+  name: string
+  /** Parent folder id, or `null` for a root-level folder. */
+  parentId: string | null
+  /** Position among sibling folders that share the same `parentId` (0-based). */
+  order: number
+  /** Whether this folder is expanded in the panel. Persisted so collapse state round-trips. */
+  expanded: boolean
 }
 
 /** A single reference-only clip inside an animation combination. It points at an existing
@@ -942,6 +967,9 @@ export interface Project {
   personality: Personality
   timing: GlobalTiming
   animations: Animation[]
+  /** Animation-panel folder tree (editor organization only — see AnimationFolder). Empty on old
+   * projects; animations reference these by `Animation.folderId`. */
+  animationFolders: AnimationFolder[]
   animationCombos: AnimationCombo[]
   expressions: Expression[]
   /** The project's single shared default appearance — see VisualReferenceStyle below. */

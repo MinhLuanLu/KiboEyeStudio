@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid'
 import type {
   Animation,
+  AnimationFolder,
   AnimationCombo,
   AnimationComboClip,
   CustomEyeShape,
@@ -742,7 +743,7 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     colorsRightOverride: normalizeEyeColorsOverride(rawVr?.colorsRightOverride)
   }
 
-  const animations: Animation[] = (raw.animations ?? []).map((aRaw) => {
+  const animations: Animation[] = (raw.animations ?? []).map((aRaw, animIndex) => {
     const a = aRaw as unknown as Record<string, unknown>
     const loop = Boolean(a.loop)
     const poseKeyframes = normalizeKeyframeList(a.keyframes, visualReference)
@@ -782,10 +783,51 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
       eyelidKeyframes,
       tracks,
       stickers,
-      markers
+      markers,
+      // Animation-panel folder organization (see AnimationFolder). Old projects have neither field:
+      // folderId defaults to null (root), order backfills from array index so the flat list renders
+      // exactly as before. animation.id itself is never touched, so references stay valid.
+      folderId: typeof a.folderId === 'string' ? a.folderId : null,
+      order: typeof a.order === 'number' ? a.order : animIndex
     }
   })
   const animationIds = new Set(animations.map((a) => a.id))
+
+  // Animation-panel folder tree (editor organization only). Coerce each folder, then repair the
+  // links: a folder whose parent doesn't exist (or that would form a cycle) is reparented to root,
+  // and any animation.folderId pointing at a missing folder falls back to root. This keeps the tree
+  // always well-formed regardless of hand-edited/older files. Old projects have no animationFolders
+  // → empty array, every animation stays at root (folderId already defaulted to null above).
+  const rawFolders = Array.isArray(raw.animationFolders) ? raw.animationFolders : []
+  const animationFolders: AnimationFolder[] = rawFolders.map((fRaw, i) => {
+    const f = fRaw as unknown as Record<string, unknown>
+    return {
+      id: typeof f.id === 'string' ? f.id : nanoid(8),
+      name: typeof f.name === 'string' ? f.name : 'Folder',
+      parentId: typeof f.parentId === 'string' ? f.parentId : null,
+      order: typeof f.order === 'number' ? f.order : i,
+      expanded: f.expanded !== false // default to expanded when absent
+    }
+  })
+  const folderById = new Map(animationFolders.map((f) => [f.id, f]))
+  for (const f of animationFolders) {
+    if (f.parentId && !folderById.has(f.parentId)) f.parentId = null
+  }
+  for (const f of animationFolders) {
+    const seen = new Set<string>()
+    let cur: string | null = f.parentId
+    while (cur) {
+      if (cur === f.id || seen.has(cur)) {
+        f.parentId = null // break a parent cycle
+        break
+      }
+      seen.add(cur)
+      cur = folderById.get(cur)?.parentId ?? null
+    }
+  }
+  for (const a of animations) {
+    if (a.folderId && !folderById.has(a.folderId)) a.folderId = null
+  }
   const animationCombos: AnimationCombo[] = (raw.animationCombos ?? []).map((comboRaw) => {
     const combo = comboRaw as unknown as Record<string, unknown>
     const clips: AnimationComboClip[] = Array.isArray(combo.clips)
@@ -845,6 +887,7 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     personality: { ...DEFAULT_PERSONALITY, ...(raw.personality ?? {}) },
     timing: { ...DEFAULT_TIMING, ...(raw.timing ?? {}) },
     animations,
+    animationFolders,
     animationCombos,
     expressions,
     visualReference,

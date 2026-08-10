@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
 import { nanoid } from 'nanoid'
+import type { AnimationFolder } from '@/types'
 import type {
   Animation,
   AnimationCombo,
@@ -128,6 +129,7 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     personality: { ...DEFAULT_PERSONALITY },
     timing: { ...DEFAULT_TIMING },
     animations,
+    animationFolders: [],
     animationCombos: [],
     expressions,
     visualReference,
@@ -489,11 +491,19 @@ interface StoreState {
 
   // animations
   selectAnimation: (id: string) => void
-  addAnimation: (name?: string) => string
+  addAnimation: (name?: string, folderId?: string | null) => string
   duplicateAnimation: (id: string) => string
   renameAnimation: (id: string, name: string) => void
   deleteAnimation: (id: string) => void
   reorderAnimation: (id: string, newIndex: number) => void
+  // Animation-panel folder tree (editor organization only — see AnimationFolder). None of these
+  // touch animation data/ids or playback; they only rearrange how animations are grouped/displayed.
+  addAnimationFolder: (parentId: string | null, name?: string) => string
+  renameAnimationFolder: (id: string, name: string) => void
+  deleteAnimationFolder: (id: string) => void
+  setAnimationFolderExpanded: (id: string, expanded: boolean) => void
+  moveAnimationToFolder: (animationId: string, targetFolderId: string | null, index: number) => void
+  moveAnimationFolder: (folderId: string, targetParentId: string | null, index: number) => void
   setAnimationLoop: (id: string, loop: boolean) => void
   importAnimation: (animation: Animation) => void
 
@@ -1029,6 +1039,56 @@ export interface UiDragPreview {
   rect: { x: number; y: number; width: number; height: number }
   guides: UiSnapGuide[]
   spacing: UiSpacingIndicator[]
+}
+
+// ---- Animation-panel folder tree helpers (editor organization only) ----------------------------
+/** Reassign 0..n `order` to the folders sharing a parent, preserving current relative order. */
+function reindexFolders(folders: AnimationFolder[], parentId: string | null): void {
+  folders
+    .filter((f) => f.parentId === parentId)
+    .sort((a, b) => a.order - b.order)
+    .forEach((f, i) => (f.order = i))
+}
+/** Reassign 0..n `order` to the animations sharing a folder (root = null). */
+function reindexAnimations(animations: Animation[], folderId: string | null): void {
+  animations
+    .filter((a) => (a.folderId ?? null) === folderId)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .forEach((a, i) => (a.order = i))
+}
+/** Place `movedId` at position `index` among the target folder's animations, then reassign 0..n.
+ * The moved animation's `folderId` must already equal `folderId` before calling. */
+function insertAnimationAt(animations: Animation[], folderId: string | null, movedId: string, index: number): void {
+  const group = animations
+    .filter((a) => (a.folderId ?? null) === folderId && a.id !== movedId)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+  const moved = animations.find((a) => a.id === movedId)
+  if (!moved) return
+  const at = Math.max(0, Math.min(group.length, index))
+  group.splice(at, 0, moved)
+  group.forEach((a, i) => (a.order = i))
+}
+/** Same, for a folder among its (new) parent's sub-folders. `parentId` must already be set. */
+function insertFolderAt(folders: AnimationFolder[], parentId: string | null, movedId: string, index: number): void {
+  const group = folders
+    .filter((f) => f.parentId === parentId && f.id !== movedId)
+    .sort((a, b) => a.order - b.order)
+  const moved = folders.find((f) => f.id === movedId)
+  if (!moved) return
+  const at = Math.max(0, Math.min(group.length, index))
+  group.splice(at, 0, moved)
+  group.forEach((f, i) => (f.order = i))
+}
+/** True if moving `folderId` under `targetParentId` would create a cycle (target IS the folder or a
+ * descendant of it). Prevents an "into its own child" drop. */
+function wouldCycleFolder(folders: AnimationFolder[], folderId: string, targetParentId: string | null): boolean {
+  const byId = new Map(folders.map((f) => [f.id, f]))
+  let cur: string | null = targetParentId
+  while (cur) {
+    if (cur === folderId) return true
+    cur = byId.get(cur)?.parentId ?? null
+  }
+  return false
 }
 
 function activeAnimationOf(project: Project, id: string): Animation | undefined {
@@ -1839,13 +1899,16 @@ export const useStore = create<StoreState>()(
         s.playbackTimeMs = 0
       }),
 
-    addAnimation: (name = 'New Animation') => {
+    addAnimation: (name = 'New Animation', folderId = null) => {
       const id = nanoid(10)
       set((s) => {
         const overrides = computeStyleOverrides(s.project.eyeBase, null, s.project.visualReference)
+        const order = s.project.animations.filter((a) => (a.folderId ?? null) === (folderId ?? null)).length
         s.project.animations.push({
           id,
           name,
+          folderId: folderId ?? null,
+          order,
           loop: false,
           durationMs: 500,
           keyframes: [
@@ -1888,7 +1951,10 @@ export const useStore = create<StoreState>()(
         copy.eyelidKeyframes = copy.eyelidKeyframes.map((k) => ({ ...k, id: nanoid(10) }))
         copy.markers = copy.markers.map((m) => ({ ...m, id: nanoid(10) }))
         copy.stickers = copy.stickers.map((st) => ({ ...st, id: nanoid(8), trackId: trackIdMap.get(st.trackId) ?? '' }))
+        // Place the duplicate directly after its source, in the same folder.
+        copy.folderId = src.folderId ?? null
         s.project.animations.push(copy)
+        insertAnimationAt(s.project.animations, copy.folderId, newId, (src.order ?? 0) + 1)
         s.dirty = true
       })
       return newId
@@ -1925,6 +1991,75 @@ export const useStore = create<StoreState>()(
         if (clamped === idx) return
         const [anim] = arr.splice(idx, 1)
         arr.splice(clamped, 0, anim)
+        // Keep the flat array position and the folder-tree `order` in sync for root animations, so
+        // reordering at root behaves the same whether or not folders are in use.
+        reindexAnimations(s.project.animations, null)
+        s.dirty = true
+      }),
+
+    // ---- Animation-panel folder tree (editor organization only) --------------------------------
+    addAnimationFolder: (parentId, name = 'New Folder') => {
+      const id = nanoid(8)
+      set((s) => {
+        const order = s.project.animationFolders.filter((f) => f.parentId === (parentId ?? null)).length
+        s.project.animationFolders.push({ id, name, parentId: parentId ?? null, order, expanded: true })
+        s.dirty = true
+      })
+      return id
+    },
+
+    renameAnimationFolder: (id, name) =>
+      set((s) => {
+        const f = s.project.animationFolders.find((x) => x.id === id)
+        if (f) f.name = name || f.name
+        s.dirty = true
+      }),
+
+    deleteAnimationFolder: (id) =>
+      set((s) => {
+        const folder = s.project.animationFolders.find((f) => f.id === id)
+        if (!folder) return
+        const parent = folder.parentId // children move up to here (no animations are ever lost)
+        for (const f of s.project.animationFolders) if (f.parentId === id) f.parentId = parent
+        for (const a of s.project.animations) if ((a.folderId ?? null) === id) a.folderId = parent
+        s.project.animationFolders = s.project.animationFolders.filter((f) => f.id !== id)
+        reindexFolders(s.project.animationFolders, parent)
+        reindexAnimations(s.project.animations, parent)
+        s.dirty = true
+      }),
+
+    setAnimationFolderExpanded: (id, expanded) =>
+      set((s) => {
+        const f = s.project.animationFolders.find((x) => x.id === id)
+        if (f) f.expanded = expanded
+        s.dirty = true
+      }),
+
+    moveAnimationToFolder: (animationId, targetFolderId, index) =>
+      set((s) => {
+        const anim = s.project.animations.find((a) => a.id === animationId)
+        if (!anim) return
+        const to = targetFolderId ?? null
+        if (to !== null && !s.project.animationFolders.some((f) => f.id === to)) return // unknown target
+        const from = anim.folderId ?? null
+        anim.folderId = to
+        insertAnimationAt(s.project.animations, to, animationId, index)
+        if (from !== to) reindexAnimations(s.project.animations, from)
+        s.dirty = true
+      }),
+
+    moveAnimationFolder: (folderId, targetParentId, index) =>
+      set((s) => {
+        const folder = s.project.animationFolders.find((f) => f.id === folderId)
+        if (!folder) return
+        const to = targetParentId ?? null
+        if (to === folderId) return
+        if (to !== null && !s.project.animationFolders.some((f) => f.id === to)) return // unknown target
+        if (wouldCycleFolder(s.project.animationFolders, folderId, to)) return // into its own descendant
+        const from = folder.parentId
+        folder.parentId = to
+        insertFolderAt(s.project.animationFolders, to, folderId, index)
+        if (from !== to) reindexFolders(s.project.animationFolders, from)
         s.dirty = true
       }),
 
