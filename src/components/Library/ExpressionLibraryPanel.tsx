@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, Fragment } from 'react'
 import { useStore } from '@/state/store'
 import { renderFace } from '@/renderer/faceRenderer'
 import { fitDisplayToBox } from '@/renderer/displayMask'
@@ -47,11 +47,35 @@ export function ExpressionLibraryPanel() {
   const saveExpression = useStore((s) => s.saveExpression)
   const renameExpression = useStore((s) => s.renameExpression)
   const deleteExpression = useStore((s) => s.deleteExpression)
+  const reorderExpression = useStore((s) => s.reorderExpression)
   const checkpoint = useStore((s) => s.checkpoint)
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draftName, setDraftName] = useState('')
   const [newName, setNewName] = useState('')
+  // Drag-to-reorder: which item is being dragged, and the insertion slot (0..length) the
+  // indicator line is showing.
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [overIndex, setOverIndex] = useState<number | null>(null)
+  const clearDrag = () => {
+    setDragId(null)
+    setOverIndex(null)
+  }
+  const dropAt = (slot: number) => {
+    if (!dragId) return
+    const fromIdx = expressions.findIndex((e) => e.id === dragId)
+    if (fromIdx === -1) {
+      clearDrag()
+      return
+    }
+    let target = slot > fromIdx ? slot - 1 : slot // account for the dragged item's own removal
+    target = Math.max(0, Math.min(expressions.length - 1, target))
+    if (target !== fromIdx) {
+      checkpoint()
+      reorderExpression(dragId, target)
+    }
+    clearDrag()
+  }
 
   const selected = expressions.find((e) => e.id === selectedExpressionId)
   const isDirty =
@@ -112,19 +136,53 @@ export function ExpressionLibraryPanel() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto p-1.5 grid grid-cols-1 gap-1">
-        {expressions.map((expr) => {
+      <div
+        className="flex-1 overflow-y-auto p-1.5 flex flex-col gap-1"
+        onDragOver={(e) => {
+          if (dragId) e.preventDefault()
+        }}
+        onDrop={(e) => {
+          if (dragId) {
+            e.preventDefault()
+            dropAt(overIndex ?? expressions.length)
+          }
+        }}
+      >
+        {expressions.map((expr, i) => {
           const isSelected = expr.id === selectedExpressionId
           const showDirtyDot = isSelected && isDirty
           return (
-            <div
-              key={expr.id}
-              className={`group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer border ${
-                isSelected ? 'bg-studio-accent/20 border-studio-accent/40' : 'hover:bg-studio-panel2 border-transparent'
-              }`}
-              onClick={() => handleSelect(expr.id)}
-            >
-              <ExpressionThumb expr={expr} />
+            <Fragment key={expr.id}>
+              {dragId && overIndex === i && <div className="h-0.5 rounded bg-studio-accent" />}
+              <div
+                draggable={editingId !== expr.id}
+                onDragStart={(e) => {
+                  setDragId(expr.id)
+                  e.dataTransfer.effectAllowed = 'move'
+                  e.dataTransfer.setData('text/plain', expr.id)
+                }}
+                onDragOver={(e) => {
+                  if (!dragId) return
+                  e.preventDefault()
+                  const r = e.currentTarget.getBoundingClientRect()
+                  setOverIndex(e.clientY < r.top + r.height / 2 ? i : i + 1)
+                }}
+                onDrop={(e) => {
+                  if (!dragId) return
+                  e.preventDefault()
+                  e.stopPropagation()
+                  dropAt(overIndex ?? i)
+                }}
+                onDragEnd={clearDrag}
+                className={`group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer border ${dragId === expr.id ? 'opacity-40' : ''} ${
+                  isSelected ? 'bg-studio-accent/20 border-studio-accent/40' : 'hover:bg-studio-panel2 border-transparent'
+                }`}
+                onClick={() => handleSelect(expr.id)}
+              >
+                <span className="text-studio-muted/50 group-hover:text-studio-muted cursor-grab select-none shrink-0 leading-none" title="Drag to reorder">
+                  ⠿
+                </span>
+                <ExpressionThumb expr={expr} />
               {editingId === expr.id ? (
                 <input
                   autoFocus
@@ -165,9 +223,11 @@ export function ExpressionLibraryPanel() {
               >
                 ✕
               </button>
-            </div>
+              </div>
+            </Fragment>
           )
         })}
+        {dragId && overIndex === expressions.length && <div className="h-0.5 rounded bg-studio-accent" />}
       </div>
     </div>
   )

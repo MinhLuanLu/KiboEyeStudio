@@ -653,6 +653,7 @@ interface StoreState {
   saveExpression: (id: string) => void
   renameExpression: (id: string, name: string) => void
   deleteExpression: (id: string) => void
+  reorderExpression: (id: string, newIndex: number) => void
 
   // auth
   setAuthSession: (email: string | null) => void
@@ -2916,6 +2917,21 @@ export const useStore = create<StoreState>()(
       set((s) => {
         s.project.expressions = s.project.expressions.filter((e) => e.id !== id)
         if (s.selectedExpressionId === id) s.selectedExpressionId = null
+        s.dirty = true
+      }),
+
+    // Drag-to-reorder in the Expressions panel — same as reorderAnimation: only changes the order
+    // within project.expressions (which is serialized, so it persists across save/reopen); the
+    // expressions themselves are untouched. newIndex is the final 0-based position.
+    reorderExpression: (id, newIndex) =>
+      set((s) => {
+        const arr = s.project.expressions
+        const idx = arr.findIndex((e) => e.id === id)
+        if (idx === -1) return
+        const clamped = Math.max(0, Math.min(arr.length - 1, newIndex))
+        if (clamped === idx) return
+        const [expr] = arr.splice(idx, 1)
+        arr.splice(clamped, 0, expr)
         s.dirty = true
       }),
 
