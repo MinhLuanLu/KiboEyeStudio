@@ -52,7 +52,11 @@ export function TimelineInspector() {
 
   const [exprPickerOpen, setExprPickerOpen] = useState(false)
   const [exprSearch, setExprSearch] = useState('')
-  const [exprMode, setExprMode] = useState<'styleOnly' | 'replace'>('styleOnly')
+  // Default to "Replace all" so adding an expression captures a COMPLETE snapshot of it (pose +
+  // position/rotation + colours), i.e. the keyframe looks exactly like the expression. "Preserve
+  // overrides" (styleOnly) stays available for applying just the shared visual style onto a
+  // keyframe that already has its own movement/overrides.
+  const [exprMode, setExprMode] = useState<'styleOnly' | 'replace'>('replace')
 
   if (selection.length === 1 && selection[0].kind === 'comboClip') {
     const item = selection[0]

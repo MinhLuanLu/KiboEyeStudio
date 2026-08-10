@@ -2232,6 +2232,15 @@ export const useStore = create<StoreState>()(
             copyStyleFields(kf.rightParams, exprRight)
           }
         }
+        // Also capture the expression's full COLOUR palette. Fill, border (colour/width/opacity),
+        // iris, pupil, highlight, shadow and glow all live in EyeColors — a separate object from
+        // EyeParams — so copying params alone left the keyframe on its old/base colours (the
+        // "not all properties copied" bug). This applies to both modes: colours are visual style,
+        // and applyExpressionToKeyframe only ever targets pose-track keyframes (a.keyframes), where
+        // a per-keyframe palette is meaningful. `{ ...expr.colors }` is a fresh, independent copy
+        // (EyeColors is flat), so later editing the source Expression can't mutate this keyframe,
+        // and editing this keyframe can't mutate the Expression or any sibling keyframe.
+        kf.colors = { ...expr.colors }
         kf.styleOverrides = computeStyleOverrides(kf.params, null, s.project.visualReference)
         s.dirty = true
       }),
