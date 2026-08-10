@@ -493,6 +493,7 @@ interface StoreState {
   duplicateAnimation: (id: string) => string
   renameAnimation: (id: string, name: string) => void
   deleteAnimation: (id: string) => void
+  reorderAnimation: (id: string, newIndex: number) => void
   setAnimationLoop: (id: string, loop: boolean) => void
   importAnimation: (animation: Animation) => void
 
@@ -1907,6 +1908,22 @@ export const useStore = create<StoreState>()(
           s.selectedKeyframeId = null
           s.timelineSelection = []
         }
+        s.dirty = true
+      }),
+
+    // Drag-to-reorder in the Animations panel. Only changes ordering within project.animations (so
+    // related animations can be grouped) — animation contents/playback are untouched. Order is part
+    // of the serialized project, so it persists across save/reopen. newIndex is the final 0-based
+    // position among the other items.
+    reorderAnimation: (id, newIndex) =>
+      set((s) => {
+        const arr = s.project.animations
+        const idx = arr.findIndex((a) => a.id === id)
+        if (idx === -1) return
+        const clamped = Math.max(0, Math.min(arr.length - 1, newIndex))
+        if (clamped === idx) return
+        const [anim] = arr.splice(idx, 1)
+        arr.splice(clamped, 0, anim)
         s.dirty = true
       }),
 
