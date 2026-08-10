@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { useStore } from '@/state/store'
 import { WidgetRenderer } from './WidgetRenderer'
 import { readAssetDragPayload, readComponentTemplateDragPayload, readWidgetDragPayload } from '@/lib/uiDesign/dnd'
-import { UI_SRC_IMAGE_WIDGETS } from '@/types'
+import { UI_SRC_IMAGE_WIDGETS, screenBackgroundColor } from '@/types'
 import { clampUiZoom, computeStageTransform, zoomAroundPoint } from '@/lib/uiDesign/canvasZoom'
 import { CanvasRulers } from './Ruler'
 import { DragInfoPanel } from './DragInfoPanel'
@@ -39,6 +39,9 @@ export function Canvas() {
   const activeScreen = uiDesign.screens.find((s) => s.id === uiDesign.activeScreenId) ?? uiDesign.screens[0]
 
   const borderRadius = display.shape === 'round' ? '50%' : '0px'
+  // Per-screen background: the active screen's own color, falling back to the project default.
+  // "Preview As..." overrides intentionally win (it's a whole-display what-if snapshot).
+  const canvasBackground = previewOverride ? (display.backgroundColor ?? '#ffffff') : screenBackgroundColor(activeScreen, uiDesign.display)
 
   useEffect(() => {
     const el = viewportRef.current
@@ -187,7 +190,7 @@ export function Canvas() {
             width: display.width,
             height: display.height,
             borderRadius,
-            background: display.backgroundColor ?? '#ffffff',
+            background: canvasBackground,
             overflow: 'hidden',
             boxShadow: '0 0 0 1px rgba(255,255,255,0.08), 0 8px 24px rgba(0,0,0,0.4)',
             // Explicit reset so descendants inherit a clean baseline instead of the app's own

@@ -1,5 +1,5 @@
 import { useStore } from '@/state/store'
-import { UI_DISPLAY_PRESETS } from '@/types'
+import { UI_DISPLAY_PRESETS, screenBackgroundColor } from '@/types'
 import type { UiDisplayOrientation, UiDisplayRotation, UiDisplayShape } from '@/types'
 import { ColorField } from '@/components/ui/ColorField'
 
@@ -23,6 +23,9 @@ export function DisplaySettingsPanel() {
   const checkpoint = useStore((s) => s.checkpoint)
   const previewOverride = useStore((s) => s.uiPreviewDisplayOverride)
   const setUiPreviewDisplayOverride = useStore((s) => s.setUiPreviewDisplayOverride)
+  const activeScreen = useStore((s) => s.project.uiDesign.screens.find((sc) => sc.id === s.project.uiDesign.activeScreenId) ?? s.project.uiDesign.screens[0])
+  const setUiScreenStyle = useStore((s) => s.setUiScreenStyle)
+  const screenBg = screenBackgroundColor(activeScreen, display)
 
   const activePresetId = UI_DISPLAY_PRESETS.find((p) => p.width === display.width && p.height === display.height && p.shape === display.shape)?.id ?? null
 
@@ -34,6 +37,9 @@ export function DisplaySettingsPanel() {
 
   return (
     <div className="p-3 flex flex-col gap-4">
+      <p className="text-[11px] text-studio-muted -mb-1">
+        Project Display — physical panel settings shared by every screen. Per-screen visual style (background) is at the bottom.
+      </p>
       <div className="flex flex-col gap-1.5">
         <span className="studio-label">Presets</span>
         <div className="grid grid-cols-2 gap-1.5">
@@ -140,15 +146,18 @@ export function DisplaySettingsPanel() {
         </div>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <span className="studio-label">Background Color</span>
+      <div className="border-t border-studio-border pt-3 flex flex-col gap-1.5">
+        <span className="studio-label">Screen Style — {activeScreen?.name ?? 'no screen'}</span>
+        <p className="text-[11px] text-studio-muted -mt-0.5">
+          Per-screen: each screen tab keeps its own background. The size/shape/rotation above are shared by every screen (one physical display).
+        </p>
         <ColorField
-          label="Screen background"
-          value={display.backgroundColor}
+          label={`${activeScreen?.name ?? 'Screen'} background`}
+          value={screenBg}
           onCommitStart={checkpoint}
-          onChange={(v) => setUiDisplaySettings({ backgroundColor: v })}
+          onChange={(v) => activeScreen && setUiScreenStyle(activeScreen.id, { backgroundColor: v })}
         />
-        <p className="text-[11px] text-studio-muted">The screen surface behind all widgets — exported as the LVGL screen's own background color.</p>
+        <p className="text-[11px] text-studio-muted">The surface behind this screen's widgets — exported as this LVGL screen's own background color.</p>
       </div>
 
       <div className="border-t border-studio-border pt-3 flex flex-col gap-1.5">

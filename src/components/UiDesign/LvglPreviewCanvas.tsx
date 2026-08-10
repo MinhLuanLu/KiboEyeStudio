@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useStore } from '@/state/store'
 import type { UiAsset, UiCssRule, UiDesignProject, UiWidget } from '@/types'
+import { screenBackgroundColor } from '@/types'
 import { computeEffectiveStyle } from '@/lib/uiDesign/cssCascade'
 import { CONTAINER_LIKE, DEFAULT_VISUAL_CSS, WidgetInner, backgroundImageCss, mergeDefined, styleToCss } from './WidgetRenderer'
 
@@ -112,7 +113,7 @@ export function LvglScreenPreview({ screenId }: { screenId: string | null }) {
             transform: `scale(${scale})`,
             transformOrigin: 'top left',
             borderRadius,
-            background: '#ffffff',
+            background: screenBackgroundColor(screen, display),
             overflow: 'hidden',
             boxShadow: '0 0 0 1px rgba(255,255,255,0.08), 0 4px 12px rgba(0,0,0,0.35)',
             color: '#000000',

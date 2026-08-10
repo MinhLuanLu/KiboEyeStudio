@@ -3,6 +3,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import type { ToolbarActions } from '@/components/Layout/Toolbar'
 import { PanelTabs } from '@/components/ui/PanelTabs'
 import { UiDesignTopBar } from './UiDesignTopBar'
+import { ScreenTabs } from './ScreenTabs'
 import { Toolbox } from './Toolbox'
 import { LayersPanel } from './LayersPanel'
 import { Canvas } from './Canvas'
@@ -59,6 +60,7 @@ export function UiDesignWorkspace({ toolbarActions }: { toolbarActions: ToolbarA
   return (
     <div className="flex flex-col h-full">
       <UiDesignTopBar actions={toolbarActions} />
+      <ScreenTabs />
       <div className="flex-1 min-h-0">
         <PanelGroup direction="horizontal">
           {/* Every <Panel> below gets className="flex flex-col" so it establishes a real flex
