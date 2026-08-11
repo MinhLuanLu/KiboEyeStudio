@@ -43,6 +43,8 @@ export function TimelineInspector() {
   const setKeyframeTime = useStore((s) => s.setKeyframeTime)
   const updateTrackKeyframeEasing = useStore((s) => s.updateTrackKeyframeEasing)
   const applyExpressionToKeyframe = useStore((s) => s.applyExpressionToKeyframe)
+  const saveKeyframeAsExpression = useStore((s) => s.saveKeyframeAsExpression)
+  const setLeftTab = useStore((s) => s.setLeftTab)
   const resizeStickerClip = useStore((s) => s.resizeStickerClip)
   const updateSticker = useStore((s) => s.updateSticker)
   const updateMarker = useStore((s) => s.updateMarker)
@@ -240,6 +242,20 @@ export function TimelineInspector() {
             {kf.styleOverrides.length > 0 && <> · Overrides: {kf.styleOverrides.map(formatFieldLabel).join(', ')}</>}
           </span>
           {trackKind === 'pose' && (
+            <div className="flex items-center gap-1.5">
+            <button
+              className="studio-btn text-xs px-2 py-1"
+              title="Save this keyframe's current look as a new reusable Expression"
+              onClick={() => {
+                const name = window.prompt('Name for the new Expression:', '')?.trim()
+                if (!name) return
+                checkpoint()
+                const id = saveKeyframeAsExpression(kf.id, name)
+                if (id) setLeftTab('expressions') // reveal it in the Expressions panel
+              }}
+            >
+              Save as Expression...
+            </button>
             <div className="relative">
               <button className="studio-btn text-xs px-2 py-1" onClick={() => setExprPickerOpen((v) => !v)}>
                 Use Existing Expression...
@@ -291,6 +307,7 @@ export function TimelineInspector() {
                   </div>
                 </div>
               )}
+            </div>
             </div>
           )}
         </div>

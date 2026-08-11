@@ -548,6 +548,9 @@ interface StoreState {
    * (see the Timeline "Apply Expression" control's own comment for why a live-linked
    * reference isn't implemented in this pass). */
   applyExpressionToKeyframe: (keyframeId: string, expressionId: string, mode: 'replace' | 'styleOnly') => void
+  /** Reverse of applyExpressionToKeyframe: snapshot a pose-track keyframe's full visual state into a
+   * brand-new reusable Expression (added to project.expressions at root). Returns the new id. */
+  saveKeyframeAsExpression: (keyframeId: string, name: string) => string
 
   // timeline (multi-track, CapCut-style editing) — operates on whichever of the 5 keyframe
   // tracks / sticker clips / markers the caller names, across the active animation, and (for
@@ -2395,6 +2398,40 @@ export const useStore = create<StoreState>()(
         kf.styleOverrides = computeStyleOverrides(kf.params, null, s.project.visualReference)
         s.dirty = true
       }),
+
+    // Reverse workflow: turn a pose keyframe's current look into a new reusable Expression. Captures
+    // the full visual state — pose (params), per-eye divergence (left/right params), and the effective
+    // colour palette (the keyframe's own `colors`, or the project base when it has none) — exactly as
+    // saveExpression()/addExpression() build one, so it drops straight into the Expressions library and
+    // is immediately selectable from any other keyframe's "Use Existing Expression". A keyframe carries
+    // no stickers of its own (those are per-animation), so the new Expression starts with none.
+    saveKeyframeAsExpression: (keyframeId, name) => {
+      const newId = nanoid(10)
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const kf = a?.keyframes.find((k) => k.id === keyframeId)
+        if (!kf) return
+        const params = { ...kf.params }
+        const colors = kf.colors ? { ...kf.colors } : { ...s.project.colors }
+        const order = s.project.expressions.filter((e) => (e.folderId ?? null) === null).length
+        s.project.expressions.push({
+          id: newId,
+          name,
+          params,
+          colors,
+          leftParams: kf.leftParams ? { ...kf.leftParams } : null,
+          rightParams: kf.rightParams ? { ...kf.rightParams } : null,
+          leftColors: null,
+          rightColors: null,
+          styleOverrides: computeStyleOverrides(params, colors, s.project.visualReference),
+          stickers: [],
+          folderId: null,
+          order
+        })
+        s.dirty = true
+      })
+      return newId
+    },
 
     // ---- timeline (multi-track, CapCut-style editing) --------------------------------------
 
