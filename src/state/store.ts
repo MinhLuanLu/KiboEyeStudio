@@ -512,6 +512,8 @@ interface StoreState {
   duplicateAnimationCombo: (id: string) => string
   renameAnimationCombo: (id: string, name: string) => void
   deleteAnimationCombo: (id: string) => void
+  /** Drag-to-reorder a combination within the library (persists via the serialized array order). */
+  reorderAnimationCombo: (id: string, newIndex: number) => void
   addAnimationComboClip: (comboId: string, animationId: string) => string
   updateAnimationComboClip: (comboId: string, clipId: string, partial: Partial<AnimationComboClip>) => void
   deleteAnimationComboClip: (comboId: string, clipId: string) => void
@@ -2219,6 +2221,18 @@ export const useStore = create<StoreState>()(
         combo.clips.splice(clamped, 0, clip)
         combo.clips.forEach((item, index) => (item.startTimeMs = index === 0 ? 0 : Math.max(item.startTimeMs, combo.clips[index - 1].startTimeMs + 1)))
         combo.clips.sort((a, b) => a.startTimeMs - b.startTimeMs)
+        s.dirty = true
+      }),
+
+    reorderAnimationCombo: (id, newIndex) =>
+      set((s) => {
+        const arr = s.project.animationCombos
+        const idx = arr.findIndex((c) => c.id === id)
+        if (idx === -1) return
+        const clamped = Math.max(0, Math.min(arr.length - 1, newIndex))
+        if (clamped === idx) return
+        const [combo] = arr.splice(idx, 1)
+        arr.splice(clamped, 0, combo)
         s.dirty = true
       }),
 
