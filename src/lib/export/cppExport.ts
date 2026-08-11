@@ -638,14 +638,22 @@ function exportEyeShapes(project: Project): string {
 
 // ---- Stickers -------------------------------------------------------------------------
 //
-// Scope for this pass: only Project.stickers (the project-wide, "always visible" scope)
-// exports to firmware — Expression.stickers/Animation.stickers stay studio-preview-only for
-// now (they're a real feature there, applied to the effective sticker list the same way).
-// Wiring per-expression/per-animation stickers into SetExpression()/PlayAnimation() would
-// mean tracking a *second* time base per active pose and cross-referencing it against
-// whichever expression/animation is currently live — a meaningfully separate chunk of player
-// state beyond what this pass covers. Flagging this here the same way SVG/sprite-sheet
-// import were flagged as deferred in the plan, rather than silently under-delivering it.
+// Scope: every sticker scope exports and draws on firmware — Project.stickers (PROJECT_STICKERS,
+// always visible), each Expression's stickers (bundled into its EyeExpression), and each
+// Animation's stickers (bundled into its EyeAnimation). eyesDrawEyePair() merges PROJECT_STICKERS
+// with whichever expression/animation (or combo clip) is currently live, exactly like the studio's
+// effectiveStickers().
+//
+// The "second time base" this needs: animation/combo-clip stickers must be evaluated against the
+// animation's OWN looping playhead, not the free-running millis() clock. A sticker clip carries a
+// start/end window (StickerAnimSettings.startTimeMs/endTimeMs) in animation-local ms; if it were
+// evaluated against millis() (time since boot), a clip with a finite end time would satisfy its
+// window only once — during the first endTimeMs after power-on — and then stay hidden forever,
+// which read as "the sticker exports but never shows on the device". So UpdateEyes() resolves the
+// active sticker list + its LOCAL clock each frame into EyesPlayerState.activeStickers/
+// activeStickerElapsedMs (looping within the animation's duration), and eyesDrawEyePair() draws
+// PROJECT_STICKERS on millis() (ambient) but the active stickers on that local clock — matching the
+// studio's Animate-mode preview, where the sticker scrubs/loops with the animation's own time.
 //
 // Built-in procedural stickers: all 14 have a hand-ported C++ drawer below
 // (eyesDrawSticker_Rain/Snow/Zzz/... in PLAYER_CODE), each a direct port of the matching
@@ -2673,6 +2681,16 @@ struct EyesPlayerState {
   uint8_t sequenceCount = 0;
   uint8_t sequenceIndex = 0;
   bool sequenceLoop = false;
+  // The sticker list belonging to whatever pose is currently live — a direct animation, the
+  // active combo clip's animation, or the current expression — plus the LOCAL clock to evaluate
+  // it against. Refreshed every frame by UpdateEyes() and consumed by eyesDrawEyePair(). Animation
+  // stickers scrub with the animation's own looping playhead (activeStickerElapsedMs), NOT the
+  // free-running millis() used for PROJECT_STICKERS; see the Stickers comment above for why a
+  // finite-end sticker clip would otherwise vanish forever after boot. nullptr/0 = nothing active
+  // (only PROJECT_STICKERS draw this frame).
+  const StickerDef* activeStickers = nullptr;
+  uint8_t activeStickerCount = 0;
+  unsigned long activeStickerElapsedMs = 0;
 };
 static EyesPlayerState eyesPlayer;
 
@@ -2794,7 +2812,12 @@ inline void eyesBlendTowardClipStart(const AnimationComboClip& clip, float t, Li
   outRight = eyesLerpLive(outRight, targetRight, t);
 }
 
-inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, bool loop, LiveEye& outLeft, LiveEye& outRight) {
+// outStickers/outStickerCount/outStickerElapsedMs (all optional) report the currently-playing
+// clip's animation stickers and the clip-local playhead to draw them at, so the caller can scrub
+// combo-clip stickers with the clip's own time (see UpdateEyes()).
+inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, bool loop, LiveEye& outLeft, LiveEye& outRight,
+                           const StickerDef** outStickers = nullptr, uint8_t* outStickerCount = nullptr,
+                           unsigned long* outStickerElapsedMs = nullptr) {
   if (combo.count == 0) return false;
   unsigned long totalDuration = eyesComboDurationMs(combo);
   if (totalDuration == 0) return false;
@@ -2822,6 +2845,11 @@ inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, 
       unsigned long animDuration = eyesAnimationDurationMs(active);
       unsigned long animElapsed = animDuration > 0 ? (scaledElapsed % animDuration) : 0;
       unsigned long localStartMillis = millis() - animElapsed;
+      // Report this clip's stickers + its animation-local playhead so combo-clip stickers scrub
+      // with the clip's own time, matching the studio's sampleCombo()/effectiveStickers() preview.
+      if (outStickers) *outStickers = clip.animation->stickers;
+      if (outStickerCount) *outStickerCount = clip.animation->stickerCount;
+      if (outStickerElapsedMs) *outStickerElapsedMs = animElapsed;
       uint16_t frameIndex = 0;
       bool stillPlaying = eyesPlayAnimationPair(active, localStartMillis, frameIndex, outLeft, outRight);
 
@@ -2939,15 +2967,31 @@ inline void AnimationCombination(std::initializer_list<EyeAnimation> animations,
 // eye's pose (identical unless the currently-playing animation authored real left/right
 // divergence).
 inline LiveEye UpdateEyes() {
+  // Resolve which sticker list is active this frame + the LOCAL clock to evaluate it against.
+  // Default: nothing active (only PROJECT_STICKERS draw). Each playback branch below overrides.
+  // Expression stickers run on the ambient millis() clock (like the studio's Design/Idle mode);
+  // animation & combo-clip stickers get the animation's own looping playhead instead.
+  eyesPlayer.activeStickers = nullptr;
+  eyesPlayer.activeStickerCount = 0;
+  eyesPlayer.activeStickerElapsedMs = millis();
   if (eyesPlayer.blending) {
     float t = (float)(millis() - eyesPlayer.blendStart) / (float)EYES_BLEND_MS;
     if (t >= 1.0f) { t = 1.0f; eyesPlayer.blending = false; }
     LiveEye target = eyesLerpFrame(*eyesPlayer.expression->frame, *eyesPlayer.expression->frame, 0);
     eyesPlayer.live = eyesLerpLive(eyesPlayer.blendFrom, target, t);
     eyesPlayer.liveRight = eyesPlayer.live;
+    eyesPlayer.activeStickers = eyesPlayer.expression->stickers;
+    eyesPlayer.activeStickerCount = eyesPlayer.expression->stickerCount;
   } else if (ComboPlaying() && eyesPlayer.combo != nullptr) {
     unsigned long elapsed = millis() - eyesPlayer.comboStart;
-    bool stillPlaying = eyesPlayCombo(*eyesPlayer.combo, elapsed, eyesPlayer.comboLoop, eyesPlayer.live, eyesPlayer.liveRight);
+    const StickerDef* clipStickers = nullptr;
+    uint8_t clipStickerCount = 0;
+    unsigned long clipStickerMs = 0;
+    bool stillPlaying = eyesPlayCombo(*eyesPlayer.combo, elapsed, eyesPlayer.comboLoop, eyesPlayer.live, eyesPlayer.liveRight,
+                                      &clipStickers, &clipStickerCount, &clipStickerMs);
+    eyesPlayer.activeStickers = clipStickers;
+    eyesPlayer.activeStickerCount = clipStickerCount;
+    eyesPlayer.activeStickerElapsedMs = clipStickerMs;
     if (!eyesPlayer.comboLoop) {
       unsigned long totalDuration = eyesComboDurationMs(*eyesPlayer.combo);
       if (elapsed >= totalDuration) {
@@ -2966,12 +3010,27 @@ inline LiveEye UpdateEyes() {
     bool animationFinished = eyesPlayer.animation.loop
       ? sequenceElapsed >= eyesAnimationDurationMs(eyesPlayer.animation)
       : !stillPlaying;
+    // Draw this animation's stickers against its own playhead — looped within the animation's
+    // duration for a looping animation (so a finite-end sticker clip reappears every cycle, like
+    // the studio), or the raw elapsed for a one-shot (holds past its window at the end, like the
+    // studio holding the final frame).
+    eyesPlayer.activeStickers = eyesPlayer.animation.stickers;
+    eyesPlayer.activeStickerCount = eyesPlayer.animation.stickerCount;
+    unsigned long animDur = eyesAnimationDurationMs(eyesPlayer.animation);
+    // Looping: wrap within the animation duration so a finite-end sticker clip reappears each
+    // cycle. One-shot: clamp at the end (freeze drift/pulse), matching the studio holding the
+    // playhead at its total once a non-looping animation finishes.
+    eyesPlayer.activeStickerElapsedMs = (animDur > 0 && eyesPlayer.animation.loop)
+      ? (sequenceElapsed % animDur)
+      : (animDur > 0 && sequenceElapsed > animDur ? animDur : sequenceElapsed);
     if (animationFinished && eyesPlayer.sequencePlaying) {
       eyesAdvanceAnimationSequence();
     }
   } else if (eyesPlayer.expression) {
     eyesPlayer.live = eyesLerpFrame(*eyesPlayer.expression->frame, *eyesPlayer.expression->frame, 0);
     eyesPlayer.liveRight = eyesPlayer.live;
+    eyesPlayer.activeStickers = eyesPlayer.expression->stickers;
+    eyesPlayer.activeStickerCount = eyesPlayer.expression->stickerCount;
   }
   return eyesPlayer.live;
 }
@@ -3382,18 +3441,17 @@ inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const Li
   // eye-spacing mismatch. In the common case (both eyes share one distance) halfLeft == halfRight.
   int16_t halfLeft  = (int16_t)(left.distance / 2);
   int16_t halfRight = (int16_t)(right.distance / 2);
+  // PROJECT_STICKERS animate on the free-running millis() clock (ambient, always-visible). The
+  // active expression/animation/combo-clip stickers + the LOCAL clock to draw them at are resolved
+  // each frame by UpdateEyes() into eyesPlayer.activeStickers/activeStickerElapsedMs — so animation
+  // stickers scrub/loop with the animation's own playhead instead of millis() (see the Stickers
+  // comment + EyesPlayerState above for why the free clock would otherwise hide them after boot).
   unsigned long stickersMs = millis();
-  const StickerDef* activeStickers = nullptr;
-  uint8_t activeStickerCount = 0;
-  if (eyesPlayer.playingAnimation) {
-    activeStickers = eyesPlayer.animation.stickers;
-    activeStickerCount = eyesPlayer.animation.stickerCount;
-  } else if (eyesPlayer.expression) {
-    activeStickers = eyesPlayer.expression->stickers;
-    activeStickerCount = eyesPlayer.expression->stickerCount;
-  }
+  const StickerDef* activeStickers = eyesPlayer.activeStickers;
+  uint8_t activeStickerCount = eyesPlayer.activeStickerCount;
+  unsigned long activeStickersMs = eyesPlayer.activeStickerElapsedMs;
   eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs, screenCx, screenCy);
-  eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, stickersMs, screenCx, screenCy);
+  eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_BEHIND, activeStickersMs, screenCx, screenCy);
   // eyePosX/Y move the whole eye on top of the ±distance/2 placement — eyePosX is sign-mirrored
   // for the right eye exactly like the studio's faceRenderer.ts, eyePosY never is.
   // Eyelid roundness/skew auto-mirror for the right eye whenever they match the left eye's
@@ -3404,7 +3462,7 @@ inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const Li
   eyesDrawEye(gfx, screenCx - halfLeft + (int16_t)left.eyePosX, screenCy + (int16_t)left.eyePosY, left, false, bgColor, leftColors);
   eyesDrawEye(gfx, screenCx + halfRight - (int16_t)right.eyePosX, screenCy + (int16_t)right.eyePosY, rightForDraw, true, bgColor, rightColors);
   eyesDrawStickers(gfx, PROJECT_STICKERS, PROJECT_STICKERS_Count, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
-  eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, stickersMs, screenCx, screenCy);
+  eyesDrawStickers(gfx, activeStickers, activeStickerCount, STICKER_RASTER_ASSETS, STICKER_RASTER_ASSET_COUNT, STICKER_LAYER_FRONT, activeStickersMs, screenCx, screenCy);
 }
 
 // Single-LiveEye convenience overload — draws both eyes mirrored from one shared pose (the
