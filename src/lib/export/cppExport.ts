@@ -3788,10 +3788,15 @@ function exportQuickReference(project: Project): string {
     for (const combo of project.animationCombos) lines.push(`//   Combo(${toIdentifier(combo.name)});`)
     // Play several combos back-to-back (each starts only after the previous ComboFinished()) — pass
     // combo POINTERS (&Name); every combo plays once, and with loop==true the whole list repeats.
-    const comboRefs = project.animationCombos.slice(0, 3).map((c) => `&${toIdentifier(c.name)}`).join(', ')
+    // Lists ALL of this project's combos (up to the 32-per-call queue limit) so it's ready to copy.
+    const PMC_MAX = 32 // EYES_MAX_ANIMATION_SEQUENCE — max combos a single PlayMultipleCombos() queues
+    const comboRefs = project.animationCombos.slice(0, PMC_MAX).map((c) => `&${toIdentifier(c.name)}`).join(', ')
     lines.push('//')
     lines.push(`//   PlayMultipleCombos({ ${comboRefs} });        // play each once, then hold the last frame`)
     lines.push(`//   PlayMultipleCombos({ ${comboRefs} }, true);  // ...and loop the whole list forever`)
+    if (project.animationCombos.length > PMC_MAX) {
+      lines.push(`//   // (only the first ${PMC_MAX} of ${project.animationCombos.length} combos shown — that's the most one PlayMultipleCombos() call can queue)`)
+    }
   } else {
     lines.push('// Animation Combinations: (this project has none yet)')
   }
