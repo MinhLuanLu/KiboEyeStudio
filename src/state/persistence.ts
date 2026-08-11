@@ -193,6 +193,7 @@ export function normalizeStickerInstances(raw: unknown): StickerInstance[] {
       scaleY: typeof r.scaleY === 'number' ? r.scaleY : typeof r.scale === 'number' ? r.scale : 100,
       rotation: typeof r.rotation === 'number' ? r.rotation : 0,
       opacity: typeof r.opacity === 'number' ? r.opacity : 100,
+      strokeWidth: typeof r.strokeWidth === 'number' ? r.strokeWidth : 5,
       tint: typeof r.tint === 'string' ? r.tint : null,
       svgColorMode: r.svgColorMode === 'overrideWithTint' ? 'overrideWithTint' : 'preserveOriginal',
       resolvedSvg:

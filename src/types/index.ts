@@ -915,6 +915,10 @@ export interface StickerInstance {
   scaleY: number
   rotation: number
   opacity: number
+  /** Stroke thickness (%) for stroke-based procedural stickers (e.g. Circle Expanding). Maps to the
+   * drawer's line width in the [-1,1] unit box as strokeWidth/100 — 5 (default) reproduces the
+   * original 0.05. Absent on old projects → treated as the default. Ignored by non-stroke stickers. */
+  strokeWidth?: number
   /** null = the asset's native colors/frames, unmodified. For a kind:'svg' asset, this also
    * doubles as the override/currentColor color — see svgColorMode below. */
   tint: string | null

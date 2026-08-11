@@ -820,7 +820,8 @@ function stickerDefLiteral(s: StickerInstance, asset: StickerAsset | undefined, 
     Math.round(anim.driftY),
     Math.round(anim.spin),
     Math.max(0, Math.min(100, Math.round(anim.pulseScale))),
-    Math.max(0, Math.min(100, Math.round(anim.pulseOpacity)))
+    Math.max(0, Math.min(100, Math.round(anim.pulseOpacity))),
+    Math.max(1, Math.round(s.strokeWidth ?? 5)) // stroke thickness % for stroke-based procedurals
   ]
   return `  { ${fields.join(', ')} }`
 }
@@ -932,6 +933,7 @@ function exportStickers(project: Project): { code: string; assetsById: Map<strin
     '  int16_t driftX, driftY; // px/s',
     '  int16_t spin;           // deg/s',
     '  uint8_t pulseScale, pulseOpacity; // 0-100',
+    '  uint8_t strokeWidth;    // % stroke thickness for stroke-based procedurals (e.g. Circle Expanding)',
     '};',
     '',
     '// One imported raster (PNG/GIF) sticker asset\'s pixel data — frames are RGB565 with',
@@ -977,7 +979,7 @@ function exportStickers(project: Project): { code: string; assetsById: Map<strin
 
   lines.push('// kind, assetIndex, layer, x, y, width, height, scaleX, scaleY, rotation, opacity, tintColor,')
   lines.push('// flipH, flipV, animSpeed, animFps, startDelayMs, loopMode, reverse, fadeInMs, fadeOutMs,')
-  lines.push('// startTimeMs, endTimeMs, driftX, driftY, spin, pulseScale, pulseOpacity')
+  lines.push('// startTimeMs, endTimeMs, driftX, driftY, spin, pulseScale, pulseOpacity, strokeWidth')
   lines.push('// Project-wide stickers — always visible. Each Expression/Animation below exports its own')
   lines.push('// _Stickers array the same way; eyesDrawEyePair() merges whichever is currently active with')
   lines.push('// this one at draw time (see the Stickers comment above and eyesDrawEyePair() in PLAYER_CODE).')
@@ -2376,22 +2378,37 @@ inline void eyesDrawSticker_BurstLines(T& gfx, int16_t cx, int16_t cy, int16_t r
 }
 
 template <typename T>
-inline void eyesDrawSticker_ExpandingCircles(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t) {
+inline void eyesDrawSticker_ExpandingCircles(T& gfx, int16_t cx, int16_t cy, int16_t rx, int16_t ry, float rotationDeg, uint16_t color, float t, uint8_t strokeWidth, bool loop) {
   (void)rotationDeg; // rings are rotation-invariant
   float rMag = (fabsf((float)rx) + fabsf((float)ry)) * 0.5f;
   const uint8_t N = 3;
+  // Stroke thickness: the studio's lineWidth = strokeWidth/100 in unit space maps to strokeWidth% of
+  // the ring's own radius magnitude in pixels; drawCircle() is 1px, so stack concentric circles.
+  int16_t halfThick = (int16_t)roundf((strokeWidth / 100.0f) * rMag * 0.5f);
+  if (halfThick < 0) halfThick = 0;
   for (uint8_t i = 0; i < N; i++) {
-    float local = fmodf(t * 0.6f + (float)i / N, 1.0f);
-    if (local < 0) local += 1.0f;
+    float raw = t * 0.6f + (float)i / N;
+    float local;
+    if (loop) {
+      local = fmodf(raw, 1.0f);
+      if (local < 0) local += 1.0f;
+    } else {
+      local = raw;
+      if (local >= 1.0f) continue; // "No Loop": once a ring has fully expanded it stops (studio fades to 0)
+    }
     int16_t wr = (int16_t)roundf(local * rMag);
-    if (wr > 0) gfx.drawCircle(cx, cy, wr, color);
+    if (wr <= 0) continue;
+    for (int16_t d = -halfThick; d <= halfThick; d++) {
+      int16_t r = wr + d;
+      if (r > 0) gfx.drawCircle(cx, cy, r, color);
+    }
   }
 }
 
 // Dispatches to the matching built-in drawer. All 14 built-ins have a firmware drawer.
 template <typename T>
 inline void eyesDrawStickerProcedural(T& gfx, uint8_t builtinId, int16_t cx, int16_t cy, int16_t rx, int16_t ry,
-                                       float rotationDeg, uint16_t color, float t) {
+                                       float rotationDeg, uint16_t color, float t, uint8_t strokeWidth, bool loop) {
   switch (builtinId) {
     case STICKER_BUILTIN_RAIN: eyesDrawSticker_Rain(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
     case STICKER_BUILTIN_SNOW: eyesDrawSticker_Snow(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
@@ -2405,7 +2422,7 @@ inline void eyesDrawStickerProcedural(T& gfx, uint8_t builtinId, int16_t cx, int
     case STICKER_BUILTIN_SMOKE: eyesDrawSticker_Smoke(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
     case STICKER_BUILTIN_LIGHTNING: eyesDrawSticker_Lightning(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
     case STICKER_BUILTIN_BURST_LINES: eyesDrawSticker_BurstLines(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
-    case STICKER_BUILTIN_EXPANDING_CIRCLES: eyesDrawSticker_ExpandingCircles(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
+    case STICKER_BUILTIN_EXPANDING_CIRCLES: eyesDrawSticker_ExpandingCircles(gfx, cx, cy, rx, ry, rotationDeg, color, t, strokeWidth, loop); break;
     case STICKER_BUILTIN_CONFETTI: eyesDrawSticker_Confetti(gfx, cx, cy, rx, ry, rotationDeg, color, t); break;
     default: break;
   }
@@ -2561,7 +2578,7 @@ inline void eyesDrawStickers(T& gfx, const StickerDef* stickers, uint8_t count,
     int16_t drawCx = screenCx + live.cx;
     int16_t drawCy = screenCy + live.cy;
     if (s.kind == STICKER_KIND_PROCEDURAL) {
-      eyesDrawStickerProcedural(gfx, s.assetIndex, drawCx, drawCy, live.rx, live.ry, live.rotationDeg, s.tintColor, localMs / 1000.0f);
+      eyesDrawStickerProcedural(gfx, s.assetIndex, drawCx, drawCy, live.rx, live.ry, live.rotationDeg, s.tintColor, localMs / 1000.0f, s.strokeWidth, s.loopMode != STICKER_LOOP_ONCE);
     } else if (s.assetIndex < rasterCount) {
       const StickerRasterAsset& asset = rasterAssets[s.assetIndex];
       uint8_t frame = eyesPickStickerFrame(asset, s, localMs);

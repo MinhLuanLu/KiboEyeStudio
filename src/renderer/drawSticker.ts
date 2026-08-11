@@ -125,7 +125,10 @@ export function drawSticker(ctx: CanvasRenderingContext2D, instance: StickerInst
     const drawer = BUILTIN_STICKER_DRAWERS[asset.builtinId]
     ctx.save()
     ctx.scale(hw, hh) // drawer operates in [-1,1] unit space
-    drawer(ctx, tSec, instance.tint ?? '#ffffff')
+    drawer(ctx, tSec, instance.tint ?? '#ffffff', {
+      strokeScale: (instance.strokeWidth ?? 5) / 100,
+      loop: anim.loopMode !== 'once' // "No Loop" (once) plays a procedural cycle just once
+    })
     ctx.restore()
   } else if (asset.kind === 'svg') {
     // The recolor (currentColor -> tint, and hardcoded fills/strokes -> tint when

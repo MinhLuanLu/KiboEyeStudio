@@ -17,7 +17,7 @@ const SVG_COLOR_MODES: { value: StickerSvgColorMode; label: string }[] = [
 ]
 
 const LOOP_MODES: { value: StickerLoopMode; label: string }[] = [
-  { value: 'once', label: 'Once' },
+  { value: 'once', label: 'No Loop' }, // play once then stop (raster frames + procedural cycles)
   { value: 'loop', label: 'Loop' },
   { value: 'pingpong', label: 'Ping-Pong' }
 ]
@@ -98,6 +98,17 @@ export function StickerControls({ sticker }: { sticker: StickerInstance }) {
         <Slider label="Scale Y" value={sticker.scaleY} min={10} max={300} suffix="%" onCommitStart={checkpoint} onChange={(v) => set('scaleY', v)} />
         <Slider label="Rotation" value={sticker.rotation} min={-180} max={180} suffix="°" onCommitStart={checkpoint} onChange={(v) => set('rotation', v)} />
         <Slider label="Opacity" value={sticker.opacity} min={0} max={100} suffix="%" onCommitStart={checkpoint} onChange={(v) => set('opacity', v)} />
+        {asset?.builtinId === 'expandingCircles' && (
+          <Slider
+            label="Stroke Thickness"
+            value={sticker.strokeWidth ?? 5}
+            min={1}
+            max={30}
+            suffix="%"
+            onCommitStart={checkpoint}
+            onChange={(v) => set('strokeWidth', v)}
+          />
+        )}
         <div className="flex items-center justify-between">
           <span className="studio-label">{asset?.kind === 'svg' ? 'Sticker Color' : 'Tint'}</span>
           <div className="flex items-center gap-2">

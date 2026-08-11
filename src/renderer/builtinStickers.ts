@@ -14,7 +14,15 @@ import { PUPIL_SHAPE_POLYGONS } from './pupilShapes'
  * `t` is seconds elapsed (wraps as each drawer likes — most use `t % period`), so a drawer is
  * a pure function of time: no internal state, nothing to reset when a sticker starts/stops.
  */
-export type StickerDrawer = (ctx: CanvasRenderingContext2D, t: number, tint: string) => void
+/** Optional per-instance drawer options. `strokeScale` is the line width in the [-1,1] unit box
+ * (default per drawer); `loop` is false when the sticker's Loop Mode is "No Loop", so an animated
+ * drawer plays its cycle once and then holds/fades to nothing instead of repeating. Drawers that
+ * don't use strokes or don't animate simply ignore these. */
+export interface StickerDrawOpts {
+  strokeScale?: number
+  loop?: boolean
+}
+export type StickerDrawer = (ctx: CanvasRenderingContext2D, t: number, tint: string, opts?: StickerDrawOpts) => void
 
 // Deterministic pseudo-random in [0,1) from an integer seed — NOT Math.random(): particle
 // layouts must be exactly reproducible so the C++ port (sinf/floorf, same formula) lays out
@@ -280,12 +288,16 @@ const burstLines: StickerDrawer = (ctx, t, tint) => {
 }
 
 // ---- expandingCircles: concentric rings expanding outward and fading, looping --------------
-const expandingCircles: StickerDrawer = (ctx, t, tint) => {
+const expandingCircles: StickerDrawer = (ctx, t, tint, opts) => {
   const N = 3
   ctx.strokeStyle = tint
-  ctx.lineWidth = 0.05
+  ctx.lineWidth = opts?.strokeScale ?? 0.05 // customizable stroke thickness (0.05 = original)
+  const loop = opts?.loop ?? true
   for (let i = 0; i < N; i++) {
-    const local = (t * 0.6 + i / N) % 1
+    // "No Loop" (loop=false): don't wrap, so once each ring passes local>=1 its alpha (1-local)
+    // clamps to 0 and it stops drawing — the effect plays once, then holds nothing.
+    const raw = t * 0.6 + i / N
+    const local = loop ? raw % 1 : raw
     setAlpha(ctx, 1 - local)
     ctx.beginPath()
     ctx.arc(0, 0, local * 1, 0, Math.PI * 2)
