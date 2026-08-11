@@ -3781,6 +3781,12 @@ function exportQuickReference(project: Project): string {
     lines.push('//   Combo(<yourCombo>, true);    // Loop forever')
     lines.push('//   Combo(<yourCombo>, false);   // Play once (explicit)')
     for (const combo of project.animationCombos) lines.push(`//   Combo(${toIdentifier(combo.name)});`)
+    // Play several combos back-to-back (each starts only after the previous ComboFinished()) — pass
+    // combo POINTERS (&Name); only the final combo loops, and only when loopLast == true.
+    const comboRefs = project.animationCombos.slice(0, 3).map((c) => `&${toIdentifier(c.name)}`).join(', ')
+    lines.push('//')
+    lines.push(`//   PlayMultipleCombos({ ${comboRefs} });        // play each once, then hold the last frame`)
+    lines.push(`//   PlayMultipleCombos({ ${comboRefs} }, true);  // ...and loop the last combo forever`)
   } else {
     lines.push('// Animation Combinations: (this project has none yet)')
   }
