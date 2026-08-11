@@ -370,6 +370,13 @@ function exportAnimationCombos(project: Project): string {
   lines.push(' *   Combo(<yourCombo>);   // loop defaults to false -- see the Quick Reference at the')
   lines.push(' *                          // top of this file for the optional loop argument')
   lines.push(' *')
+  lines.push(' * Play several combos back-to-back (each starts only after the previous finishes):')
+  lines.push(' *')
+  lines.push(' *   PlayMultipleCombos({ &WakeUp, &IdleLookUp, &Idle });        // play each once, then hold')
+  lines.push(' *   PlayMultipleCombos({ &WakeUp, &IdleLookUp, &Idle }, true);  // ...and loop the last forever')
+  lines.push(' *   // Pass combo POINTERS (&Name). Each intermediate combo plays once; only the final')
+  lines.push(' *   // one loops, and only when loopLast == true. Any Combo()/PlayAnimation() cancels the queue.')
+  lines.push(' *')
   lines.push(' * Stop:')
   lines.push(' *')
   lines.push(' *   StopCombo();')
@@ -391,6 +398,7 @@ function exportAnimationCombos(project: Project): string {
   lines.push(' *   ComboPlaying();')
   lines.push(' *   ComboPaused();')
   lines.push(' *   ComboFinished();')
+  lines.push(' *   ComboSequencePlaying();   // true while a PlayMultipleCombos() queue is running')
   lines.push(' *')
   lines.push(' */')
 
@@ -2687,6 +2695,16 @@ struct EyesPlayerState {
   uint8_t sequenceCount = 0;
   uint8_t sequenceIndex = 0;
   bool sequenceLoop = false;
+  // Combo-sequence queue (PlayMultipleCombos) — the combo counterpart of the animation sequence
+  // above. Plays several combos back-to-back, each starting only after the previous ComboFinished().
+  // Stores POINTERS (combos are referenced, never copied, exactly like Combo() takes const&), so the
+  // buffer stays tiny. Only the final combo may loop (comboSequenceLoopLast); every earlier combo
+  // plays once. Advanced from UpdateEyes(); cancelled by Combo()/PlayAnimation()/PlayAnimationSequence().
+  const AnimationCombo* comboSequence[EYES_MAX_ANIMATION_SEQUENCE] = {};
+  uint8_t comboSequenceCount = 0;
+  uint8_t comboSequenceIndex = 0;
+  bool comboSequencePlaying = false;
+  bool comboSequenceLoopLast = false;
   // The sticker list belonging to whatever pose is currently live — a direct animation, the
   // active combo clip's animation, or the current expression — plus the LOCAL clock to evaluate
   // it against. Refreshed every frame by UpdateEyes() and consumed by eyesDrawEyePair(). Animation
@@ -2753,15 +2771,13 @@ inline void StopCombo() {
   eyesPlayer.comboStart = 0;
   eyesPlayer.comboPausedElapsed = 0;
   eyesPlayer.comboLoop = false;
+  eyesPlayer.comboSequencePlaying = false;   // fully stop combo playback, including a running queue
 }
 
-// Plays an exported AnimationCombo. \`loop\` overrides the combo's own baked
-// AnimationCombo::loop for this playback — pass true to repeat it forever, or omit/pass false to
-// play it once and stop (ComboFinished() then reports true). Examples:
-//   Combo(<yourCombo>);          // Play once (default)
-//   Combo(<yourCombo>, true);    // Loop forever
-//   Combo(<yourCombo>, false);   // Play once (explicit)
-inline void Combo(const AnimationCombo& combo, bool loop = false) {
+// Internal: starts a combo playing WITHOUT touching the sequence flags — the combo counterpart of
+// eyesStartAnimation(). Both the public Combo() and the combo-sequence advance (PlayMultipleCombos)
+// go through here, so the "which combo/loop is live" bookkeeping stays in one place.
+inline void eyesStartCombo(const AnimationCombo& combo, bool loop) {
   eyesPlayer.combo = &combo;
   eyesPlayer.comboPlaying = true;
   eyesPlayer.comboPaused = false;
@@ -2771,7 +2787,18 @@ inline void Combo(const AnimationCombo& combo, bool loop = false) {
   eyesPlayer.comboLoop = loop;
   eyesPlayer.playingAnimation = false;
   eyesPlayer.animationFinished = false;   // starting a combo clears any stale animation-finished flag
-  eyesPlayer.sequencePlaying = false;
+}
+
+// Plays an exported AnimationCombo. \`loop\` overrides the combo's own baked
+// AnimationCombo::loop for this playback — pass true to repeat it forever, or omit/pass false to
+// play it once and stop (ComboFinished() then reports true). Examples:
+//   Combo(<yourCombo>);          // Play once (default)
+//   Combo(<yourCombo>, true);    // Loop forever
+//   Combo(<yourCombo>, false);   // Play once (explicit)
+inline void Combo(const AnimationCombo& combo, bool loop = false) {
+  eyesPlayer.sequencePlaying = false;        // cancel an animation sequence
+  eyesPlayer.comboSequencePlaying = false;   // cancel a combo sequence — this single combo overrides it
+  eyesStartCombo(combo, loop);
 }
 
 inline void PauseCombo() {
@@ -2818,6 +2845,15 @@ inline bool ComboFinished() {
 //   if (AnimationFinished()) PlayAnimation(Anim_LookLeftToCenter);
 inline bool AnimationFinished() {
   return eyesPlayer.animationFinished;
+}
+
+// True while a PlayMultipleCombos() queue is still running — i.e. the sequence has not yet stopped.
+// Stays true through every combo including a looping final one (loopLast); goes false once a
+// non-looping final combo finishes, or when any other playback (Combo/PlayAnimation/
+// PlayAnimationSequence/SetExpression) cancels the queue. The combo-sequence counterpart of
+// SequencePlaying-style status.
+inline bool ComboSequencePlaying() {
+  return eyesPlayer.comboSequencePlaying;
 }
 
 // Crossfades outLeft/outRight toward "clip"'s own first frame, proportional to "t" (0..1) —
@@ -2922,6 +2958,28 @@ inline bool eyesAdvanceAnimationSequence() {
   return true;
 }
 
+// Combo counterpart of eyesAdvanceAnimationSequence(): called from UpdateEyes() when the current
+// combo of a PlayMultipleCombos() queue reports ComboFinished(). Starts the next combo; the final
+// combo loops only if loopLast was requested (so we never reach here for it — a looping combo never
+// finishes), otherwise the queue simply stops and holds the last frame.
+inline bool eyesAdvanceComboSequence() {
+  if (!eyesPlayer.comboSequencePlaying || eyesPlayer.comboSequenceCount == 0) return false;
+  uint8_t nextIndex = (uint8_t)(eyesPlayer.comboSequenceIndex + 1);
+  if (nextIndex >= eyesPlayer.comboSequenceCount) {
+    // Was the last combo (and it wasn't looping, or we wouldn't be here) — queue done.
+    eyesPlayer.comboSequencePlaying = false;
+    eyesPlayer.comboSequenceCount = 0;
+    eyesPlayer.comboSequenceIndex = 0;
+    eyesPlayer.comboSequenceLoopLast = false;
+    return false;
+  }
+  eyesPlayer.comboSequenceIndex = nextIndex;
+  bool isLast = (nextIndex == (uint8_t)(eyesPlayer.comboSequenceCount - 1));
+  // Each intermediate combo plays once; only the final combo loops, and only if loopLast was set.
+  eyesStartCombo(*eyesPlayer.comboSequence[nextIndex], isLast && eyesPlayer.comboSequenceLoopLast);
+  return true;
+}
+
 // Shows a static expression, crossfading smoothly from whatever's currently on screen —
 // call it with any Expr_* constant, e.g. SetExpression(Expr_Happy). Also switches this
 // expression's own color palette and stickers, matching the studio (applying an expression
@@ -2970,6 +3028,7 @@ inline void PlayAnimationSequence(std::initializer_list<EyeAnimation> animations
     eyesPlayer.sequenceLoop = false;
     return;
   }
+  eyesPlayer.comboSequencePlaying = false;   // starting an animation sequence cancels a combo queue
   eyesPlayer.sequenceCount = count;
   eyesPlayer.sequenceIndex = 0;
   eyesPlayer.sequenceLoop = loop;
@@ -2980,6 +3039,39 @@ inline void PlayAnimationSequence(std::initializer_list<EyeAnimation> animations
 // Friendly alias for the sequence helper, matching the example usage in the exported header.
 inline void AnimationCombination(std::initializer_list<EyeAnimation> animations, bool loop = false) {
   PlayAnimationSequence(animations, loop);
+}
+
+// Plays several COMBOS one after another, each starting only after the previous one ComboFinished()
+// — the combo counterpart of PlayAnimationSequence(). Pass an ordered list of combo POINTERS; each
+// intermediate combo plays once, and only the final combo loops forever if loopLast == true
+// (otherwise it holds its last frame). Only the first combo starts here — the rest are advanced from
+// UpdateEyes() so they never overwrite each other before drawing. Heap-free (fixed player buffer).
+//   PlayMultipleCombos({ &WakeUp, &IdleLookUp, &Idle });        // play each once, then hold
+//   PlayMultipleCombos({ &WakeUp, &IdleLookUp, &Idle }, true);  // ...and loop Idle forever at the end
+inline void PlayMultipleCombos(std::initializer_list<const AnimationCombo*> combos, bool loopLast = false) {
+  uint8_t count = 0;
+  for (const AnimationCombo* combo : combos) {
+    if (count >= EYES_MAX_ANIMATION_SEQUENCE) break;
+    if (combo == nullptr) continue;   // skip null entries defensively
+    eyesPlayer.comboSequence[count++] = combo;
+  }
+  // Starting a combo queue overrides every other playback mode.
+  eyesPlayer.sequencePlaying = false;
+  eyesPlayer.playingAnimation = false;
+  if (count == 0) {
+    eyesPlayer.comboSequencePlaying = false;
+    eyesPlayer.comboSequenceCount = 0;
+    eyesPlayer.comboSequenceIndex = 0;
+    eyesPlayer.comboSequenceLoopLast = false;
+    return;
+  }
+  eyesPlayer.comboSequenceCount = count;
+  eyesPlayer.comboSequenceIndex = 0;
+  eyesPlayer.comboSequenceLoopLast = loopLast;
+  eyesPlayer.comboSequencePlaying = true;
+  // Play the FIRST combo now with loop=false — unless it is also the only/last combo and loopLast
+  // was requested, in which case it must loop (there's no later combo for the queue to advance to).
+  eyesStartCombo(*eyesPlayer.comboSequence[0], (count == 1) && loopLast);
 }
 
 // Advances whatever's currently playing and returns the pose to draw this frame. Call this
@@ -3024,6 +3116,13 @@ inline LiveEye UpdateEyes() {
     } else {
       eyesPlayer.comboFinished = false;
       eyesPlayer.comboPlaying = stillPlaying;
+    }
+    // Combo-sequence advance (PlayMultipleCombos): when the current combo just finished, start the
+    // next one in the same frame (eyesStartCombo re-arms comboPlaying), so the queue is seamless and
+    // never lets the single-combo/animation/expression branches take over mid-sequence. A looping
+    // final combo never sets comboFinished, so it simply keeps looping and the queue rests on it.
+    if (eyesPlayer.comboFinished && eyesPlayer.comboSequencePlaying) {
+      eyesAdvanceComboSequence();
     }
   } else if (eyesPlayer.playingAnimation) {
     unsigned long sequenceElapsed = millis() - eyesPlayer.animStart;
@@ -3963,9 +4062,12 @@ export function generateCppHeader(project: Project): string {
  *   Then change what's showing from ANYWHERE (a button callback, a sensor, a serial command):
  *     SetExpression(Expr_Happy);              // switch expression   (use YOUR real Expr_ name)
  *     PlayAnimation(Anim_Blink);              // play an animation   (use YOUR real Anim_ name)
+ *     PlayAnimationSequence({ Anim_A, Anim_B });        // play animations back-to-back
  *     Combo(<yourCombo>);                     // play a combination  (use YOUR real combo name)
+ *     PlayMultipleCombos({ &WakeUp, &IdleLookUp, &Idle }, true);  // play combos back-to-back; loop the last
  *     if (AnimationFinished()) { ... }        // true once a one-shot animation has fully finished
  *     if (ComboFinished()) { ... }            // the combo equivalent
+ *     if (ComboSequencePlaying()) { ... }     // true while a PlayMultipleCombos() queue is running
  *     EyesLvgl::Hide();                       // reveal your LVGL UI underneath the eyes
  *     EyesLvgl::Show();                       // bring the eyes back on top
  *   Every valid Expr_/Anim_/combo name for THIS project is listed in the "Quick Reference"
