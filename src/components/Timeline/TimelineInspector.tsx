@@ -54,6 +54,10 @@ export function TimelineInspector() {
 
   const [exprPickerOpen, setExprPickerOpen] = useState(false)
   const [exprSearch, setExprSearch] = useState('')
+  // Inline name entry for "Save as Expression". Electron doesn't support window.prompt(), so we can't
+  // use it here — this small popup collects the name instead.
+  const [saveExprOpen, setSaveExprOpen] = useState(false)
+  const [saveExprName, setSaveExprName] = useState('')
   // Default to "Replace all" so adding an expression captures a COMPLETE snapshot of it (pose +
   // position/rotation + colours), i.e. the keyframe looks exactly like the expression. "Preserve
   // overrides" (styleOnly) stays available for applying just the shared visual style onto a
@@ -243,19 +247,59 @@ export function TimelineInspector() {
           </span>
           {trackKind === 'pose' && (
             <div className="flex items-center gap-1.5">
-            <button
-              className="studio-btn text-xs px-2 py-1"
-              title="Save this keyframe's current look as a new reusable Expression"
-              onClick={() => {
-                const name = window.prompt('Name for the new Expression:', '')?.trim()
-                if (!name) return
-                checkpoint()
-                const id = saveKeyframeAsExpression(kf.id, name)
-                if (id) setLeftTab('expressions') // reveal it in the Expressions panel
-              }}
-            >
-              Save as Expression...
-            </button>
+            <div className="relative">
+              <button
+                className="studio-btn text-xs px-2 py-1"
+                title="Save this keyframe's current look as a new reusable Expression"
+                onClick={() => {
+                  setSaveExprName('')
+                  setSaveExprOpen((v) => !v)
+                }}
+              >
+                Save as Expression...
+              </button>
+              {saveExprOpen && (
+                <div className="absolute right-0 bottom-full mb-1 w-64 studio-panel border border-studio-border rounded-md shadow-lg z-20 p-2 flex flex-col gap-2">
+                  <span className="studio-label">New Expression from this keyframe</span>
+                  <input
+                    autoFocus
+                    className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm"
+                    placeholder="Expression name..."
+                    value={saveExprName}
+                    onChange={(e) => setSaveExprName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const name = saveExprName.trim()
+                        if (!name) return
+                        checkpoint()
+                        saveKeyframeAsExpression(kf.id, name)
+                        setSaveExprOpen(false)
+                        setLeftTab('expressions')
+                      } else if (e.key === 'Escape') setSaveExprOpen(false)
+                    }}
+                  />
+                  <div className="flex justify-end gap-1">
+                    <button className="studio-btn text-xs px-2 py-1" onClick={() => setSaveExprOpen(false)}>
+                      Cancel
+                    </button>
+                    <button
+                      className="studio-btn-primary text-xs px-2 py-1"
+                      disabled={!saveExprName.trim()}
+                      onClick={() => {
+                        const name = saveExprName.trim()
+                        if (!name) return
+                        checkpoint()
+                        saveKeyframeAsExpression(kf.id, name)
+                        setSaveExprOpen(false)
+                        setLeftTab('expressions') // reveal it in the Expressions panel
+                      }}
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
             <div className="relative">
               <button className="studio-btn text-xs px-2 py-1" onClick={() => setExprPickerOpen((v) => !v)}>
                 Use Existing Expression...
