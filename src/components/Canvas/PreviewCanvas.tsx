@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useStore, getActiveAnimation, isComboTimelineActive } from '@/state/store'
 import { renderFace } from '@/renderer/faceRenderer'
 import { sampleAnimationEye, sampleAnimationColors, sampleTrack, animationDuration, wrapTime } from '@/engine/interpolate'
@@ -7,6 +7,7 @@ import { IdleEngine } from '@/engine/idleEngine'
 import {
   clampFps,
   effectiveStickers,
+  EYE_PARAM_RANGES,
   leftEyeColors,
   leftEyeParams,
   leftVisualReferenceColors,
@@ -18,39 +19,44 @@ import {
   rightVisualReferenceParams
 } from '@/types'
 import type { Animation, EyeColors, EyeParams, Expression, StickerInstance } from '@/types'
+import { CanvasToolbar } from './CanvasToolbar'
+import { SelectionOverlay, type Selection } from './SelectionOverlay'
+import { centerView, clamp, eyeHitBox, fitToView, pointInBox, screenDeltaToEyePos, snap, zoomAtPoint } from './canvasMath'
 
 const MAX_DT_MS = 100
+const EYE_RANGE = { x: EYE_PARAM_RANGES.eyePosX, y: EYE_PARAM_RANGES.eyePosY }
+
+type Drag =
+  | { kind: 'sticker'; id: string; grabOffsetX: number; grabOffsetY: number }
+  | { kind: 'eye'; side: 'left' | 'right'; startX: number; startY: number; startEyePosX: number; startEyePosY: number }
+  | { kind: 'pan'; startClientX: number; startClientY: number; startPanX: number; startPanY: number; moved: boolean }
 
 export function PreviewCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const viewportRef = useRef<HTMLDivElement>(null)
   const idleEngineRef = useRef(new IdleEngine())
   const rafRef = useRef<number>()
   const lastTimeRef = useRef<number | null>(null)
   const fpsAccumRef = useRef({ frames: 0, elapsed: 0 })
-  // Time banked since the last actual tick+draw — lets the loop skip frames to hit the
-  // configured Display FPS while still handing the *full* elapsed real time to the tick
-  // logic below (so animation speed stays real-time-accurate regardless of draw rate,
-  // exactly like the exported firmware: eyesPlayAnimation() reads absolute millis(), so
-  // throttling how often it's called doesn't change how fast an animation plays).
   const pendingDtRef = useRef(0)
-  // Stickers run on their own continuous real-time clock (drift/spin/pulse/GIF playback) in
-  // Design and Idle mode, where there's no scrubbable timeline to speak of — ambient
-  // decoration with its own independent speed/fps/loop controls. In Animate mode, though, a
-  // sticker's clip (StickerAnimSettings.startTimeMs/endTimeMs) is now a first-class Timeline
-  // item with its own visible start/end, so it must scrub, pause, and reverse together with
-  // the animation's own playback time — see the `isAnimateScrub` branch below, which feeds the
-  // animation's own `t` into drawSticker.ts's visibility/motion math instead of this clock.
   const stickerElapsedRef = useRef(0)
-  // Latest effective sticker list, refreshed every drawn frame — read (not recomputed) by the
-  // pointer handlers below so canvas-drag hit-testing always matches what's actually on
-  // screen without duplicating the project/expression/animation resolution logic above.
+  // Refreshed every drawn frame so the pointer/keyboard handlers hit-test against exactly what's on
+  // screen without re-deriving mode/expression/animation resolution.
   const lastStickersRef = useRef<StickerInstance[]>([])
-  const dragRef = useRef<{ id: string; grabOffsetX: number; grabOffsetY: number } | null>(null)
+  const lastEyeParamsRef = useRef<{ left: EyeParams; right: EyeParams } | null>(null)
+  const lastCanEditEyesRef = useRef(false)
+  const dragRef = useRef<Drag | null>(null)
+  const spaceDownRef = useRef(false)
 
   const display = useStore((s) => s.project.display)
 
-  // Resize the backing canvas + reset the DPR transform whenever the configured display
-  // size changes. Kept separate from the rAF loop below so resizing doesn't restart it.
+  // View-only editor state (never written to the project → cannot affect export/coords).
+  const [view, setView] = useState({ zoom: 1, pan: { x: 0, y: 0 } })
+  const [selected, setSelected] = useState<Selection>(null)
+  const [snapOn, setSnapOn] = useState(false)
+  const [gridSize, setGridSize] = useState(5)
+
+  // Resize the backing canvas + reset the DPR transform whenever the configured display size changes.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -59,8 +65,47 @@ export function PreviewCanvas() {
     const dpr = window.devicePixelRatio || 1
     canvas.width = display.width * dpr
     canvas.height = display.height * dpr
-    ctx.scale(dpr, dpr)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   }, [display.width, display.height])
+
+  // Centre the display in the viewport on first mount and whenever the display size changes.
+  useLayoutEffect(() => {
+    const vp = viewportRef.current
+    if (!vp) return
+    setView(centerView(display.width, display.height, vp.clientWidth, vp.clientHeight, 1))
+  }, [display.width, display.height])
+
+  // Native (non-passive) wheel listener so Ctrl+wheel can preventDefault the browser page-zoom.
+  useEffect(() => {
+    const vp = viewportRef.current
+    if (!vp) return
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return
+      e.preventDefault()
+      const rect = vp.getBoundingClientRect()
+      const cursor = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1
+      setView((v) => zoomAtPoint(v.zoom, v.pan, cursor, factor))
+    }
+    vp.addEventListener('wheel', onWheel, { passive: false })
+    return () => vp.removeEventListener('wheel', onWheel)
+  }, [])
+
+  // Track Space (held = pan) so a drag on an element region can still pan when Space is down.
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.code === 'Space') spaceDownRef.current = true
+    }
+    const up = (e: KeyboardEvent) => {
+      if (e.code === 'Space') spaceDownRef.current = false
+    }
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+    }
+  }, [])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -74,9 +119,6 @@ export function PreviewCanvas() {
       lastTimeRef.current = now
 
       const state = useStore.getState()
-
-      // Throttle to the configured Display FPS. Re-read every rAF (not cached) so a change
-      // to the slider takes effect on the very next frame.
       const targetFps = clampFps(state.project.display.fps)
       const frameInterval = 1000 / targetFps
       pendingDtRef.current += rawDt
@@ -95,16 +137,11 @@ export function PreviewCanvas() {
       let timeMs = state.playbackTimeMs
       let activeExpression: Expression | null = null
       let activeAnimation: Animation | null = null
-      // True only while actually viewing/playing the Animate-mode timeline — gates whether
-      // stickers scrub with `timeMs` (see stickerElapsedRef's comment) below.
       let isAnimateScrub = false
+      // Eyes are only directly editable where they come from the design pose (not animation sampling).
+      let canEditEyes = false
 
       if (state.rightTab === 'visual-reference') {
-        // While the right panel's Visual Reference tab is open, this canvas shows the VR's
-        // own pose/theme instead of the live design/animate/idle state — same full-size,
-        // bezel-and-all render everything else gets. Read-only: this never writes into
-        // eyeBase/colors, so switching away always resumes exactly whatever Design/Animate/
-        // Idle was showing before, undisturbed.
         idleEngineRef.current.reset()
         const vr = state.project.visualReference
         params = leftVisualReferenceParams(vr)
@@ -113,20 +150,6 @@ export function PreviewCanvas() {
         rightTheme = rightVisualReferenceColors(vr)
         timeMs = 0
       } else if (isComboTimelineActive(state)) {
-        // While a Combination is selected on the Combinations tab, this canvas (and the
-        // bottom Timeline, via the same shared predicate) shows the combo's own playback
-        // instead of Design/Animate/Idle — same reasoning as the Visual Reference branch
-        // above: leftTab+selectedComboId pick what's being authored right now, so the shared
-        // preview should reflect that regardless of `mode` (mode is left untouched, so
-        // switching back to Animations/Expressions resumes exactly where it was).
-        //
-        // isComboTimelineActive already excludes an actively-*playing* Animate-mode
-        // animation, even if leftTab is still (sticky-)showing 'combinations' — e.g. the user
-        // built a combo, then hit the Toolbar's own Play button for a regular animation
-        // without first clicking back to the Animations tab. Without this, leftTab's
-        // stickiness silently swallowed the Toolbar Play button's effect (reported as "no
-        // animation play"). Non-playing states (paused/stopped, or plain Design) still yield
-        // to the combo preview, since there's nothing actively animating to protect there.
         idleEngineRef.current.reset()
         const combo = state.project.animationCombos.find((c) => c.id === state.selectedComboId) ?? null
         if (combo) {
@@ -154,18 +177,13 @@ export function PreviewCanvas() {
         }
       } else if (state.mode === 'design') {
         idleEngineRef.current.reset()
-        // Design mode is the only place the live pose can actually diverge per eye (Eye
-        // Target: Left/Right) — Animate/Idle keep playing back one shared pose mirrored, as
-        // before, since keyframes/idle drift aren't split per eye.
         params = leftEyeParams(state.project)
         rightParams = rightEyeParams(state.project)
         theme = leftEyeColors(state.project)
         rightTheme = rightEyeColors(state.project)
         timeMs = 0
+        canEditEyes = true
         activeExpression = state.project.expressions.find((e) => e.id === state.selectedExpressionId) ?? null
-        // Eyelids panel "Preview Blink": non-destructively lerp both lids toward fully closed by
-        // the transient eyelidPreviewClose amount (0 = authored pose). Never written back to the
-        // project — purely a live design-time preview of how the current lids close.
         if (state.eyelidPreviewClose > 0) {
           const c = state.eyelidPreviewClose
           const close = (p: EyeParams): EyeParams => ({
@@ -193,16 +211,8 @@ export function PreviewCanvas() {
               state.tickPlayback(t, true)
             }
           }
-          // Per-eye sampling merges the pose track with the pupils/eyelids/leftEye-or-
-          // rightEye tracks (see sampleAnimationEye) — the one wiring change that makes the
-          // new independently-timed tracks actually take effect during playback/scrubbing.
           params = sampleAnimationEye(anim, t, 'left')
           rightParams = sampleAnimationEye(anim, t, 'right')
-          // Per-keyframe color: interpolate the pose track's own keyframe palettes at the
-          // playhead (falls back to the shared base for any keyframe with no colors of its
-          // own, and to the plain base entirely when no keyframe carries color — so pre-
-          // existing animations look identical). Both eyes share the sampled palette; animation
-          // color has never diverged per eye (and the firmware export still bakes base colors).
           theme = sampleAnimationColors(anim, t, state.project.colors)
           rightTheme = theme
           frameIndex = sampleTrack(anim.keyframes, anim.loop, anim.durationMs, t)?.segmentIndex ?? 0
@@ -220,17 +230,12 @@ export function PreviewCanvas() {
         timeMs = 0
       }
 
-      // Animate mode: stickers scrub/pause/reverse with the animation's own playback time,
-      // so a sticker clip's start/end (and drift/spin/pulse/GIF-frame motion) reflects
-      // exactly what the Timeline shows at the current playhead. Design/Idle mode: no
-      // scrubbable timeline exists, so stickers keep running on their own free-running clock.
       const stickerElapsedMs = isAnimateScrub ? timeMs : (stickerElapsedRef.current += dt)
       const stickers = effectiveStickers(state.project, activeExpression, activeAnimation)
       lastStickersRef.current = stickers
-      // Auto-mirrors the right eye's eyelid taper (left/right roundness, Center Position X)
-      // whenever it isn't intentionally diverged from the left eye's — see
-      // renderRightEyeParams()'s own doc comment. Applied once, right here, so every mode branch
-      // above (Design/Animate/Idle/Visual Reference/Combo) gets correct mirroring for free.
+      lastEyeParamsRef.current = { left: params, right: rightParams }
+      lastCanEditEyesRef.current = canEditEyes
+
       renderFace(ctx!, params, {
         ...state.project.display,
         theme,
@@ -266,25 +271,19 @@ export function PreviewCanvas() {
 
   const borderRadius = display.shape === 'circle' ? '50%' : display.shape === 'rounded' ? `${display.cornerRadius}px` : '0px'
 
-  // Converts a pointer event's client coordinates into display-space coordinates relative to
-  // the display's own center — the same coordinate space StickerInstance.x/y are defined in
-  // (see faceRenderer.ts's drawLayer(), which translates to (cx, cy) before drawing stickers).
-  function toDisplayCoords(e: React.PointerEvent<HTMLCanvasElement>): { x: number; y: number } {
-    const rect = e.currentTarget.getBoundingClientRect()
+  // Client → display-centre coords (origin at display centre), the space StickerInstance.x/y and the
+  // eye centres live in. Reads the canvas's live boundingRect, which already includes the stage's
+  // zoom+pan transform, so the result is REAL display px at any zoom/pan (never zoomed-canvas px).
+  function toDisplayCoords(clientX: number, clientY: number): { x: number; y: number } {
+    const rect = canvasRef.current!.getBoundingClientRect()
     const scaleX = display.width / rect.width
     const scaleY = display.height / rect.height
     return {
-      x: (e.clientX - rect.left) * scaleX - display.width / 2,
-      y: (e.clientY - rect.top) * scaleY - display.height / 2
+      x: (clientX - rect.left) * scaleX - display.width / 2,
+      y: (clientY - rect.top) * scaleY - display.height / 2
     }
   }
 
-  // Hit-tests against each sticker's *static* box (instance.x/y/width/height*scale, ignoring
-  // live drift/spin/pulse and rotation) — grabbing wherever a sticker is currently animated to
-  // would make the drag target visually "run away" as you try to grab it; editing the base
-  // position and watching the live preview separately is the more predictable interaction.
-  // Front-layer stickers are tested first so a front sticker is grabbed before whatever sits
-  // behind it at the same spot, matching the Sticker Manager's "front-layer-first" list order.
   function hitTestSticker(x: number, y: number): StickerInstance | null {
     const candidates = [...lastStickersRef.current].sort((a, b) => (a.layer === b.layer ? 0 : a.layer === 'front' ? -1 : 1))
     for (const s of candidates) {
@@ -296,39 +295,187 @@ export function PreviewCanvas() {
     return null
   }
 
-  function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
-    const { x, y } = toDisplayCoords(e)
-    const hit = hitTestSticker(x, y)
-    if (!hit) return
-    e.currentTarget.setPointerCapture(e.pointerId)
-    useStore.getState().checkpoint()
-    useStore.getState().selectSticker(hit.id)
-    dragRef.current = { id: hit.id, grabOffsetX: x - hit.x, grabOffsetY: y - hit.y }
+  function hitTestEye(x: number, y: number): 'left' | 'right' | null {
+    if (!lastCanEditEyesRef.current || !lastEyeParamsRef.current) return null
+    const { left, right } = lastEyeParamsRef.current
+    if (pointInBox(x, y, eyeHitBox(left, 'left'))) return 'left'
+    if (pointInBox(x, y, eyeHitBox(right, 'right'))) return 'right'
+    return null
   }
 
-  function handlePointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
+  function beginPan(e: React.PointerEvent, clientX: number, clientY: number) {
+    e.currentTarget.setPointerCapture(e.pointerId)
+    dragRef.current = { kind: 'pan', startClientX: clientX, startClientY: clientY, startPanX: view.pan.x, startPanY: view.pan.y, moved: false }
+  }
+
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    viewportRef.current?.focus()
+    // Middle-mouse or Space = always pan.
+    if (e.button === 1 || spaceDownRef.current) {
+      beginPan(e, e.clientX, e.clientY)
+      return
+    }
+    if (e.button !== 0) return
+    const { x, y } = toDisplayCoords(e.clientX, e.clientY)
+    const sticker = hitTestSticker(x, y)
+    if (sticker) {
+      e.currentTarget.setPointerCapture(e.pointerId)
+      const store = useStore.getState()
+      store.checkpoint()
+      store.selectSticker(sticker.id)
+      store.setRightTab('stickers')
+      setSelected({ kind: 'sticker', id: sticker.id })
+      dragRef.current = { kind: 'sticker', id: sticker.id, grabOffsetX: x - sticker.x, grabOffsetY: y - sticker.y }
+      return
+    }
+    const eye = hitTestEye(x, y)
+    if (eye && lastEyeParamsRef.current) {
+      e.currentTarget.setPointerCapture(e.pointerId)
+      const store = useStore.getState()
+      store.checkpoint()
+      store.setEyeTarget(eye)
+      store.selectSticker(null)
+      setSelected({ kind: 'eye', side: eye })
+      const p = lastEyeParamsRef.current[eye]
+      dragRef.current = { kind: 'eye', side: eye, startX: x, startY: y, startEyePosX: p.eyePosX, startEyePosY: p.eyePosY }
+      return
+    }
+    // Empty space → pan (and, if it turns out to be a click, deselect on pointer-up).
+    beginPan(e, e.clientX, e.clientY)
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     const drag = dragRef.current
     if (!drag) return
-    const { x, y } = toDisplayCoords(e)
-    useStore.getState().updateSticker(drag.id, { x: x - drag.grabOffsetX, y: y - drag.grabOffsetY })
+    if (drag.kind === 'pan') {
+      const dx = e.clientX - drag.startClientX
+      const dy = e.clientY - drag.startClientY
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) drag.moved = true
+      setView((v) => ({ ...v, pan: { x: drag.startPanX + dx, y: drag.startPanY + dy } }))
+      return
+    }
+    const { x, y } = toDisplayCoords(e.clientX, e.clientY)
+    const store = useStore.getState()
+    if (drag.kind === 'sticker') {
+      const nx = x - drag.grabOffsetX
+      const ny = y - drag.grabOffsetY
+      store.updateSticker(drag.id, { x: snapOn ? snap(nx, gridSize) : nx, y: snapOn ? snap(ny, gridSize) : ny })
+    } else {
+      let pos = screenDeltaToEyePos(drag.side, { eyePosX: drag.startEyePosX, eyePosY: drag.startEyePosY }, x - drag.startX, y - drag.startY, EYE_RANGE)
+      if (snapOn) {
+        pos = {
+          eyePosX: clamp(snap(pos.eyePosX, gridSize), EYE_RANGE.x[0], EYE_RANGE.x[1]),
+          eyePosY: clamp(snap(pos.eyePosY, gridSize), EYE_RANGE.y[0], EYE_RANGE.y[1])
+        }
+      }
+      store.setEyeParam('eyePosX', pos.eyePosX)
+      store.setEyeParam('eyePosY', pos.eyePosY)
+    }
   }
 
-  function handlePointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (dragRef.current) e.currentTarget.releasePointerCapture(e.pointerId)
+  function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current
+    if (drag) e.currentTarget.releasePointerCapture(e.pointerId)
+    // A click on empty space (pan that never moved) clears the selection.
+    if (drag?.kind === 'pan' && !drag.moved) {
+      setSelected(null)
+      useStore.getState().selectSticker(null)
+    }
     dragRef.current = null
   }
 
+  // Arrow-key nudge of the selected element (Shift = 10 px). Directions are SCREEN-space; the eye
+  // helper mirrors X for the right eye so the element always moves the way the arrow points.
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (!selected) return
+    const map: Record<string, [number, number]> = {
+      ArrowLeft: [-1, 0],
+      ArrowRight: [1, 0],
+      ArrowUp: [0, -1],
+      ArrowDown: [0, 1]
+    }
+    const dir = map[e.key]
+    if (!dir) return
+    e.preventDefault()
+    const step = e.shiftKey ? 10 : 1
+    const dx = dir[0] * step
+    const dy = dir[1] * step
+    const store = useStore.getState()
+    if (!e.repeat) store.checkpoint()
+    if (selected.kind === 'sticker') {
+      const s = lastStickersRef.current.find((k) => k.id === selected.id)
+      if (!s) return
+      const nx = s.x + dx
+      const ny = s.y + dy
+      store.updateSticker(selected.id, { x: snapOn ? snap(nx, gridSize) : nx, y: snapOn ? snap(ny, gridSize) : ny })
+    } else if (lastEyeParamsRef.current) {
+      const p = lastEyeParamsRef.current[selected.side]
+      let pos = screenDeltaToEyePos(selected.side, { eyePosX: p.eyePosX, eyePosY: p.eyePosY }, dx, dy, EYE_RANGE)
+      if (snapOn) {
+        pos = {
+          eyePosX: clamp(snap(pos.eyePosX, gridSize), EYE_RANGE.x[0], EYE_RANGE.x[1]),
+          eyePosY: clamp(snap(pos.eyePosY, gridSize), EYE_RANGE.y[0], EYE_RANGE.y[1])
+        }
+      }
+      store.setEyeTarget(selected.side)
+      store.setEyeParam('eyePosX', pos.eyePosX)
+      store.setEyeParam('eyePosY', pos.eyePosY)
+    }
+  }
+
+  const zoomButton = (factor: number) => {
+    const vp = viewportRef.current
+    const cursor = vp ? { x: vp.clientWidth / 2, y: vp.clientHeight / 2 } : { x: 0, y: 0 }
+    setView((v) => zoomAtPoint(v.zoom, v.pan, cursor, factor))
+  }
+  const resetView = () => {
+    const vp = viewportRef.current
+    if (vp) setView(centerView(display.width, display.height, vp.clientWidth, vp.clientHeight, 1))
+  }
+  const fitView = () => {
+    const vp = viewportRef.current
+    if (vp) setView(fitToView(display.width, display.height, vp.clientWidth, vp.clientHeight))
+  }
+
+  const panning = dragRef.current?.kind === 'pan'
+
   return (
-    <div className="flex items-center justify-center w-full h-full">
-      <canvas
-        ref={canvasRef}
-        style={{ width: display.width, height: display.height, borderRadius }}
-        className="shadow-floating"
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
+    <div
+      ref={viewportRef}
+      tabIndex={0}
+      className={`relative w-full h-full overflow-hidden bg-studio-bg outline-none ${panning ? 'cursor-grabbing' : ''}`}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onKeyDown={handleKeyDown}
+    >
+      <CanvasToolbar
+        zoom={view.zoom}
+        onZoomIn={() => zoomButton(1.2)}
+        onZoomOut={() => zoomButton(1 / 1.2)}
+        onReset={resetView}
+        onFit={fitView}
+        snapOn={snapOn}
+        gridSize={gridSize}
+        onToggleSnap={() => setSnapOn((v) => !v)}
+        onGridSize={setGridSize}
       />
+      {/* Transformed stage: the canvas + overlay scale/translate together, so the render pipeline and
+          all element coordinates stay in native display pixels (zoom is view-only). */}
+      <div
+        className="absolute top-0 left-0"
+        style={{ transform: `translate(${view.pan.x}px, ${view.pan.y}px) scale(${view.zoom})`, transformOrigin: '0 0' }}
+      >
+        <div className="relative" style={{ width: display.width, height: display.height }}>
+          <canvas
+            ref={canvasRef}
+            style={{ width: display.width, height: display.height, borderRadius, imageRendering: 'pixelated' }}
+            className="shadow-floating block"
+          />
+          <SelectionOverlay selected={selected} showGrid={snapOn} gridSize={gridSize} />
+        </div>
+      </div>
     </div>
   )
 }
