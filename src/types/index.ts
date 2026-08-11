@@ -1247,10 +1247,10 @@ export const EYE_PARAM_RANGES: Record<
   rotation: [-45, 45],
   eyePosX: [-100, 100],
   eyePosY: [-100, 100],
-  irisWidth: [10, 100],
-  irisHeight: [10, 100],
-  pupilWidth: [5, 100],
-  pupilHeight: [5, 100],
+  irisWidth: [0, 100],
+  irisHeight: [0, 100],
+  pupilWidth: [0, 100],
+  pupilHeight: [0, 100],
   // Percent of half the eye's own width/height — already scales with eye size. +-100 lets
   // the pupil's center reach all the way to the eye's edge (previously capped at 40%, which
   // kept the pupil confined to the middle of the eye and unable to reach the corners).
