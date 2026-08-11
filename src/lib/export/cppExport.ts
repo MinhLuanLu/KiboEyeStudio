@@ -2650,6 +2650,12 @@ constexpr uint8_t EYES_MAX_ANIMATION_SEQUENCE = 32;
 
 struct EyesPlayerState {
   bool playingAnimation = false;
+  // True only after a NON-looping animation has fully played its final frame and is holding it —
+  // the animation counterpart of comboFinished. Stays false while the animation is still playing,
+  // and never becomes true for a looping animation (which has no end). Reset to false whenever a
+  // new animation starts (eyesStartAnimation) or a combo starts (Combo), mirroring how
+  // eyesStartAnimation resets comboFinished. Query via AnimationFinished().
+  bool animationFinished = false;
   const EyeExpression* expression = nullptr;
   EyeAnimation animation = {};
   unsigned long animStart = 0;
@@ -2696,6 +2702,7 @@ static EyesPlayerState eyesPlayer;
 
 inline void eyesStartAnimation(const EyeAnimation& animation) {
   eyesPlayer.playingAnimation = true;
+  eyesPlayer.animationFinished = false;   // new animation → not finished yet (see AnimationFinished())
   eyesPlayer.animation = animation;
   eyesPlayer.animStart = millis();
   eyesPlayer.frameIndex = 0;
@@ -2763,6 +2770,7 @@ inline void Combo(const AnimationCombo& combo, bool loop = false) {
   eyesPlayer.comboPausedElapsed = 0;
   eyesPlayer.comboLoop = loop;
   eyesPlayer.playingAnimation = false;
+  eyesPlayer.animationFinished = false;   // starting a combo clears any stale animation-finished flag
   eyesPlayer.sequencePlaying = false;
 }
 
@@ -2797,6 +2805,19 @@ inline bool ComboPaused() {
 
 inline bool ComboFinished() {
   return eyesPlayer.comboFinished;
+}
+
+// The animation counterpart of ComboFinished(): true once the currently-playing animation has
+// fully completed — it reached its final frame and is now holding it. Stays false while the
+// animation is still playing, and stays false for a looping animation (which never completes).
+// Automatically resets to false when the next animation starts (PlayAnimation()/eyesStartAnimation)
+// — so it reports the completion of exactly the animation you last started. Requires UpdateEyes()
+// to be pumped each frame (it is, from the EyesLvgl redraw timer / your loop()). Usage matches the
+// combo API:
+//   PlayAnimation(Anim_LookLeft);
+//   if (AnimationFinished()) PlayAnimation(Anim_LookLeftToCenter);
+inline bool AnimationFinished() {
+  return eyesPlayer.animationFinished;
 }
 
 // Crossfades outLeft/outRight toward "clip"'s own first frame, proportional to "t" (0..1) —
@@ -3007,6 +3028,11 @@ inline LiveEye UpdateEyes() {
   } else if (eyesPlayer.playingAnimation) {
     unsigned long sequenceElapsed = millis() - eyesPlayer.animStart;
     bool stillPlaying = eyesPlayAnimationPair(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live, eyesPlayer.liveRight);
+    // Public completion flag (AnimationFinished()): a non-looping animation is finished once
+    // playback ends and it holds the final frame; a looping animation never finishes. Set before
+    // the sequence-advance below so a mid-sequence hand-off (which restarts via eyesStartAnimation,
+    // re-clearing this) never leaves a spurious "finished" for one frame.
+    eyesPlayer.animationFinished = !stillPlaying && !eyesPlayer.animation.loop;
     bool animationFinished = eyesPlayer.animation.loop
       ? sequenceElapsed >= eyesAnimationDurationMs(eyesPlayer.animation)
       : !stillPlaying;
@@ -3938,6 +3964,8 @@ export function generateCppHeader(project: Project): string {
  *     SetExpression(Expr_Happy);              // switch expression   (use YOUR real Expr_ name)
  *     PlayAnimation(Anim_Blink);              // play an animation   (use YOUR real Anim_ name)
  *     Combo(<yourCombo>);                     // play a combination  (use YOUR real combo name)
+ *     if (AnimationFinished()) { ... }        // true once a one-shot animation has fully finished
+ *     if (ComboFinished()) { ... }            // the combo equivalent
  *     EyesLvgl::Hide();                       // reveal your LVGL UI underneath the eyes
  *     EyesLvgl::Show();                       // bring the eyes back on top
  *   Every valid Expr_/Anim_/combo name for THIS project is listed in the "Quick Reference"
