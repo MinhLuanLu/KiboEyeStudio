@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
 import { nanoid } from 'nanoid'
-import type { AnimationFolder } from '@/types'
 import type {
   Animation,
   AnimationCombo,
@@ -132,6 +131,7 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     animationFolders: [],
     animationCombos: [],
     expressions,
+    expressionFolders: [],
     visualReference,
     customPupilShapes: [],
     customEyeShapes: [],
@@ -658,12 +658,19 @@ interface StoreState {
   deleteSelection: () => void
 
   // expressions
-  addExpression: (name: string) => void
+  addExpression: (name: string, folderId?: string | null) => void
   applyExpression: (id: string) => void
   saveExpression: (id: string) => void
   renameExpression: (id: string, name: string) => void
   deleteExpression: (id: string) => void
   reorderExpression: (id: string, newIndex: number) => void
+  // Expressions-panel folder tree (editor organization only — mirrors the Animation panel actions).
+  addExpressionFolder: (parentId: string | null, name?: string) => string
+  renameExpressionFolder: (id: string, name: string) => void
+  deleteExpressionFolder: (id: string) => void
+  setExpressionFolderExpanded: (id: string, expanded: boolean) => void
+  moveExpressionToFolder: (expressionId: string, targetFolderId: string | null, index: number) => void
+  moveExpressionFolder: (folderId: string, targetParentId: string | null, index: number) => void
 
   // auth
   setAuthSession: (email: string | null) => void
@@ -1043,33 +1050,41 @@ export interface UiDragPreview {
 
 // ---- Animation-panel folder tree helpers (editor organization only) ----------------------------
 /** Reassign 0..n `order` to the folders sharing a parent, preserving current relative order. */
-function reindexFolders(folders: AnimationFolder[], parentId: string | null): void {
+// ---- Shared folder-tree helpers (used by BOTH the Animation and Expression panel trees) ----------
+// Folders (AnimationFolder / ExpressionFolder) and items (Animation / Expression) share the same
+// shape here — `parentId`/`order` on folders, `folderId`/`order` on items — so these helpers are
+// generic and both panels reuse them, keeping the two trees behaviourally identical.
+type FolderLike = { id: string; parentId: string | null; order: number }
+type FiledItem = { id: string; folderId?: string | null; order?: number }
+
+/** Reassign 0..n `order` to the folders sharing a parent (root = null). */
+function reindexFolders<T extends FolderLike>(folders: T[], parentId: string | null): void {
   folders
     .filter((f) => f.parentId === parentId)
     .sort((a, b) => a.order - b.order)
     .forEach((f, i) => (f.order = i))
 }
-/** Reassign 0..n `order` to the animations sharing a folder (root = null). */
-function reindexAnimations(animations: Animation[], folderId: string | null): void {
-  animations
+/** Reassign 0..n `order` to the items sharing a folder (root = null). */
+function reindexItems<T extends FiledItem>(items: T[], folderId: string | null): void {
+  items
     .filter((a) => (a.folderId ?? null) === folderId)
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
     .forEach((a, i) => (a.order = i))
 }
-/** Place `movedId` at position `index` among the target folder's animations, then reassign 0..n.
- * The moved animation's `folderId` must already equal `folderId` before calling. */
-function insertAnimationAt(animations: Animation[], folderId: string | null, movedId: string, index: number): void {
-  const group = animations
+/** Place `movedId` at position `index` among the target folder's items, then reassign 0..n.
+ * The moved item's `folderId` must already equal `folderId` before calling. */
+function insertItemAt<T extends FiledItem>(items: T[], folderId: string | null, movedId: string, index: number): void {
+  const group = items
     .filter((a) => (a.folderId ?? null) === folderId && a.id !== movedId)
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-  const moved = animations.find((a) => a.id === movedId)
+  const moved = items.find((a) => a.id === movedId)
   if (!moved) return
   const at = Math.max(0, Math.min(group.length, index))
   group.splice(at, 0, moved)
   group.forEach((a, i) => (a.order = i))
 }
 /** Same, for a folder among its (new) parent's sub-folders. `parentId` must already be set. */
-function insertFolderAt(folders: AnimationFolder[], parentId: string | null, movedId: string, index: number): void {
+function insertFolderAt<T extends FolderLike>(folders: T[], parentId: string | null, movedId: string, index: number): void {
   const group = folders
     .filter((f) => f.parentId === parentId && f.id !== movedId)
     .sort((a, b) => a.order - b.order)
@@ -1081,7 +1096,7 @@ function insertFolderAt(folders: AnimationFolder[], parentId: string | null, mov
 }
 /** True if moving `folderId` under `targetParentId` would create a cycle (target IS the folder or a
  * descendant of it). Prevents an "into its own child" drop. */
-function wouldCycleFolder(folders: AnimationFolder[], folderId: string, targetParentId: string | null): boolean {
+function wouldCycleFolder<T extends FolderLike>(folders: T[], folderId: string, targetParentId: string | null): boolean {
   const byId = new Map(folders.map((f) => [f.id, f]))
   let cur: string | null = targetParentId
   while (cur) {
@@ -1954,7 +1969,7 @@ export const useStore = create<StoreState>()(
         // Place the duplicate directly after its source, in the same folder.
         copy.folderId = src.folderId ?? null
         s.project.animations.push(copy)
-        insertAnimationAt(s.project.animations, copy.folderId, newId, (src.order ?? 0) + 1)
+        insertItemAt(s.project.animations, copy.folderId, newId, (src.order ?? 0) + 1)
         s.dirty = true
       })
       return newId
@@ -1993,7 +2008,7 @@ export const useStore = create<StoreState>()(
         arr.splice(clamped, 0, anim)
         // Keep the flat array position and the folder-tree `order` in sync for root animations, so
         // reordering at root behaves the same whether or not folders are in use.
-        reindexAnimations(s.project.animations, null)
+        reindexItems(s.project.animations, null)
         s.dirty = true
       }),
 
@@ -2024,7 +2039,7 @@ export const useStore = create<StoreState>()(
         for (const a of s.project.animations) if ((a.folderId ?? null) === id) a.folderId = parent
         s.project.animationFolders = s.project.animationFolders.filter((f) => f.id !== id)
         reindexFolders(s.project.animationFolders, parent)
-        reindexAnimations(s.project.animations, parent)
+        reindexItems(s.project.animations, parent)
         s.dirty = true
       }),
 
@@ -2043,8 +2058,8 @@ export const useStore = create<StoreState>()(
         if (to !== null && !s.project.animationFolders.some((f) => f.id === to)) return // unknown target
         const from = anim.folderId ?? null
         anim.folderId = to
-        insertAnimationAt(s.project.animations, to, animationId, index)
-        if (from !== to) reindexAnimations(s.project.animations, from)
+        insertItemAt(s.project.animations, to, animationId, index)
+        if (from !== to) reindexItems(s.project.animations, from)
         s.dirty = true
       }),
 
@@ -2984,11 +2999,12 @@ export const useStore = create<StoreState>()(
         s.dirty = true
       }),
 
-    addExpression: (name) =>
+    addExpression: (name, folderId = null) =>
       set((s) => {
         const newId = nanoid(10)
         const newParams = { ...s.project.eyeBase }
         const newColors = { ...s.project.colors }
+        const order = s.project.expressions.filter((e) => (e.folderId ?? null) === (folderId ?? null)).length
         s.project.expressions.push({
           id: newId,
           name,
@@ -2999,7 +3015,9 @@ export const useStore = create<StoreState>()(
           leftColors: s.project.colorsLeftOverride ? { ...s.project.colorsLeftOverride } : null,
           rightColors: s.project.colorsRightOverride ? { ...s.project.colorsRightOverride } : null,
           styleOverrides: computeStyleOverrides(newParams, newColors, s.project.visualReference),
-          stickers: []
+          stickers: [],
+          folderId: folderId ?? null,
+          order
         })
         s.selectedExpressionId = newId
         s.dirty = true
@@ -3067,6 +3085,73 @@ export const useStore = create<StoreState>()(
         if (clamped === idx) return
         const [expr] = arr.splice(idx, 1)
         arr.splice(clamped, 0, expr)
+        reindexItems(s.project.expressions, null) // keep root `order` in sync with the flat position
+        s.dirty = true
+      }),
+
+    // ---- Expressions-panel folder tree (editor organization only; mirrors the Animation panel) ----
+    addExpressionFolder: (parentId, name = 'New Folder') => {
+      const id = nanoid(8)
+      set((s) => {
+        const order = s.project.expressionFolders.filter((f) => f.parentId === (parentId ?? null)).length
+        s.project.expressionFolders.push({ id, name, parentId: parentId ?? null, order, expanded: true })
+        s.dirty = true
+      })
+      return id
+    },
+
+    renameExpressionFolder: (id, name) =>
+      set((s) => {
+        const f = s.project.expressionFolders.find((x) => x.id === id)
+        if (f) f.name = name || f.name
+        s.dirty = true
+      }),
+
+    deleteExpressionFolder: (id) =>
+      set((s) => {
+        const folder = s.project.expressionFolders.find((f) => f.id === id)
+        if (!folder) return
+        const parent = folder.parentId // children move up to here (no expressions are ever lost)
+        for (const f of s.project.expressionFolders) if (f.parentId === id) f.parentId = parent
+        for (const e of s.project.expressions) if ((e.folderId ?? null) === id) e.folderId = parent
+        s.project.expressionFolders = s.project.expressionFolders.filter((f) => f.id !== id)
+        reindexFolders(s.project.expressionFolders, parent)
+        reindexItems(s.project.expressions, parent)
+        s.dirty = true
+      }),
+
+    setExpressionFolderExpanded: (id, expanded) =>
+      set((s) => {
+        const f = s.project.expressionFolders.find((x) => x.id === id)
+        if (f) f.expanded = expanded
+        s.dirty = true
+      }),
+
+    moveExpressionToFolder: (expressionId, targetFolderId, index) =>
+      set((s) => {
+        const expr = s.project.expressions.find((e) => e.id === expressionId)
+        if (!expr) return
+        const to = targetFolderId ?? null
+        if (to !== null && !s.project.expressionFolders.some((f) => f.id === to)) return // unknown target
+        const from = expr.folderId ?? null
+        expr.folderId = to // moving only changes the folder — id/data/references are untouched
+        insertItemAt(s.project.expressions, to, expressionId, index)
+        if (from !== to) reindexItems(s.project.expressions, from)
+        s.dirty = true
+      }),
+
+    moveExpressionFolder: (folderId, targetParentId, index) =>
+      set((s) => {
+        const folder = s.project.expressionFolders.find((f) => f.id === folderId)
+        if (!folder) return
+        const to = targetParentId ?? null
+        if (to === folderId) return
+        if (to !== null && !s.project.expressionFolders.some((f) => f.id === to)) return // unknown target
+        if (wouldCycleFolder(s.project.expressionFolders, folderId, to)) return // into its own descendant
+        const from = folder.parentId
+        folder.parentId = to
+        insertFolderAt(s.project.expressionFolders, to, folderId, index)
+        if (from !== to) reindexFolders(s.project.expressionFolders, from)
         s.dirty = true
       }),
 

@@ -537,6 +537,18 @@ export interface AnimationFolder {
   expanded: boolean
 }
 
+/** A folder in the Expressions panel's tree — the expression counterpart of AnimationFolder, with
+ * the exact same shape and semantics (editor-only organization; no effect on data/export). Kept as
+ * a separate type so the two panels' trees stay independent, but they share the same folder logic
+ * in the store. */
+export interface ExpressionFolder {
+  id: string
+  name: string
+  parentId: string | null
+  order: number
+  expanded: boolean
+}
+
 /** A single reference-only clip inside an animation combination. It points at an existing
  * animation by id and stores only playback settings, so the combo can be edited and exported
  * without copying frame data. */
@@ -585,6 +597,14 @@ export interface Expression {
   styleOverrides: string[]
   /** Stickers visible only while this expression is applied — see StickerInstance below. */
   stickers: StickerInstance[]
+  /** Expressions-panel organization ONLY (VS Code Explorer-style folders — see ExpressionFolder).
+   * The folder this expression is filed under, or `null`/absent = the tree root. Purely a display
+   * concern: it never changes the expression's data, styles, `id`, references (animations/combos
+   * that use it), or exported behavior. The `id` is untouched when moved between folders. */
+  folderId?: string | null
+  /** Position among sibling expressions that share the same `folderId` (0-based; folders render
+   * above expressions within a parent). Absent on old projects — normalizeProject backfills it. */
+  order?: number
 }
 
 export interface Personality {
@@ -972,6 +992,8 @@ export interface Project {
   animationFolders: AnimationFolder[]
   animationCombos: AnimationCombo[]
   expressions: Expression[]
+  /** Expressions-panel folder tree (editor organization only — see ExpressionFolder). */
+  expressionFolders: ExpressionFolder[]
   /** The project's single shared default appearance — see VisualReferenceStyle below. */
   visualReference: VisualReferenceStyle
   /** Reusable library of imported custom pupil shapes — see CustomPupilShape above. */

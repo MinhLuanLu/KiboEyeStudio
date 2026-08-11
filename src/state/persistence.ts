@@ -2,6 +2,7 @@ import { nanoid } from 'nanoid'
 import type {
   Animation,
   AnimationFolder,
+  ExpressionFolder,
   AnimationCombo,
   AnimationComboClip,
   CustomEyeShape,
@@ -856,9 +857,10 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
       clips
     }
   })
-  const expressions: Expression[] = (raw.expressions ?? []).map((e) => {
+  const expressions: Expression[] = (raw.expressions ?? []).map((e, exprIndex) => {
     const params = normalizeEyeParams(e.params)
     const exprColors = { ...DEFAULT_EYE_COLORS, ...(e.colors ?? {}) }
+    const eRaw = e as unknown as Record<string, unknown>
     return {
       ...e,
       params,
@@ -868,9 +870,46 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
       leftColors: normalizeEyeColorsOverride(e.leftColors),
       rightColors: normalizeEyeColorsOverride(e.rightColors),
       styleOverrides: normalizeStyleOverrides(e.styleOverrides) ?? computeStyleOverrides(params, exprColors, visualReference),
-      stickers: normalizeStickerInstances((e as unknown as Record<string, unknown>).stickers)
+      stickers: normalizeStickerInstances(eRaw.stickers),
+      // Expressions-panel folder organization (see ExpressionFolder). Old projects have neither
+      // field: folderId defaults to null (root), order backfills from array index — the flat list
+      // renders exactly as before. expression.id is never touched, so references stay valid.
+      folderId: typeof eRaw.folderId === 'string' ? eRaw.folderId : null,
+      order: typeof eRaw.order === 'number' ? eRaw.order : exprIndex
     }
   })
+
+  // Expressions-panel folder tree (editor organization only) — same repair pass as animationFolders.
+  const rawExprFolders = Array.isArray(raw.expressionFolders) ? raw.expressionFolders : []
+  const expressionFolders: ExpressionFolder[] = rawExprFolders.map((fRaw, i) => {
+    const f = fRaw as unknown as Record<string, unknown>
+    return {
+      id: typeof f.id === 'string' ? f.id : nanoid(8),
+      name: typeof f.name === 'string' ? f.name : 'Folder',
+      parentId: typeof f.parentId === 'string' ? f.parentId : null,
+      order: typeof f.order === 'number' ? f.order : i,
+      expanded: f.expanded !== false // default to expanded when absent
+    }
+  })
+  const exprFolderById = new Map(expressionFolders.map((f) => [f.id, f]))
+  for (const f of expressionFolders) {
+    if (f.parentId && !exprFolderById.has(f.parentId)) f.parentId = null
+  }
+  for (const f of expressionFolders) {
+    const seen = new Set<string>()
+    let cur: string | null = f.parentId
+    while (cur) {
+      if (cur === f.id || seen.has(cur)) {
+        f.parentId = null // break a parent cycle
+        break
+      }
+      seen.add(cur)
+      cur = exprFolderById.get(cur)?.parentId ?? null
+    }
+  }
+  for (const e of expressions) {
+    if (e.folderId && !exprFolderById.has(e.folderId)) e.folderId = null
+  }
 
   return {
     id: raw.id ?? nanoid(10),
@@ -890,6 +929,7 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     animationFolders,
     animationCombos,
     expressions,
+    expressionFolders,
     visualReference,
     customPupilShapes: normalizeCustomPupilShapes(raw.customPupilShapes),
     customEyeShapes: normalizeCustomEyeShapes(raw.customEyeShapes),
