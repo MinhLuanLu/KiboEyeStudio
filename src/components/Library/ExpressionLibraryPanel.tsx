@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, Fragment } from 'react'
-import { useStore } from '@/state/store'
+import { useStore, normalizeName } from '@/state/store'
 import { renderFace } from '@/renderer/faceRenderer'
 import { fitDisplayToBox } from '@/renderer/displayMask'
 import { expressionLeftColors, expressionLeftParams, expressionRightColors, expressionRightParams } from '@/types'
@@ -76,6 +76,11 @@ export function ExpressionLibraryPanel() {
   const [editing, setEditing] = useState<{ kind: 'folder' | 'expression'; id: string } | null>(null)
   const [draftName, setDraftName] = useState('')
   const [newName, setNewName] = useState('')
+  // Duplicate-name detection (matches the exported-identifier collision). Flags rows, and blocks the
+  // "Save Pose" input from creating an expression whose name already exists.
+  const nameCounts = expressions.reduce((m, e) => m.set(normalizeName(e.name), (m.get(normalizeName(e.name)) ?? 0) + 1), new Map<string, number>())
+  const isDupName = (name: string) => (nameCounts.get(normalizeName(name)) ?? 0) > 1
+  const newNameTaken = newName.trim() !== '' && (nameCounts.get(normalizeName(newName)) ?? 0) > 0
   const [drag, setDrag] = useState<DragItem | null>(null)
   const [drop, setDrop] = useState<Drop | null>(null)
   const [menu, setMenu] = useState<Menu | null>(null)
@@ -278,20 +283,24 @@ export function ExpressionLibraryPanel() {
   const lineBefore = (row: Row) => drop?.type === 'reorder' && drop.rowKey === row.key && drop.pos === 'before'
   const lineAfter = (row: Row) => drop?.type === 'reorder' && drop.rowKey === row.key && drop.pos === 'after'
 
+  const saveNewExpression = () => {
+    if (!newName.trim() || newNameTaken) return
+    checkpoint()
+    addExpression(newName.trim())
+    setNewName('')
+  }
+
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-1.5 p-2 border-b border-studio-border">
+      <div className="flex flex-col gap-1 p-2 border-b border-studio-border">
+      <div className="flex items-center gap-1.5">
         <input
-          className="flex-1 bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm min-w-0"
+          className={`flex-1 bg-studio-panel2 border rounded px-2 py-1 text-sm min-w-0 ${newNameTaken ? 'border-studio-danger' : 'border-studio-border'}`}
           placeholder="New expression name..."
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && newName.trim()) {
-              checkpoint()
-              addExpression(newName.trim())
-              setNewName('')
-            }
+            if (e.key === 'Enter') saveNewExpression()
           }}
         />
         <button className="studio-btn shrink-0" title="New folder" onClick={() => createFolder(null)}>
@@ -299,15 +308,16 @@ export function ExpressionLibraryPanel() {
         </button>
         <button
           className="studio-btn shrink-0"
-          disabled={!newName.trim()}
-          onClick={() => {
-            checkpoint()
-            addExpression(newName.trim())
-            setNewName('')
-          }}
+          disabled={!newName.trim() || newNameTaken}
+          title={newNameTaken ? 'An expression with this name already exists — choose another' : undefined}
+          onClick={saveNewExpression}
         >
           Save Pose
         </button>
+      </div>
+      {newNameTaken && (
+        <span className="text-[11px] text-studio-danger">An expression named “{newName.trim()}” already exists — choose another name.</span>
+      )}
       </div>
 
       {selected && (
@@ -432,6 +442,11 @@ export function ExpressionLibraryPanel() {
                   >
                     {row.kind === 'folder' ? row.folder.name : row.expr.name}
                     {showDirtyDot && <span className="w-1.5 h-1.5 rounded-full bg-studio-warn shrink-0" title="Unsaved changes" />}
+                    {row.kind === 'expression' && isDupName(row.expr.name) && (
+                      <span className="text-studio-warn shrink-0" title="Duplicate name — rename to keep names unique">
+                        ⚠
+                      </span>
+                    )}
                   </span>
                 )}
 

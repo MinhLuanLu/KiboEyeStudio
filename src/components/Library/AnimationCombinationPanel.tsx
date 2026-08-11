@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
-import { useStore } from '@/state/store'
+import { useStore, normalizeName } from '@/state/store'
 
 /** Combination library management + playback transport — the actual clip *editing* (drag/trim/
  * reorder/copy/paste/multi-select) lives in the shared bottom Timeline (Timeline.tsx), which
@@ -32,6 +32,10 @@ export function AnimationCombinationPanel() {
   const checkpoint = useStore((s) => s.checkpoint)
 
   const selectedCombo = combos.find((combo) => combo.id === selectedComboId) ?? combos[0] ?? null
+
+  // Duplicate-name detection — flags combos whose name collides (would share an exported identifier).
+  const nameCounts = combos.reduce((m, c) => m.set(normalizeName(c.name), (m.get(normalizeName(c.name)) ?? 0) + 1), new Map<string, number>())
+  const isDupName = (name: string) => (nameCounts.get(normalizeName(name)) ?? 0) > 1
 
   const [search, setSearch] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -197,7 +201,12 @@ export function AnimationCombinationPanel() {
                         }}
                       >
                         {isSelected && playing && <span className="text-studio-accent" title="Previewing">▶</span>}
-                        {combo.name}
+                        <span className="truncate">{combo.name}</span>
+                        {isDupName(combo.name) && (
+                          <span className="text-studio-warn shrink-0" title="Duplicate name — rename to keep names unique">
+                            ⚠
+                          </span>
+                        )}
                       </div>
                     )}
                     <div className="text-[11px] text-studio-muted truncate">

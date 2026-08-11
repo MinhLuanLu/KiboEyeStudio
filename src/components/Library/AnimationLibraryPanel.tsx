@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
-import { useStore } from '@/state/store'
+import { useStore, normalizeName } from '@/state/store'
 import type { Animation, AnimationFolder } from '@/types'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 
@@ -24,6 +24,10 @@ const AUTO_EXPAND_MS = 700
 export function AnimationLibraryPanel() {
   const animations = useStore((s) => s.project.animations)
   const folders = useStore((s) => s.project.animationFolders)
+  // Names that collide (would share an exported C++ identifier) — flagged in the list so the user
+  // can rename them. New items are auto-suffixed by the store, so these come only from manual renames.
+  const nameCounts = animations.reduce((m, a) => m.set(normalizeName(a.name), (m.get(normalizeName(a.name)) ?? 0) + 1), new Map<string, number>())
+  const isDupName = (name: string) => (nameCounts.get(normalizeName(name)) ?? 0) > 1
   const activeAnimationId = useStore((s) => s.activeAnimationId)
   const selectAnimation = useStore((s) => s.selectAnimation)
   const addAnimation = useStore((s) => s.addAnimation)
@@ -340,6 +344,11 @@ export function AnimationLibraryPanel() {
                   >
                     {row.kind === 'folder' ? row.folder.name : row.anim.name}
                     {row.kind === 'animation' && row.anim.loop && <span className="text-studio-muted"> ↻</span>}
+                    {row.kind === 'animation' && isDupName(row.anim.name) && (
+                      <span className="text-studio-warn shrink-0" title="Duplicate name — rename to keep names unique">
+                        ⚠
+                      </span>
+                    )}
                   </span>
                 )}
 

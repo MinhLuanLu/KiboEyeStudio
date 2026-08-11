@@ -1062,6 +1062,27 @@ export interface UiDragPreview {
 type FolderLike = { id: string; parentId: string | null; order: number }
 type FiledItem = { id: string; folderId?: string | null; order?: number }
 
+/**
+ * Normalised name key used for duplicate detection — lowercased with all non-alphanumerics stripped,
+ * so it matches exactly when two names would collide into the same exported C++ identifier
+ * (toIdentifier() in cppExport.ts): "Look Up Right", "LookUpRight" and "look-up-right" all map here to
+ * "lookupright". Panels use this to flag duplicates; the store uses it to auto-suffix new names.
+ */
+export function normalizeName(name: string): string {
+  return name.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+/** Returns `base` if its normalized form is free among `existing`, else `base 2`, `base 3`, … so a
+ * newly-created animation/expression/combination never duplicates an existing name. */
+function uniqueName(base: string, existing: string[]): string {
+  const taken = new Set(existing.map(normalizeName))
+  const trimmed = base.trim() || 'Untitled'
+  if (!taken.has(normalizeName(trimmed))) return trimmed
+  let n = 2
+  while (taken.has(normalizeName(`${trimmed} ${n}`))) n++
+  return `${trimmed} ${n}`
+}
+
 /** Reassign 0..n `order` to the folders sharing a parent (root = null). */
 function reindexFolders<T extends FolderLike>(folders: T[], parentId: string | null): void {
   folders
@@ -1926,7 +1947,7 @@ export const useStore = create<StoreState>()(
         const order = s.project.animations.filter((a) => (a.folderId ?? null) === (folderId ?? null)).length
         s.project.animations.push({
           id,
-          name,
+          name: uniqueName(name, s.project.animations.map((a) => a.name)),
           folderId: folderId ?? null,
           order,
           loop: false,
@@ -2124,7 +2145,7 @@ export const useStore = create<StoreState>()(
     addAnimationCombo: (name = 'New Combo') => {
       const id = nanoid(10)
       set((s) => {
-        s.project.animationCombos.push({ id, name, loop: false, clips: [] })
+        s.project.animationCombos.push({ id, name: uniqueName(name, s.project.animationCombos.map((c) => c.name)), loop: false, clips: [] })
         s.dirty = true
       })
       return id
@@ -3058,7 +3079,7 @@ export const useStore = create<StoreState>()(
         const order = s.project.expressions.filter((e) => (e.folderId ?? null) === (folderId ?? null)).length
         s.project.expressions.push({
           id: newId,
-          name,
+          name: uniqueName(name, s.project.expressions.map((e) => e.name)),
           params: newParams,
           colors: newColors,
           leftParams: s.project.eyeLeftOverride ? { ...s.project.eyeLeftOverride } : null,
