@@ -156,7 +156,10 @@ export function TimelineInspector() {
     const kf = list[idx]
     if (!kf) return null
     const isPinned = trackKind === 'pose' && idx === 0
-    const filteredExpressions = expressions.filter((e) => e.name.toLowerCase().includes(exprSearch.toLowerCase()))
+    // Case-insensitive partial-name filter. Short-circuits when the box is empty so we skip the
+    // per-item toLowerCase pass entirely — keeps typing smooth in large projects.
+    const q = exprSearch.trim().toLowerCase()
+    const filteredExpressions = q ? expressions.filter((e) => e.name.toLowerCase().includes(q)) : expressions
     const nudgeKeyframeTime = (deltaMs: number) => {
       checkpoint()
       setKeyframeTime(trackKind, kf.id, kf.timeMs + deltaMs)
@@ -267,7 +270,7 @@ export function TimelineInspector() {
                     </button>
                   </div>
                   <div className="max-h-60 overflow-y-auto flex flex-col gap-0.5">
-                    {filteredExpressions.length === 0 && <span className="text-xs text-studio-muted p-2">No matching expressions.</span>}
+                    {filteredExpressions.length === 0 && <span className="text-xs text-studio-muted p-2">No results found</span>}
                     {filteredExpressions.map((expr) => (
                       <button
                         key={expr.id}

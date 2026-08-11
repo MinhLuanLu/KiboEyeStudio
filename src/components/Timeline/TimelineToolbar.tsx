@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { Animation, TrackKind } from '@/types'
 import { msToFrame, steppedZoom, pxPerMsToPercent } from './timelineMath'
+import { SearchableSelect } from '@/components/ui/SearchableSelect'
 
 /** The Snap menu's options — 'off' disables snapping, 'frame' snaps to frame boundaries (the
  * default), and the numeric values snap to that fixed ms grid. */
@@ -144,21 +145,15 @@ export function TimelineToolbar({
 
       {isCombo && (
         <div className="flex items-center gap-1 ml-auto">
-          <select
-            className="min-w-0 max-w-[9rem] bg-studio-panel2 border border-studio-border rounded px-1.5 py-1 text-xs"
+          <SearchableSelect
+            items={comboAnimations ?? []}
             value={comboClipPick}
-            onChange={(e) => setComboClipPick(e.target.value)}
+            onChange={setComboClipPick}
+            placeholder="Choose animation…"
+            searchPlaceholder="Search animations..."
+            emptyLabel="No results found"
             title="Animation to add as a new clip"
-          >
-            <option value="" disabled>
-              Choose animation…
-            </option>
-            {comboAnimations?.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
+          />
           <button
             className="studio-btn px-2 py-1"
             disabled={!comboClipPick && (comboAnimations?.length ?? 0) === 0}
