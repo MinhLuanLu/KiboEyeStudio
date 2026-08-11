@@ -45,6 +45,30 @@ function toIdentifier(name: string): string {
   return /^[0-9]/.test(pascal) ? `_${pascal}` : pascal
 }
 
+/**
+ * Maps each item's id → a UNIQUE C++ identifier. `toIdentifier()` alone isn't unique — two items
+ * whose names sanitize to the same PascalCase (e.g. "Look Up Right" and "LookUpRight", or two
+ * animations both called "Look Up Right") would emit duplicate symbols (`Anim_LookUpRight` defined
+ * twice) and fail to compile with a "redefinition" error. Deduping per kind (animations among
+ * animations, expressions among expressions, combos among combos) by appending `_2`, `_3`, … keeps
+ * every generated symbol distinct. Deterministic (array order), so any function can rebuild the same
+ * map from the same list and get identical names — that's how the struct definition and every
+ * reference to it (combo clips, the Quick Reference, the demo) stay in agreement.
+ */
+function buildUniqueIdents(items: { id: string; name: string }[]): Map<string, string> {
+  const used = new Set<string>()
+  const map = new Map<string, string>()
+  for (const item of items) {
+    const base = toIdentifier(item.name) || 'Unnamed'
+    let ident = base
+    let n = 2
+    while (used.has(ident)) ident = `${base}_${n++}`
+    used.add(ident)
+    map.set(item.id, ident)
+  }
+  return map
+}
+
 function clampByte(v: number): number {
   return Math.max(-127, Math.min(127, Math.round(v)))
 }
@@ -270,12 +294,12 @@ function bakeAnimationFrames(anim: Animation): BakedFrame[] {
 // exactly one shared array, identical output to before this feature existed.
 function exportAnimation(
   anim: Animation,
+  ident: string,
   customShapes: CustomPupilShape[],
   customEyeShapes: CustomEyeShape[],
   assetsById: Map<string, StickerAsset>,
   rasterIndexByAssetId: Map<string, number>
 ): string {
-  const ident = toIdentifier(anim.name)
   const baked = bakeAnimationFrames(anim)
   const diverges = baked.some((f) => JSON.stringify(f.leftParams) !== JSON.stringify(f.rightParams))
   const stickers = anim.stickers.filter((s) => s.visible)
@@ -316,13 +340,13 @@ function exportAnimation(
 // eyesDrawEye()/eyesDrawStickers() use, per the existing Expr_X_L/Expr_X_R pattern.
 function exportExpression(
   expr: Expression,
+  ident: string,
   customShapes: CustomPupilShape[],
   customEyeShapes: CustomEyeShape[],
   backgroundColor: string,
   assetsById: Map<string, StickerAsset>,
   rasterIndexByAssetId: Map<string, number>
 ): string {
-  const ident = toIdentifier(expr.name)
   const leftColors = expressionLeftColors(expr)
   const rightColors = expressionRightColors(expr)
   const colorsSame = JSON.stringify(leftColors) === JSON.stringify(rightColors)
@@ -358,6 +382,8 @@ function exportExpression(
 
 function exportAnimationCombos(project: Project): string {
   const combos = project.animationCombos ?? []
+  const animIdents = buildUniqueIdents(project.animations)
+  const comboIdents = buildUniqueIdents(combos)
   const lines: string[] = []
   lines.push('// ---- Animation Combinations -----------------------------------------------')
   lines.push('/*')
@@ -408,12 +434,12 @@ function exportAnimationCombos(project: Project): string {
   }
 
   for (const combo of combos) {
-    const ident = toIdentifier(combo.name)
+    const ident = comboIdents.get(combo.id)!
     const clips = combo.clips
       .map((clip) => {
         const anim = project.animations.find((a) => a.id === clip.animationId)
         if (!anim) return null
-        return `  { &Anim_${toIdentifier(anim.name)}, ${Math.max(0, Math.round(clip.startTimeMs))}, ${Math.max(1, Math.round(clip.loopCount || 1))}, ${Math.max(1, Math.round(clip.playbackSpeed || 100))}, ${Math.max(0, Math.round(clip.transitionMs || 0))}, ${Math.max(0, Math.round(clip.endDelayMs || 0))} }`
+        return `  { &Anim_${animIdents.get(anim.id)!}, ${Math.max(0, Math.round(clip.startTimeMs))}, ${Math.max(1, Math.round(clip.loopCount || 1))}, ${Math.max(1, Math.round(clip.playbackSpeed || 100))}, ${Math.max(0, Math.round(clip.transitionMs || 0))}, ${Math.max(0, Math.round(clip.endDelayMs || 0))} }`
       })
       .filter((line): line is string => !!line)
     lines.push(`const AnimationComboClip ${ident}_Clips[] PROGMEM = {`)
@@ -3768,6 +3794,9 @@ inline void Detach() {
 function exportQuickReference(project: Project): string {
   const singleExpressions = project.expressions.filter((e) => !expressionShapeDiverges(e))
   const divergedExpressions = project.expressions.filter((e) => expressionShapeDiverges(e))
+  const animIdents = buildUniqueIdents(project.animations)
+  const exprIdents = buildUniqueIdents(project.expressions)
+  const comboIdents = buildUniqueIdents(project.animationCombos ?? [])
 
   const lines: string[] = []
   lines.push('// ---- Quick Reference --------------------------------------------------------')
@@ -3775,7 +3804,7 @@ function exportQuickReference(project: Project): string {
   lines.push('//')
   if (project.animations.length > 0) {
     lines.push('// Animations:')
-    for (const a of project.animations) lines.push(`//   PlayAnimation(Anim_${toIdentifier(a.name)});`)
+    for (const a of project.animations) lines.push(`//   PlayAnimation(Anim_${animIdents.get(a.id)!});`)
   } else {
     lines.push('// Animations: (this project has none yet)')
   }
@@ -3785,12 +3814,12 @@ function exportQuickReference(project: Project): string {
     lines.push('//   Combo(<yourCombo>);          // Play once (default)')
     lines.push('//   Combo(<yourCombo>, true);    // Loop forever')
     lines.push('//   Combo(<yourCombo>, false);   // Play once (explicit)')
-    for (const combo of project.animationCombos) lines.push(`//   Combo(${toIdentifier(combo.name)});`)
+    for (const combo of project.animationCombos) lines.push(`//   Combo(${comboIdents.get(combo.id)!});`)
     // Play several combos back-to-back (each starts only after the previous ComboFinished()) — pass
     // combo POINTERS (&Name); every combo plays once, and with loop==true the whole list repeats.
     // Lists ALL of this project's combos (up to the 32-per-call queue limit) so it's ready to copy.
     const PMC_MAX = 32 // EYES_MAX_ANIMATION_SEQUENCE — max combos a single PlayMultipleCombos() queues
-    const comboRefs = project.animationCombos.slice(0, PMC_MAX).map((c) => `&${toIdentifier(c.name)}`).join(', ')
+    const comboRefs = project.animationCombos.slice(0, PMC_MAX).map((c) => `&${comboIdents.get(c.id)!}`).join(', ')
     lines.push('//')
     lines.push(`//   PlayMultipleCombos({ ${comboRefs} });        // play each once, then hold the last frame`)
     lines.push(`//   PlayMultipleCombos({ ${comboRefs} }, true);  // ...and loop the whole list forever`)
@@ -3803,7 +3832,7 @@ function exportQuickReference(project: Project): string {
   lines.push('//')
   if (singleExpressions.length > 0) {
     lines.push('// Expressions:')
-    for (const e of singleExpressions) lines.push(`//   SetExpression(Expr_${toIdentifier(e.name)});`)
+    for (const e of singleExpressions) lines.push(`//   SetExpression(Expr_${exprIdents.get(e.id)!});`)
   } else {
     lines.push('// Expressions: (this project has none yet)')
   }
@@ -3813,7 +3842,7 @@ function exportQuickReference(project: Project): string {
     lines.push('// constants instead of one — SetExpression() needs a single shared pose, so draw these')
     lines.push('// two halves yourself with eyesDrawEye() instead:')
     for (const e of divergedExpressions) {
-      const ident = toIdentifier(e.name)
+      const ident = exprIdents.get(e.id)!
       lines.push(`//   Expr_${ident}_L, Expr_${ident}_R`)
     }
   }
@@ -3828,8 +3857,10 @@ function exportQuickReference(project: Project): string {
 // Expr_ constants get called — SetExpression()/PlayAnimation()/UpdateEyes() do all the work,
 // so swapping in a different expression or animation is exactly one line, anywhere.
 function exportDemo(project: Project): string {
+  const animIdents = buildUniqueIdents(project.animations)
+  const exprIdents = buildUniqueIdents(project.expressions)
   const idleAnim = project.animations[0]
-  const idleIdent = idleAnim ? toIdentifier(idleAnim.name) : null
+  const idleIdent = idleAnim ? animIdents.get(idleAnim.id)! : null
   const hasIdle = idleIdent !== null
 
   // Expressions with a diverged Eye Target: Left/Right shape export as two constants
@@ -3879,7 +3910,7 @@ function exportDemo(project: Project): string {
     lines.push('// Cycles through every expression a few seconds apart, purely to show them off.')
     lines.push('// Replace this timer with your own trigger — a button, a sensor, a serial command,')
     lines.push('// anything — that calls SetExpression() whenever you actually want the eyes to change.')
-    lines.push(`const EyeExpression* const demoExpressions[] = { ${demoExpressions.map((e) => `&Expr_${toIdentifier(e.name)}`).join(', ')} };`)
+    lines.push(`const EyeExpression* const demoExpressions[] = { ${demoExpressions.map((e) => `&Expr_${exprIdents.get(e.id)!}`).join(', ')} };`)
     lines.push(`const char* const demoExpressionNames[] = { ${demoExpressions.map((e) => JSON.stringify(e.name)).join(', ')} };`)
     lines.push(`const int demoExpressionCount = ${demoExpressions.length};`)
     lines.push('int demoExprIndex = -1;')
@@ -3913,7 +3944,7 @@ function exportDemo(project: Project): string {
   if (hasIdle) {
     lines.push(`  PlayAnimation(Anim_${idleIdent});`)
   } else {
-    lines.push(`  SetExpression(Expr_${toIdentifier(demoExpressions[0].name)});`)
+    lines.push(`  SetExpression(Expr_${exprIdents.get(demoExpressions[0].id)!});`)
   }
   if (hasExpressions) lines.push('  demoExprCycleStart = millis();')
   lines.push('}')
@@ -3947,6 +3978,11 @@ export function generateCppHeader(project: Project): string {
   // their own sticker array against the same shared STICKER_RASTER_ASSETS table instead of
   // duplicating pixel data per scope — see exportStickers()'s own comment.
   const stickersExport = exportStickers(project)
+  // Unique C++ identifiers per animation/expression (deduped so no two collide — see
+  // buildUniqueIdents). exportAnimation()/exportExpression() take the resolved ident; the other
+  // exporters rebuild the same deterministic maps themselves, so every symbol + reference agrees.
+  const animIdents = buildUniqueIdents(project.animations)
+  const exprIdents = buildUniqueIdents(project.expressions)
   const header = `/*
  * Generated by Eyes Eye Studio — do not hand-edit, re-export instead.
  * Project: ${project.name}
@@ -4355,7 +4391,7 @@ ${PLAYER_CODE}
 
 // ---- Animations -----------------------------------------------------------
 
-${project.animations.map((a) => exportAnimation(a, project.customPupilShapes, project.customEyeShapes, stickersExport.assetsById, stickersExport.rasterIndexByAssetId)).join('\n\n')}
+${project.animations.map((a) => exportAnimation(a, animIdents.get(a.id)!, project.customPupilShapes, project.customEyeShapes, stickersExport.assetsById, stickersExport.rasterIndexByAssetId)).join('\n\n')}
 
 ${exportAnimationCombos(project)}
 
@@ -4363,7 +4399,7 @@ ${exportAnimationCombos(project)}
 
 ${project.expressions
   .map((e) =>
-    exportExpression(e, project.customPupilShapes, project.customEyeShapes, project.display.backgroundColor, stickersExport.assetsById, stickersExport.rasterIndexByAssetId)
+    exportExpression(e, exprIdents.get(e.id)!, project.customPupilShapes, project.customEyeShapes, project.display.backgroundColor, stickersExport.assetsById, stickersExport.rasterIndexByAssetId)
   )
   .join('\n\n')}
 
