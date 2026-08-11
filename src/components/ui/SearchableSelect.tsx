@@ -133,7 +133,7 @@ export function SearchableSelect({
         createPortal(
           <div
             ref={menuRef}
-            className="fixed z-[100] studio-panel border border-studio-border rounded-md shadow-floating p-2 flex flex-col gap-2"
+            className="fixed z-[100] studio-panel border border-studio-border rounded-md shadow-floating p-2 flex flex-col gap-2 text-studio-text"
             style={{ left, top, width: menuWidth, transform: openUp ? 'translateY(-100%)' : undefined }}
           >
             <input
