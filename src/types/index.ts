@@ -20,6 +20,9 @@ export interface EyeParams {
   eyePosY: number
   irisWidth: number
   irisHeight: number
+  /** Iris visibility — false hides the iris entirely (its size/colours are kept, so re-enabling
+   * restores them), a real exported behavior mirroring pupilVisible. */
+  irisVisible: boolean
   pupilWidth: number
   pupilHeight: number
   pupilX: number
@@ -147,6 +150,9 @@ export interface EyeParams {
   highlightX: number
   highlightY: number
   highlightSize: number
+  /** Highlight (eye glint) visibility — false hides it entirely, keeping its size/position so
+   * re-enabling restores them. A real exported behavior mirroring pupilVisible/irisVisible. */
+  highlightVisible: boolean
 }
 
 /** Built-in pupil outlines plus 'custom' (an imported SVG shape, referenced by
@@ -1062,6 +1068,7 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   eyePosY: 0,
   irisWidth: 58,
   irisHeight: 58,
+  irisVisible: true,
   pupilWidth: 32,
   pupilHeight: 32,
   pupilX: 0,
@@ -1112,7 +1119,8 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   lowerEyelidLocked: false,
   highlightX: -18,
   highlightY: -18,
-  highlightSize: 22
+  highlightSize: 22,
+  highlightVisible: true
 }
 
 export const DEFAULT_EYE_COLORS: EyeColors = {
@@ -1213,6 +1221,8 @@ export const EYE_PARAM_RANGES: Record<
     | 'pupilCustomShapeId'
     | 'pupilVisible'
     | 'pupilLocked'
+    | 'irisVisible'
+    | 'highlightVisible'
     | 'eyeShape'
     | 'eyeCustomShapeId'
     | 'eyeShapeFlipH'

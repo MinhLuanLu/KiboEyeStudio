@@ -202,7 +202,9 @@ function eyeFrameLiteral(
     params.eyeShapeFlipH ? 'true' : 'false',
     params.eyeShapeFlipV ? 'true' : 'false',
     params.upperEyelidVisible ? 'true' : 'false',
-    params.lowerEyelidVisible ? 'true' : 'false'
+    params.lowerEyelidVisible ? 'true' : 'false',
+    params.irisVisible ? 'true' : 'false',
+    params.highlightVisible ? 'true' : 'false'
   ]
   return `  { ${fields.join(', ')} }`
 }
@@ -1095,6 +1097,8 @@ struct LiveEye {
   uint8_t pupilShape;
   uint8_t pupilCustomShapeIndex;
   bool pupilVisible;
+  bool irisVisible;
+  bool highlightVisible;
   uint8_t eyeShape;
   uint8_t eyeCustomShapeIndex;
   bool eyeShapeFlipH;
@@ -1165,6 +1169,8 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   r.pupilShape = t < 0.5f ? a.pupilShape : b.pupilShape;
   r.pupilCustomShapeIndex = t < 0.5f ? a.pupilCustomShapeIndex : b.pupilCustomShapeIndex;
   r.pupilVisible = t < 0.5f ? a.pupilVisible : b.pupilVisible;
+  r.irisVisible = t < 0.5f ? a.irisVisible : b.irisVisible;
+  r.highlightVisible = t < 0.5f ? a.highlightVisible : b.highlightVisible;
   r.eyeShape = t < 0.5f ? a.eyeShape : b.eyeShape;
   r.eyeCustomShapeIndex = t < 0.5f ? a.eyeCustomShapeIndex : b.eyeCustomShapeIndex;
   r.eyeShapeFlipH = t < 0.5f ? a.eyeShapeFlipH : b.eyeShapeFlipH;
@@ -1227,6 +1233,8 @@ inline LiveEye eyesLerpLive(const LiveEye& a, const LiveEye& b, float t) {
   r.pupilShape = t < 0.5f ? a.pupilShape : b.pupilShape;
   r.pupilCustomShapeIndex = t < 0.5f ? a.pupilCustomShapeIndex : b.pupilCustomShapeIndex;
   r.pupilVisible = t < 0.5f ? a.pupilVisible : b.pupilVisible;
+  r.irisVisible = t < 0.5f ? a.irisVisible : b.irisVisible;
+  r.highlightVisible = t < 0.5f ? a.highlightVisible : b.highlightVisible;
   r.eyeShape = t < 0.5f ? a.eyeShape : b.eyeShape;
   r.eyeCustomShapeIndex = t < 0.5f ? a.eyeCustomShapeIndex : b.eyeCustomShapeIndex;
   r.eyeShapeFlipH = t < 0.5f ? a.eyeShapeFlipH : b.eyeShapeFlipH;
@@ -3512,7 +3520,7 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   // comment); the pupil uses its own independent Pupil Rotation and whatever shape
   // e.pupilShape selects — see eyesFillPupilShape() above. Skipped entirely when
   // e.pupilVisible is false (Layers panel) without discarding any of the pupil's own settings.
-  if (irisRX > 0 && irisRY > 0) {
+  if (e.irisVisible && irisRX > 0 && irisRY > 0) {   // Eye Controls: false hides the iris (settings kept)
     eyesFillIrisGradient(gfx, cx, cy, w, h, radius, px, py, irisRX, irisRY, eyeShape, rotRad, colors.irisLight, colors.iris, colors.irisDark);
   }
   if (e.pupilVisible && pupilRX > 0 && pupilRY > 0) {
@@ -3525,7 +3533,7 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   float hlBaseY = (e.pupilVisible && pupilRY > 0) ? pupilRY : irisRY;
   float hlBase = (hlBaseX + hlBaseY) / 2.0f;
   int16_t hR = (int16_t)((e.highlightSize / 100.0f) * hlBase);
-  if (hR > 0 && hlBase > 0) {
+  if (e.highlightVisible && hR > 0 && hlBase > 0) {   // Eye Controls: false hides the highlight (settings kept)
     float hCenterLocalX = (float)pxLocal + sign * (e.highlightX / 100.0f) * hlBaseX;
     float hCenterLocalY = (float)pyLocal + (e.highlightY / 100.0f) * hlBaseY;
     float eyeHx = w / 2.0f, eyeHy = h / 2.0f;
@@ -4282,6 +4290,8 @@ struct EyeFrame {
   int8_t eyeShapeOffsetX, eyeShapeOffsetY; // -30..30px, shifts the eye's own silhouette for every eyeShape, including EYE_SHAPE_DEFAULT
   bool eyeShapeFlipH, eyeShapeFlipV;
   bool upperEyelidVisible, lowerEyelidVisible; // Layers panel — false renders as if coverage were 0
+  bool irisVisible;      // Eye Controls — false hides the iris entirely (settings kept)
+  bool highlightVisible; // Eye Controls — false hides the highlight glint entirely (settings kept)
 };
 
 // One eye's full color palette (RGB565) plus its border thickness — the studio's Eye

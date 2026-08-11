@@ -634,6 +634,13 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
         {tab === 'iris-pupil' && (
           <div className="flex flex-col gap-5">
             <Section title="Iris & Pupil">
+              <label className="flex items-center justify-between text-sm cursor-pointer select-none">
+                <span className="studio-label">Iris</span>
+                <span className="flex items-center gap-1.5 text-xs text-studio-muted">
+                  <input type="checkbox" checked={target.irisVisible} onChange={(e) => { checkpoint(); setParam('irisVisible', e.target.checked) }} />
+                  Visible
+                </span>
+              </label>
               <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('irisWidth')} onReset={() => resetStyleField('irisWidth')}>
                 <Slider label="Iris Width" value={target.irisWidth} min={EYE_PARAM_RANGES.irisWidth[0]} max={EYE_PARAM_RANGES.irisWidth[1]} onCommitStart={checkpoint} onChange={(v) => setParam('irisWidth', v)} />
               </StyleFieldRow>
@@ -641,6 +648,13 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
                 <Slider label="Iris Height" value={target.irisHeight} min={EYE_PARAM_RANGES.irisHeight[0]} max={EYE_PARAM_RANGES.irisHeight[1]} onCommitStart={checkpoint} onChange={(v) => setParam('irisHeight', v)} />
               </StyleFieldRow>
 
+              <label className="flex items-center justify-between text-sm cursor-pointer select-none">
+                <span className="studio-label">Pupil</span>
+                <span className="flex items-center gap-1.5 text-xs text-studio-muted">
+                  <input type="checkbox" checked={target.pupilVisible} onChange={(e) => { checkpoint(); setParam('pupilVisible', e.target.checked) }} />
+                  Visible
+                </span>
+              </label>
               <StyleFieldRow active={!!editingContext} overridden={pupilShapeOverridden} onReset={resetPupilShapeStyle}>
                 <div className="flex flex-col gap-2">
                   <PupilShapePicker shape={target.pupilShape} customShapeId={target.pupilCustomShapeId} onSelectShape={selectPupilShape} />
@@ -663,6 +677,13 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
             </Section>
 
             <Section title="Highlight">
+              <label className="flex items-center justify-between text-sm cursor-pointer select-none">
+                <span className="studio-label">Highlight</span>
+                <span className="flex items-center gap-1.5 text-xs text-studio-muted">
+                  <input type="checkbox" checked={target.highlightVisible} onChange={(e) => { checkpoint(); setParam('highlightVisible', e.target.checked) }} />
+                  Visible
+                </span>
+              </label>
               <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('highlightX')} onReset={() => resetStyleField('highlightX')}>
                 <Slider label="Highlight Position X" value={target.highlightX} min={EYE_PARAM_RANGES.highlightX[0]} max={EYE_PARAM_RANGES.highlightX[1]} onCommitStart={checkpoint} onChange={(v) => setParam('highlightX', v)} />
               </StyleFieldRow>

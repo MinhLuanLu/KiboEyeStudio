@@ -160,6 +160,7 @@ export function drawEye(
     rotation,
     irisWidth,
     irisHeight,
+    irisVisible,
     pupilWidth,
     pupilHeight,
     pupilX,
@@ -168,6 +169,7 @@ export function drawEye(
     pupilShape,
     pupilCustomShapeId,
     pupilVisible,
+    highlightVisible,
     eyeShape,
     eyeCustomShapeId,
     eyeShapeScale,
@@ -321,8 +323,9 @@ export function drawEye(
   const pcy = (pupilY / 100) * (height / 2)
 
   // Iris — drawn via a scale transform so the radial gradient stretches into a true ellipse
-  // (canvas gradients are otherwise always circular).
-  if (irisRX > 0.1 && irisRY > 0.1) {
+  // (canvas gradients are otherwise always circular). Skipped entirely when irisVisible is false
+  // (Eye Controls toggle) without discarding the iris's size/colour settings.
+  if (irisVisible && irisRX > 0.1 && irisRY > 0.1) {
     if (firmwareSim) {
       // Matches eyesFillIrisGradient() in cppExport.ts exactly: 6 concentric flat-color rings
       // (largest/darkest first, smallest/lightest on top), the same t>=0.75 breakpoint between
@@ -387,7 +390,7 @@ export function drawEye(
   const highlightBaseY = pupilVisible && pupilRY > 0.1 ? pupilRY : irisRY
   const highlightBase = (highlightBaseX + highlightBaseY) / 2
   const hR = Math.max(0, (highlightSize / 100) * highlightBase)
-  if (hR > 0.1 && highlightBase > 0.1) {
+  if (highlightVisible && hR > 0.1 && highlightBase > 0.1) {
     const hx = pcx + sign * (highlightX / 100) * highlightBaseX
     const hy = pcy + (highlightY / 100) * highlightBaseY
     ctx.beginPath()
