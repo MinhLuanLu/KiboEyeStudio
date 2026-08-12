@@ -205,7 +205,8 @@ function eyeFrameLiteral(
     params.upperEyelidVisible ? 'true' : 'false',
     params.lowerEyelidVisible ? 'true' : 'false',
     params.irisVisible ? 'true' : 'false',
-    params.highlightVisible ? 'true' : 'false'
+    params.highlightVisible ? 'true' : 'false',
+    params.disableEyelid ? 'true' : 'false'
   ]
   return `  { ${fields.join(', ')} }`
 }
@@ -1173,6 +1174,7 @@ struct LiveEye {
   bool eyeShapeFlipV;
   bool upperEyelidVisible;
   bool lowerEyelidVisible;
+  bool disableEyelid;
 };
 
 // Shortest-path interpolation between two angles in degrees, wrapping through 0/360 rather
@@ -1245,6 +1247,7 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   r.eyeShapeFlipV = t < 0.5f ? a.eyeShapeFlipV : b.eyeShapeFlipV;
   r.upperEyelidVisible = t < 0.5f ? a.upperEyelidVisible : b.upperEyelidVisible;
   r.lowerEyelidVisible = t < 0.5f ? a.lowerEyelidVisible : b.lowerEyelidVisible;
+  r.disableEyelid = t < 0.5f ? a.disableEyelid : b.disableEyelid;
   return r;
 }
 
@@ -1309,6 +1312,7 @@ inline LiveEye eyesLerpLive(const LiveEye& a, const LiveEye& b, float t) {
   r.eyeShapeFlipV = t < 0.5f ? a.eyeShapeFlipV : b.eyeShapeFlipV;
   r.upperEyelidVisible = t < 0.5f ? a.upperEyelidVisible : b.upperEyelidVisible;
   r.lowerEyelidVisible = t < 0.5f ? a.lowerEyelidVisible : b.lowerEyelidVisible;
+  r.disableEyelid = t < 0.5f ? a.disableEyelid : b.disableEyelid;
   return r;
 }
 
@@ -3626,7 +3630,11 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   // shape) renders exactly like it does in the studio's preview. borderWidth lives on
   // EyeColorSet (not a single global #define) so left/right eyes can have different ring
   // thicknesses, matching the studio's per-eye Visual Reference overrides.
-  if (colors.borderWidth > 0) {
+  // "Disable Eyelid" (e.disableEyelid): skip the border ring entirely. The ring sits OUTSIDE the
+  // eye shape and outside the eyelid, so it would otherwise stay visible around the eyelid-covered
+  // part of the eye — leaving a full outline around the "hidden" region. Skipping it leaves only
+  // the eyelid-clipped sclera/iris/pupil/highlight. Mirrors drawEye.ts in the studio.
+  if (!e.disableEyelid && colors.borderWidth > 0) {
     eyesFillEyeBoundaryRing(gfx, cx, cy, w, h, radius, eyeShape, (float)colors.borderWidth, rotRad, colors.border);
   }
 
@@ -4434,6 +4442,9 @@ struct EyeFrame {
   bool upperEyelidVisible, lowerEyelidVisible; // Layers panel — false renders as if coverage were 0
   bool irisVisible;      // Eye Controls — false hides the iris entirely (settings kept)
   bool highlightVisible; // Eye Controls — false hides the highlight glint entirely (settings kept)
+  bool disableEyelid;    // "Disable Eyelid" — true skips the eye-shape border ring entirely so no
+                         // outline shows around the eyelid-covered part of the eye (eye contents +
+                         // eyelid clip are untouched). Mirrors the studio's drawEye.ts.
 };
 
 // One eye's full color palette (RGB565) plus its border thickness — the studio's Eye

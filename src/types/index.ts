@@ -153,6 +153,15 @@ export interface EyeParams {
   /** Highlight (eye glint) visibility — false hides it entirely, keeping its size/position so
    * re-enabling restores them. A real exported behavior mirroring pupilVisible/irisVisible. */
   highlightVisible: boolean
+  /** "Disable Eyelid" toggle (Eyelid settings). When true, the eye-shape BORDER/outline ring is
+   * not drawn at all. The border is normally an outer ring one borderWidth larger than the eye
+   * shape (see drawEye.ts), so it sits OUTSIDE the eyelid's clip and stays visible around the
+   * part of the eye the eyelid covers — leaving a full oval/circle outline around the "hidden"
+   * region of a half-closed/sleepy eye. Setting this true removes that outline entirely while
+   * leaving the sclera/iris/pupil/highlight and the eyelid clip/mask untouched: only the border
+   * stops rendering, nothing else. Default false = today's behavior. A real exported behavior
+   * (mirrored in the C++ firmware), interpolated like the other boolean flags. */
+  disableEyelid: boolean
 }
 
 /** Built-in pupil outlines plus 'custom' (an imported SVG shape, referenced by
@@ -1152,7 +1161,8 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   highlightX: -18,
   highlightY: -18,
   highlightSize: 22,
-  highlightVisible: true
+  highlightVisible: true,
+  disableEyelid: false
 }
 
 export const DEFAULT_EYE_COLORS: EyeColors = {
@@ -1265,6 +1275,7 @@ export const EYE_PARAM_RANGES: Record<
     | 'lowerEyelidVisible'
     | 'upperEyelidLocked'
     | 'lowerEyelidLocked'
+    | 'disableEyelid'
   >,
   [number, number]
 > = {

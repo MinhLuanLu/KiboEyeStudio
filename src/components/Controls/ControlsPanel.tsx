@@ -721,6 +721,21 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
               {editTarget === 'visual-reference' && <PreviewOnlyNote />}
             </div>
 
+            <div className="flex flex-col gap-1.5">
+              <label className="flex items-center justify-between text-sm cursor-pointer select-none">
+                <span className="studio-label">Disable Eyelid</span>
+                <span className="flex items-center gap-1.5 text-xs text-studio-muted">
+                  <input type="checkbox" checked={target.disableEyelid} onChange={(e) => { checkpoint(); setParam('disableEyelid', e.target.checked) }} />
+                  On
+                </span>
+              </label>
+              <p className="text-[11px] text-studio-muted">
+                Hides the eye-shape outline/border so no ring shows around the part of the eye an
+                eyelid covers. The sclera, iris, pupil and highlight still render and stay clipped by
+                the eyelids.
+              </p>
+            </div>
+
             {EYELID_PANELS.map((cfg) => {
               const cornerOverridden = isStyleOverridden(cfg.leftRound) || isStyleOverridden(cfg.rightRound)
               const setCorner = (v: number) => {

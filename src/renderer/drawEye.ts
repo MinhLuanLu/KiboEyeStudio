@@ -206,6 +206,7 @@ export function drawEye(
     lowerEyelidThickness,
     upperEyelidVisible,
     lowerEyelidVisible,
+    disableEyelid,
     highlightX,
     highlightY,
     highlightSize
@@ -283,7 +284,11 @@ export function drawEye(
   // anything is the only way to guarantee zero artifact. theme.borderWidth is a Visual
   // Reference style field (see types/index.ts) — matches EYE_BORDER_WIDTH in the C++ export
   // exactly, so preview and firmware always draw an identical ring thickness.
-  if (theme.borderOpacity > 0 && theme.borderWidth > 0) {
+  // "Disable Eyelid" (disableEyelid): skip the border ring entirely. The ring is drawn OUTSIDE
+  // the eye shape (one borderWidth larger) and thus outside the eyelid clip below, so it would
+  // otherwise stay visible around the eyelid-covered part of the eye — a full outline around the
+  // "hidden" region. Skipping it leaves only the eyelid-clipped sclera/iris/pupil/highlight.
+  if (!disableEyelid && theme.borderOpacity > 0 && theme.borderWidth > 0) {
     const ringColor = mixColors(backgroundColor, theme.border, theme.borderOpacity / 100)
     traceEyeBoundary(theme.borderWidth)
     ctx.fillStyle = ringColor

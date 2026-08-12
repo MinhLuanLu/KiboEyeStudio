@@ -91,6 +91,7 @@ export function lerpParams(a: EyeParams, b: EyeParams, t: number): EyeParams {
   out.lowerEyelidVisible = t < 0.5 ? a.lowerEyelidVisible : b.lowerEyelidVisible
   out.upperEyelidLocked = t < 0.5 ? a.upperEyelidLocked : b.upperEyelidLocked
   out.lowerEyelidLocked = t < 0.5 ? a.lowerEyelidLocked : b.lowerEyelidLocked
+  out.disableEyelid = t < 0.5 ? a.disableEyelid : b.disableEyelid
   return out
 }
 
