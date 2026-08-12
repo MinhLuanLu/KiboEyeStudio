@@ -1859,15 +1859,32 @@ export const useStore = create<StoreState>()(
           }
         }
 
-        // Animations have no left/right concept (keyframes always share one pose between
-        // both eyes) and no colors of their own (colors are always project-global) — so
-        // eyeTarget only matters for expressions/the base pose above, and only EyeParams
-        // style fields need updating per keyframe here.
+        // Adapt EVERY keyframe on EVERY track to the new reference — not just the pose track.
+        // An animation's keyframes are the "stored copies" of expression/pose data (a keyframe
+        // snapshots a full pose), and they live on five independently-timed tracks (pose / left
+        // eye / right eye / pupils / eyelids), each of which can also carry its own per-eye
+        // divergence via leftParams/rightParams. Applying only to anim.keyframes (the old bug)
+        // left the other four tracks — and any per-eye divergence — showing the PREVIOUS reference
+        // while expressions updated. Each keyframe's own styleOverrides still gate which fields
+        // move, so pinned customizations, keyframe timing, and movement (position/offset, which
+        // aren't style fields) are all preserved — this transforms values, never resets them.
+        // Colours are left untouched: the exported/base palette is project-global (updated in the
+        // base-pose section above), and a per-keyframe palette is a deliberate studio-only override.
+        const applyKeyframeToVr = (kf: Keyframe, poseSide: 'base' | 'left' | 'right') => {
+          if (options.overrideMode === 'replace') kf.styleOverrides = []
+          applyStyleToParams(kf.params, vrParamsFor(poseSide), kf.styleOverrides)
+          // Left/right divergence on pose/pupil/eyelid keyframes tracks the matching per-eye VR;
+          // leftEye/rightEye TRACK keyframes are already tied to one side (their leftParams/
+          // rightParams stay null), so poseSide alone carries them correctly.
+          if (kf.leftParams) applyStyleToParams(kf.leftParams, vrParamsFor('left'), kf.styleOverrides)
+          if (kf.rightParams) applyStyleToParams(kf.rightParams, vrParamsFor('right'), kf.styleOverrides)
+        }
         const applyToAnimation = (anim: Animation) => {
-          for (const kf of anim.keyframes) {
-            if (options.overrideMode === 'replace') kf.styleOverrides = []
-            applyStyleToParams(kf.params, vrParamsFor('base'), kf.styleOverrides)
-          }
+          for (const kf of anim.keyframes) applyKeyframeToVr(kf, 'base')
+          for (const kf of anim.pupilKeyframes) applyKeyframeToVr(kf, 'base')
+          for (const kf of anim.eyelidKeyframes) applyKeyframeToVr(kf, 'base')
+          for (const kf of anim.leftEyeKeyframes) applyKeyframeToVr(kf, 'left')
+          for (const kf of anim.rightEyeKeyframes) applyKeyframeToVr(kf, 'right')
         }
 
         if (options.scope === 'all' || options.scope === 'expressions') {
