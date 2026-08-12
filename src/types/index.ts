@@ -895,6 +895,26 @@ export interface StickerAnimSettings {
   pulseOpacity: number // 0-100, sinusoidal amplitude on opacity
 }
 
+/** One keyframe on a sticker's timeline — the sticker counterpart of the eye Keyframe. Stores the
+ * sticker's animatable BASE transform at an absolute animation time; the sampler interpolates between
+ * keyframes and the existing procedural Drift/Spin/Pulse still layer on top of the sampled base. A
+ * sticker with no keyframes keeps its static instance values (fully backward compatible). */
+export interface StickerKeyframe {
+  id: string
+  /** Absolute ms on the owning animation's timeline (same convention as Keyframe.timeMs). */
+  timeMs: number
+  easing: EasingType
+  customBezier?: [number, number, number, number]
+  x: number
+  y: number
+  scaleX: number
+  scaleY: number
+  rotation: number
+  opacity: number
+  /** null = the sticker's asset-native colours (no tint); otherwise a hex colour, colour-lerped. */
+  tint: string | null
+}
+
 /** One placed sticker. */
 export interface StickerInstance {
   id: string
@@ -947,6 +967,9 @@ export interface StickerInstance {
    * read this; they merge/sort purely by layer+order exactly as before. A dangling reference
    * (no matching Track) is non-fatal — the Timeline falls back to an "Ungrouped" lane. */
   trackId: string
+  /** Timeline keyframes animating this sticker's base X/Y/scale/rotation/opacity/tint. Absent/empty
+   * = static (today's behavior). Kept sorted by timeMs by the store actions. See sampleStickerKeyframes. */
+  keyframes?: StickerKeyframe[]
 }
 
 export const DEFAULT_STICKER_ANIM: StickerAnimSettings = {

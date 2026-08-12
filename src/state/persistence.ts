@@ -20,6 +20,7 @@ import type {
   ProjectFile,
   StickerAsset,
   StickerInstance,
+  StickerKeyframe,
   StickerLayer,
   Track,
   VisualReferenceStyle
@@ -170,6 +171,34 @@ function normalizeStyleOverrides(raw: unknown): string[] | null {
  * (spread-merge, like normalizeEyeParams) rather than strict-reject, since StickerInstance has
  * many fields and a saved file predating a newly-added one shouldn't lose the whole sticker.
  * Drops entries missing `id`/`assetId` entirely (unusable — nothing to reference or select). */
+/** Coerces one sticker's timeline keyframes (drops malformed entries, backfills defaults) and keeps
+ * them sorted by timeMs — the invariant sampleStickerKeyframes()/the Timeline both assume. Old
+ * projects have no `keyframes` field → empty array → the sticker stays static. */
+function normalizeStickerKeyframes(raw: unknown): StickerKeyframe[] {
+  if (!Array.isArray(raw)) return []
+  const out: StickerKeyframe[] = []
+  for (const k of raw) {
+    if (!k || typeof k !== 'object') continue
+    const r = k as Record<string, unknown>
+    if (typeof r.timeMs !== 'number') continue
+    out.push({
+      id: typeof r.id === 'string' ? r.id : nanoid(8),
+      timeMs: Math.max(0, Math.round(r.timeMs)),
+      easing: typeof r.easing === 'string' ? (r.easing as StickerKeyframe['easing']) : 'easeInOut',
+      customBezier: Array.isArray(r.customBezier) && r.customBezier.length === 4 ? (r.customBezier as [number, number, number, number]) : undefined,
+      x: typeof r.x === 'number' ? r.x : 0,
+      y: typeof r.y === 'number' ? r.y : 0,
+      scaleX: typeof r.scaleX === 'number' ? r.scaleX : 100,
+      scaleY: typeof r.scaleY === 'number' ? r.scaleY : 100,
+      rotation: typeof r.rotation === 'number' ? r.rotation : 0,
+      opacity: typeof r.opacity === 'number' ? r.opacity : 100,
+      tint: typeof r.tint === 'string' ? r.tint : null
+    })
+  }
+  out.sort((a, b) => a.timeMs - b.timeMs)
+  return out
+}
+
 export function normalizeStickerInstances(raw: unknown): StickerInstance[] {
   if (!Array.isArray(raw)) return []
   const out: StickerInstance[] = []
@@ -208,7 +237,8 @@ export function normalizeStickerInstances(raw: unknown): StickerInstance[] {
       // Resolved against the owning Animation's actual tracks by normalizeAnimationTiming()
       // below (which knows the real track ids) — '' here just means "unresolved yet"; it's
       // never treated as a real track id.
-      trackId: typeof r.trackId === 'string' ? r.trackId : ''
+      trackId: typeof r.trackId === 'string' ? r.trackId : '',
+      keyframes: normalizeStickerKeyframes(r.keyframes)
     })
   }
   return out

@@ -1,5 +1,6 @@
 import type { StickerAnimSettings, StickerAsset, StickerInstance } from '@/types'
 import { BUILTIN_STICKER_DRAWERS } from './builtinStickers'
+import { sampleStickerKeyframes } from '@/engine/interpolate'
 
 const PULSE_HZ = 1 // fixed frequency for the scale/opacity "pulse" parametric controls
 
@@ -100,15 +101,25 @@ export function drawSticker(ctx: CanvasRenderingContext2D, instance: StickerInst
 
   const tSec = animMs / 1000
   const { anim } = instance
-  const liveX = instance.x + anim.driftX * tSec
-  const liveY = instance.y + anim.driftY * tSec
-  const liveRotation = instance.rotation + anim.spin * tSec
+  // Keyframes (if any) set the BASE transform for this instant; Drift/Spin/Pulse then layer on top
+  // exactly as before. No keyframes → the static instance values, i.e. today's behavior unchanged.
+  const base = sampleStickerKeyframes(instance.keyframes, animMs)
+  const baseX = base?.x ?? instance.x
+  const baseY = base?.y ?? instance.y
+  const baseScaleX = base?.scaleX ?? instance.scaleX
+  const baseScaleY = base?.scaleY ?? instance.scaleY
+  const baseRotation = base?.rotation ?? instance.rotation
+  const baseOpacity = base?.opacity ?? instance.opacity
+  const baseTint = base ? base.tint : instance.tint
+  const liveX = baseX + anim.driftX * tSec
+  const liveY = baseY + anim.driftY * tSec
+  const liveRotation = baseRotation + anim.spin * tSec
   const pulseScale = 1 + (anim.pulseScale / 100) * Math.sin(tSec * PULSE_HZ * Math.PI * 2)
   const pulseOpacityMul = 1 + (anim.pulseOpacity / 100) * Math.sin(tSec * PULSE_HZ * Math.PI * 2 + 1) // phase-offset from scale so they don't lock in sync
   const pulseScaleClamped = Math.max(0, pulseScale)
-  const liveScaleX = (instance.scaleX / 100) * pulseScaleClamped
-  const liveScaleY = (instance.scaleY / 100) * pulseScaleClamped
-  const liveOpacity = Math.max(0, Math.min(1, (instance.opacity / 100) * Math.max(0, pulseOpacityMul))) * alpha
+  const liveScaleX = (baseScaleX / 100) * pulseScaleClamped
+  const liveScaleY = (baseScaleY / 100) * pulseScaleClamped
+  const liveOpacity = Math.max(0, Math.min(1, (baseOpacity / 100) * Math.max(0, pulseOpacityMul))) * alpha
   if (liveOpacity <= 0.002) return
 
   const hw = (instance.width / 2) * liveScaleX
@@ -125,7 +136,7 @@ export function drawSticker(ctx: CanvasRenderingContext2D, instance: StickerInst
     const drawer = BUILTIN_STICKER_DRAWERS[asset.builtinId]
     ctx.save()
     ctx.scale(hw, hh) // drawer operates in [-1,1] unit space
-    drawer(ctx, tSec, instance.tint ?? '#ffffff', {
+    drawer(ctx, tSec, baseTint ?? '#ffffff', {
       strokeScale: (instance.strokeWidth ?? 5) / 100,
       loop: anim.loopMode !== 'once' // "No Loop" (once) plays a procedural cycle just once
     })
@@ -144,7 +155,7 @@ export function drawSticker(ctx: CanvasRenderingContext2D, instance: StickerInst
   } else if (asset.kind === 'raster' && asset.frames && asset.frames.length > 0) {
     const frameIndex = pickRasterFrame(asset, animMs, anim)
     const img = getImage(asset.frames[frameIndex])
-    if (img) drawTintedImage(ctx, img, hw, hh, instance.tint)
+    if (img) drawTintedImage(ctx, img, hw, hh, baseTint)
   }
 
   ctx.restore()

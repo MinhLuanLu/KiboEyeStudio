@@ -1,4 +1,4 @@
-import type { Animation, EyeColors, EyeParams, EyeSide, Keyframe } from '@/types'
+import type { Animation, EyeColors, EyeParams, EyeSide, Keyframe, StickerKeyframe } from '@/types'
 import { PUPIL_TRACK_FIELDS, EYELID_TRACK_FIELDS, SHAPE_TRACK_FIELDS, keyframeParamsFor, keyframeColors } from '@/types'
 import { mixColors } from '@/lib/color'
 import { applyEasing } from './easing'
@@ -268,6 +268,60 @@ export function sampleAnimation(anim: Animation, timeMs: number): SampleResult {
 }
 
 /** Wraps elapsed time into [0, duration) for looping playback; clamps to the end otherwise. */
+export interface StickerSample {
+  x: number
+  y: number
+  scaleX: number
+  scaleY: number
+  rotation: number
+  opacity: number
+  tint: string | null
+}
+
+const numLerp = (a: number, b: number, t: number) => a + (b - a) * t
+/** Colour-lerp two tints. A null tint has no colour to blend, so a null endpoint steps at the
+ * midpoint (same convention lerpColors/lerpParams use for non-interpolatable fields). */
+function lerpTint(a: string | null, b: string | null, t: number): string | null {
+  if (a === null || b === null) return t < 0.5 ? a : b
+  return mixColors(a, b, t)
+}
+function stickerKeyframeSample(kf: StickerKeyframe): StickerSample {
+  return { x: kf.x, y: kf.y, scaleX: kf.scaleX, scaleY: kf.scaleY, rotation: kf.rotation, opacity: kf.opacity, tint: kf.tint }
+}
+
+/**
+ * Samples a sticker's keyframes at `animMs` (the sticker's own animation clock) to produce its BASE
+ * transform. Keyframes are kept sorted by `timeMs` by the store; holds the first keyframe before the
+ * timeline reaches it and the last one after. Rotation is plain-lerped (not shortest-path) so authored
+ * multi-turn spins animate literally. Returns null when the sticker has no keyframes, so the caller
+ * falls back to the static instance values. Kept in lockstep with eyesSampleStickerKeyframes() in
+ * cppExport.ts so firmware and preview agree. */
+export function sampleStickerKeyframes(kfs: StickerKeyframe[] | undefined, animMs: number): StickerSample | null {
+  if (!kfs || kfs.length === 0) return null
+  if (kfs.length === 1 || animMs <= kfs[0].timeMs) return stickerKeyframeSample(kfs[0])
+  const last = kfs[kfs.length - 1]
+  if (animMs >= last.timeMs) return stickerKeyframeSample(last)
+  for (let i = 0; i < kfs.length - 1; i++) {
+    const from = kfs[i]
+    const to = kfs[i + 1]
+    if (animMs <= to.timeMs) {
+      const span = Math.max(1, to.timeMs - from.timeMs)
+      const localT = Math.min(1, Math.max(0, (animMs - from.timeMs) / span))
+      const eased = applyEasing(localT, from.easing, from.customBezier)
+      return {
+        x: numLerp(from.x, to.x, eased),
+        y: numLerp(from.y, to.y, eased),
+        scaleX: numLerp(from.scaleX, to.scaleX, eased),
+        scaleY: numLerp(from.scaleY, to.scaleY, eased),
+        rotation: numLerp(from.rotation, to.rotation, eased),
+        opacity: numLerp(from.opacity, to.opacity, eased),
+        tint: lerpTint(from.tint, to.tint, eased)
+      }
+    }
+  }
+  return stickerKeyframeSample(last)
+}
+
 export function wrapTime(timeMs: number, anim: Animation): number {
   return wrapMs(timeMs, anim.durationMs, anim.loop)
 }
