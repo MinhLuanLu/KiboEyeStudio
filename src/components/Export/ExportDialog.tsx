@@ -4,13 +4,12 @@ import { useStore, getActiveAnimation } from '@/state/store'
 import { projectToJson, animationToJson } from '@/lib/export/jsonExport'
 import { generateCppHeader } from '@/lib/export/cppExport'
 import { generateEyeControllerHeader } from '@/lib/export/eyeControllerExport'
-import { createZip } from '@/lib/export/zip'
 import { validateStickerExport, type StickerValidationResult } from '@/lib/export/validateStickers'
 import { validatePupilShapeExport, type PupilShapeValidationResult } from '@/lib/export/validatePupilShapes'
 import { validateTimelineTiming, type TimelineTimingValidationResult } from '@/lib/export/validateTimelineTiming'
 import { validateEyeRotationExport, type EyeRotationValidationResult } from '@/lib/export/validateEyeRotation'
 import { parseAnimationJson } from '@/lib/import/jsonImport'
-import { exportFile, exportBinaryFile, importJsonDialog } from '@/state/persistence'
+import { exportFile, importJsonDialog } from '@/state/persistence'
 
 type Tab = 'json-project' | 'json-animation' | 'cpp'
 type ValidationStatus = 'passed' | 'warning' | 'failed'
@@ -154,17 +153,18 @@ export function ExportDialog() {
   const content = tab === 'json-project' ? projectToJson(project) : tab === 'json-animation' ? (anim ? animationToJson(anim) : '// no animation selected') : generateCppHeader(project)
 
   const handleExport = async () => {
-    // C++ export with the controller option on -> zip both files. The eyes header is named
-    // exactly "eyes.h" inside the zip (not "<name>_eyes.h") so eyeController.h's own
-    // `#include "eyes.h"` resolves against it without editing.
+    // C++ export with the controller option on -> save TWO plain .h files (no zip). Both are
+    // dropped straight into the Arduino sketch folder. The eyes header is named exactly "eyes.h"
+    // (not "<name>_eyes.h") so eyeController.h's own `#include "eyes.h"` resolves without editing.
+    // Two save dialogs in a row on desktop; two downloads in the browser.
     if (tab === 'cpp' && includeController) {
-      const zipName = `${project.name.replace(/\s+/g, '_')}_eyes.zip`
-      const zipBytes = createZip([
-        { name: 'eyes.h', content },
-        { name: 'eyeController.h', content: generateEyeControllerHeader() }
-      ])
-      const ok = await exportBinaryFile(zipName, zipBytes, ['zip'])
-      setStatus(ok ? `Exported ${zipName} (eyes.h + eyeController.h)` : null)
+      const ok1 = await exportFile('eyes.h', content, ['h'])
+      if (!ok1) {
+        setStatus('Export cancelled')
+        return
+      }
+      const ok2 = await exportFile('eyeController.h', generateEyeControllerHeader(), ['h'])
+      setStatus(ok2 ? 'Exported eyes.h + eyeController.h' : 'Exported eyes.h (eyeController.h cancelled)')
       return
     }
     const filename = tab === 'cpp' ? `${project.name.replace(/\s+/g, '_')}_eyes.h` : tab === 'json-animation' ? `${(anim?.name ?? 'animation').replace(/\s+/g, '_')}.json` : `${project.name.replace(/\s+/g, '_')}.json`
@@ -236,7 +236,7 @@ export function ExportDialog() {
               <input type="checkbox" className="mt-0.5" checked={includeController} onChange={(e) => setIncludeController(e.target.checked)} />
               <span>
                 <span className="font-medium">Generate eye controller</span>
-                <span className="text-studio-muted"> — also emit <code>eyeController.h</code>, a priority-based arbitration layer over <code>eyes.h</code> for juggling multiple input sources (sensors, buttons, events). Saves both files as a <code>.zip</code>.</span>
+                <span className="text-studio-muted"> — also emit <code>eyeController.h</code>, a priority-based arbitration layer over <code>eyes.h</code> for juggling multiple input sources (sensors, buttons, events). Saves <code>eyes.h</code> and <code>eyeController.h</code> as two files (two save prompts).</span>
               </span>
             </label>
           )}
