@@ -376,14 +376,22 @@ function normalizeTracks(raw: unknown, stickerLayersInUse: Set<StickerLayer>, ha
   return out
 }
 
-/** Backfills project.stickerAssets: keeps every valid custom (raster) asset from the save
- * file, then re-seeds the built-in procedural assets fresh from BUILTIN_STICKER_ASSETS every
- * load (rather than trusting whatever was saved for them) — built-ins are code-defined, not
- * user data, so this is the same "source of truth lives in code" treatment
- * createDefaultProject() already gives builtinAnimations/builtinExpressions. */
+/** Backfills project.stickerAssets: keeps every valid IMPORTED asset from the save file (both
+ * raster PNG/GIF and — the fix for SVGs vanishing on reopen — embedded 'svg' assets, whose full
+ * `svgSource` + rasterized frames are stored right in the project so they survive save/close/open
+ * and can't be broken by moving/deleting the original file), then re-seeds the built-in procedural
+ * assets fresh from BUILTIN_STICKER_ASSETS every load (rather than trusting whatever was saved for
+ * them) — built-ins are code-defined, not user data, so this is the same "source of truth lives in
+ * code" treatment createDefaultProject() already gives builtinAnimations/builtinExpressions.
+ *
+ * Previously this filtered to `kind === 'raster'` only, so every imported SVG asset was silently
+ * dropped on load and any sticker/expression/animation referencing it lost its art. Imported assets
+ * are matched by a stable `id`, so restoring the asset here transparently revives every usage
+ * (relink-once-fix-everywhere, for free). Only genuinely-imported kinds pass through; procedural
+ * kinds are ignored here because the built-ins above are the authority for those. */
 function normalizeStickerAssets(raw: unknown): StickerAsset[] {
   const customFromDisk = Array.isArray(raw)
-    ? raw.filter((a): a is StickerAsset => !!a && typeof a === 'object' && typeof a.id === 'string' && a.kind === 'raster')
+    ? raw.filter((a): a is StickerAsset => !!a && typeof a === 'object' && typeof a.id === 'string' && (a.kind === 'raster' || a.kind === 'svg'))
     : []
   return [...BUILTIN_STICKER_ASSETS, ...customFromDisk]
 }
