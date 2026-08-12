@@ -3618,8 +3618,12 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
 
   // Glow — a soft halo bleeding outward past the eye's own edge (and past the border ring
   // below), drawn first so everything else paints over it. See eyesFillGlow()'s own comment
-  // for the approximation this makes (no true blur on this hardware).
-  eyesFillGlow(gfx, cx, cy, w, h, radius, eyeShape, rotRad, bgColor, colors.glow, colors.glowIntensity);
+  // for the approximation this makes (no true blur on this hardware). Skipped under "Disable
+  // Eyelid" (e.disableEyelid): the halo sits OUTSIDE the eye shape, so the eyelid can't cover
+  // it and it would leave a lit rim around the eyelid-covered part of the eye — mirrors drawEye.ts.
+  if (!e.disableEyelid) {
+    eyesFillGlow(gfx, cx, cy, w, h, radius, eyeShape, rotRad, bgColor, colors.glow, colors.glowIntensity);
+  }
 
   // Border — an outer stadium/oval shape colors.borderWidth larger on every side, in a color
   // already pre-blended toward the background by Border Opacity (see EYE_COLORS_LEFT/RIGHT

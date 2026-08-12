@@ -241,7 +241,11 @@ export function drawEye(
 
   // Outer glow — painted *before* the eye-shape clip so the blur can bleed outside the
   // rounded-rect silhouette (drawn on the round-display canvas behind everything else).
-  if (theme.glowIntensity > 0) {
+  // Skipped when "Disable Eyelid" is on: like the border ring below, the glow halo sits OUTSIDE
+  // the eye shape and so outside the eyelid clip, leaving a lit rim around the eyelid-covered
+  // part of the eye. Disable Eyelid renders only the inner-eye elements (sclera/iris/pupil/
+  // highlight), so both outer decorations (glow + border) are suppressed.
+  if (!disableEyelid && theme.glowIntensity > 0) {
     if (firmwareSim) {
       // Matches eyesFillGlow() in cppExport.ts exactly: 4 concentric grown-boundary rings,
       // largest/faintest first, each a flat color blended toward the background — Adafruit_GFX
