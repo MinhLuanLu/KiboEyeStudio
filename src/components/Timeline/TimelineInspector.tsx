@@ -47,6 +47,13 @@ export function TimelineInspector() {
   const setLeftTab = useStore((s) => s.setLeftTab)
   const resizeStickerClip = useStore((s) => s.resizeStickerClip)
   const updateSticker = useStore((s) => s.updateSticker)
+  const playbackTimeMs = useStore((s) => s.playbackTimeMs)
+  const addStickerKeyframe = useStore((s) => s.addStickerKeyframe)
+  const updateStickerKeyframe = useStore((s) => s.updateStickerKeyframe)
+  const setStickerKeyframeTime = useStore((s) => s.setStickerKeyframeTime)
+  const setStickerKeyframeEasing = useStore((s) => s.setStickerKeyframeEasing)
+  const deleteStickerKeyframe = useStore((s) => s.deleteStickerKeyframe)
+  const setTimelineSelection = useStore((s) => s.setTimelineSelection)
   const updateMarker = useStore((s) => s.updateMarker)
   const setRightTab = useStore((s) => s.setRightTab)
   const updateAnimationComboClip = useStore((s) => s.updateAnimationComboClip)
@@ -407,10 +414,126 @@ export function TimelineInspector() {
             Never ends
           </label>
         </div>
+        <div className="flex items-center justify-between text-xs text-studio-muted border-t border-studio-border pt-2 gap-2 flex-wrap">
+          <span>
+            Sticker "{sticker.name}" · {(sticker.keyframes?.length ?? 0)} keyframe{(sticker.keyframes?.length ?? 0) === 1 ? '' : 's'}
+          </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              className="studio-btn text-xs px-2 py-1"
+              title="Capture this sticker's current look as a keyframe at the playhead"
+              onClick={() => {
+                checkpoint()
+                const id = addStickerKeyframe(sticker.id, playbackTimeMs)
+                if (id) setTimelineSelection([{ kind: 'stickerKeyframe', trackId: sticker.id, id }])
+              }}
+            >
+              + Keyframe
+            </button>
+            <button className="studio-btn text-xs px-2 py-1" onClick={() => setRightTab('stickers')}>
+              Edit Full Properties...
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (item.kind === 'stickerKeyframe') {
+    const sticker = anim.stickers.find((s) => s.id === item.trackId)
+    const kf = sticker?.keyframes?.find((k) => k.id === item.id)
+    if (!sticker || !kf) return null
+    const num = (label: string, value: number, key: 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation' | 'opacity', min: number, max: number, step = 1) => (
+      <div className="flex flex-col gap-1">
+        <span className="studio-label">{label}</span>
+        <input
+          type="number"
+          className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-20"
+          min={min}
+          max={max}
+          step={step}
+          value={Math.round(value * 100) / 100}
+          onChange={(e) => {
+            checkpoint()
+            updateStickerKeyframe(sticker.id, kf.id, { [key]: Math.max(min, Math.min(max, Number(e.target.value))) })
+          }}
+        />
+      </div>
+    )
+    return (
+      <div className="flex flex-col gap-2.5 studio-panel p-2.5">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex flex-col gap-1">
+            <span className="studio-label">Frame</span>
+            <input
+              type="number"
+              step={1}
+              className="bg-studio-panel2 border border-studio-border rounded px-2 py-1 text-sm w-20"
+              min={0}
+              value={msToFrame(kf.timeMs, fps)}
+              onChange={(e) => {
+                checkpoint()
+                setStickerKeyframeTime(sticker.id, kf.id, (Number(e.target.value) / fps) * 1000)
+              }}
+            />
+          </div>
+          {num('X (px)', kf.x, 'x', -240, 240)}
+          {num('Y (px)', kf.y, 'y', -240, 240)}
+          {num('Scale X (%)', kf.scaleX, 'scaleX', 0, 500)}
+          {num('Scale Y (%)', kf.scaleY, 'scaleY', 0, 500)}
+          {num('Rotation (°)', kf.rotation, 'rotation', -360, 360)}
+          {num('Opacity (%)', kf.opacity, 'opacity', 0, 100)}
+          <div className="flex flex-col gap-1">
+            <span className="studio-label">Color</span>
+            <div className="flex items-center gap-1">
+              <input
+                type="color"
+                className="h-7 w-8 bg-studio-panel2 border border-studio-border rounded cursor-pointer"
+                value={kf.tint ?? '#ffffff'}
+                onChange={(e) => {
+                  checkpoint()
+                  updateStickerKeyframe(sticker.id, kf.id, { tint: e.target.value })
+                }}
+              />
+              {kf.tint !== null && (
+                <button
+                  className="text-xs text-studio-muted hover:text-studio-text"
+                  title="Use the sticker's native colours (no tint)"
+                  onClick={() => {
+                    checkpoint()
+                    updateStickerKeyframe(sticker.id, kf.id, { tint: null })
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="studio-label">Easing (out to next)</span>
+            <EasingPicker
+              easing={kf.easing}
+              customBezier={kf.customBezier}
+              onChange={(easing, bezier) => {
+                checkpoint()
+                setStickerKeyframeEasing(sticker.id, kf.id, easing, bezier)
+              }}
+            />
+          </div>
+        </div>
         <div className="flex items-center justify-between text-xs text-studio-muted border-t border-studio-border pt-2">
-          <span>Sticker "{sticker.name}"</span>
-          <button className="studio-btn text-xs px-2 py-1" onClick={() => setRightTab('stickers')}>
-            Edit Full Properties...
+          <span>
+            {sticker.name} keyframe · Frame {msToFrame(kf.timeMs, fps)} · {Math.round(kf.timeMs)}ms
+          </span>
+          <button
+            className="studio-btn text-xs px-2 py-1 hover:text-studio-danger"
+            onClick={() => {
+              checkpoint()
+              deleteStickerKeyframe(sticker.id, kf.id)
+              setTimelineSelection([])
+            }}
+          >
+            Delete Keyframe
           </button>
         </div>
       </div>

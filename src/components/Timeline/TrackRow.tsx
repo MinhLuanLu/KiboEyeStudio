@@ -75,6 +75,9 @@ interface TrackRowProps {
   onKeyframePointerDown?: (trackKind: KeyframeTrackKind, keyframeId: string, timeMs: number, e: React.PointerEvent) => void
   onStickerBodyPointerDown?: (stickerId: string, e: React.PointerEvent) => void
   onStickerHandlePointerDown?: (stickerId: string, edge: 'start' | 'end', e: React.PointerEvent) => void
+  /** Sticker keyframe diamonds (rendered over each sticker's clip). */
+  onStickerKeyframePointerDown?: (stickerId: string, keyframeId: string, timeMs: number, e: React.PointerEvent) => void
+  isStickerKeyframeSelected?: (stickerId: string, keyframeId: string) => boolean
   onMarkerPointerDown?: (markerId: string, e: React.PointerEvent) => void
   onComboClipBodyPointerDown?: (clipId: string, e: React.PointerEvent) => void
   onComboClipHandlePointerDown?: (clipId: string, edge: 'start' | 'end', e: React.PointerEvent) => void
@@ -107,6 +110,8 @@ export function TrackRow({
   onKeyframePointerDown,
   onStickerBodyPointerDown,
   onStickerHandlePointerDown,
+  onStickerKeyframePointerDown,
+  isStickerKeyframeSelected,
   onMarkerPointerDown,
   onComboClipBodyPointerDown,
   onComboClipHandlePointerDown,
@@ -235,6 +240,22 @@ export function TrackRow({
             onEndHandlePointerDown={(e) => onStickerHandlePointerDown?.(s.id, 'end', e)}
           />
         ))}
+
+        {/* Sticker keyframe diamonds, laid over each sticker's clip (absolute timeMs). */}
+        {stickers?.flatMap((s) =>
+          (s.keyframes ?? []).map((k, i) => (
+            <KeyframeDiamond
+              key={`${s.id}:${k.id}`}
+              trackKind="sticker"
+              timeMs={k.timeMs}
+              pxPerMs={pxPerMs}
+              selected={isStickerKeyframeSelected?.(s.id, k.id) ?? false}
+              locked={track.locked || s.locked}
+              onPointerDown={(e) => onStickerKeyframePointerDown?.(s.id, k.id, k.timeMs, e)}
+              title={`${s.name} keyframe ${i + 1} — Frame ${msToFrame(k.timeMs, fps)} · ${Math.round(k.timeMs)}ms`}
+            />
+          ))
+        )}
 
         {markers?.map((m) => (
           <MarkerFlag

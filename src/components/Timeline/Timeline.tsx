@@ -126,6 +126,7 @@ interface DragState {
    * auto-scroll frames) never accumulate and relative spacing between keyframes is preserved. */
   lastMs: number
   singleKeyframe?: { trackKind: KeyframeTrackKind; keyframeId: string }
+  singleStickerKeyframe?: { stickerId: string; keyframeId: string }
   stickerId?: string
   comboClipId?: string
   edge?: 'start' | 'end'
@@ -168,6 +169,7 @@ export function Timeline() {
   const setSnapIntervalMs = useStore((s) => s.setSnapIntervalMs)
   const setAnimationDuration = useStore((s) => s.setAnimationDuration)
   const setKeyframeTime = useStore((s) => s.setKeyframeTime)
+  const setStickerKeyframeTime = useStore((s) => s.setStickerKeyframeTime)
   const moveSelectionByDelta = useStore((s) => s.moveSelectionByDelta)
   const resizeStickerClip = useStore((s) => s.resizeStickerClip)
   const resizeComboClip = useStore((s) => s.resizeComboClip)
@@ -393,6 +395,7 @@ export function Timeline() {
     ;(e.target as Element).setPointerCapture(e.pointerId)
     const excludeKeys = new Set(resultingSelection.map(itemKey))
     const single = resultingSelection.length === 1 && resultingSelection[0].kind === 'keyframe' ? resultingSelection[0] : null
+    const singleSk = resultingSelection.length === 1 && resultingSelection[0].kind === 'stickerKeyframe' ? resultingSelection[0] : null
     const snapCandidates =
       comboMode && comboTimeline
         ? buildSnapCandidates(
@@ -412,6 +415,7 @@ export function Timeline() {
       armed: false,
       lastMs: currentTimeMs,
       singleKeyframe: single ? { trackKind: single.trackId as KeyframeTrackKind, keyframeId: single.id } : undefined,
+      singleStickerKeyframe: singleSk ? { stickerId: singleSk.trackId, keyframeId: singleSk.id } : undefined,
       snapCandidates,
       marqueeOriginX: 0,
       marqueeOriginY: 0
@@ -544,6 +548,8 @@ export function Timeline() {
     } else if (drag.kind === 'move') {
       if (drag.singleKeyframe) {
         setKeyframeTime(drag.singleKeyframe.trackKind, drag.singleKeyframe.keyframeId, newMs)
+      } else if (drag.singleStickerKeyframe) {
+        setStickerKeyframeTime(drag.singleStickerKeyframe.stickerId, drag.singleStickerKeyframe.keyframeId, newMs)
       } else {
         // Apply only the increment since the last committed position (not the total since the
         // grab) so repeated calls never accumulate — this keeps multi-select spacing exact and
@@ -790,6 +796,10 @@ export function Timeline() {
                       const s = anim.stickers.find((st) => st.id === id)!
                       beginResizeDrag(id, edge, edge === 'start' ? s.anim.startTimeMs : s.anim.endTimeMs ?? durationMs, e)
                     }}
+                    onStickerKeyframePointerDown={(stickerId, keyframeId, timeMs, e) =>
+                      beginMoveDrag({ kind: 'stickerKeyframe', trackId: stickerId, id: keyframeId }, timeMs, e)
+                    }
+                    isStickerKeyframeSelected={(stickerId, keyframeId) => isSelected('stickerKeyframe', stickerId, keyframeId)}
                     onToggleVisible={() => setTrackVisible(track.id, !track.visible)}
                     onToggleLocked={() => setTrackLocked(track.id, !track.locked)}
                     onRemove={() => removeTrack(track.id)}

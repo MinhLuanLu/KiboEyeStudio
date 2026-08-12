@@ -2798,6 +2798,9 @@ export const useStore = create<StoreState>()(
           } else if (item.kind === 'sticker') {
             const owner = findStickerOwner(s.project, item.id)
             if (owner) minTime = Math.min(minTime, owner.list[owner.index].anim.startTimeMs)
+          } else if (item.kind === 'stickerKeyframe') {
+            const kf = a.stickers.find((st) => st.id === item.trackId)?.keyframes?.find((k) => k.id === item.id)
+            if (kf) minTime = Math.min(minTime, kf.timeMs)
           } else {
             const marker = a.markers.find((m) => m.id === item.id)
             if (marker) minTime = Math.min(minTime, marker.timeMs)
@@ -2821,11 +2824,15 @@ export const useStore = create<StoreState>()(
             const sticker = owner.list[owner.index]
             sticker.anim.startTimeMs = Math.max(0, sticker.anim.startTimeMs + appliedDelta)
             if (sticker.anim.endTimeMs != null) sticker.anim.endTimeMs = Math.max(sticker.anim.startTimeMs, sticker.anim.endTimeMs + appliedDelta)
+          } else if (item.kind === 'stickerKeyframe') {
+            const kf = a.stickers.find((st) => st.id === item.trackId)?.keyframes?.find((k) => k.id === item.id)
+            if (kf) kf.timeMs = Math.max(0, kf.timeMs + appliedDelta)
           } else {
             const marker = a.markers.find((m) => m.id === item.id)
             if (marker) marker.timeMs = Math.max(0, marker.timeMs + appliedDelta)
           }
         }
+        for (const st of a.stickers) st.keyframes?.sort((x, y) => x.timeMs - y.timeMs)
         a.keyframes.sort((x, y) => x.timeMs - y.timeMs)
         a.leftEyeKeyframes.sort((x, y) => x.timeMs - y.timeMs)
         a.rightEyeKeyframes.sort((x, y) => x.timeMs - y.timeMs)
