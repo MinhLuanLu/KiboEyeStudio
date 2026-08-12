@@ -475,7 +475,9 @@ export function createTrack(idFactory: () => string, kind: TrackKind, order: num
   }
 }
 
-export type SelectionItemKind = 'keyframe' | 'sticker' | 'marker' | 'comboClip'
+// 'stickerKeyframe' reuses the flat {trackId,id} shape: trackId = the OWNING sticker's id, id = the
+// keyframe id (a sticker keyframe needs both to be located). Everything else is as for eye keyframes.
+export type SelectionItemKind = 'keyframe' | 'sticker' | 'marker' | 'comboClip' | 'stickerKeyframe'
 
 /** One uniformly-shaped selectable timeline item, letting the Timeline's selection/clipboard/
  * drag code treat keyframes-on-any-track, sticker clips, markers, and Combination clips

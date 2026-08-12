@@ -22,6 +22,7 @@ import type {
   SelectionItem,
   StickerAsset,
   StickerInstance,
+  StickerKeyframe,
   StickerLayer,
   StickerScope,
   TrackKind,
@@ -76,7 +77,7 @@ import { builtinAnimations } from '@/data/builtinAnimations'
 import { MATERIAL_PRESETS } from '@/lib/uiDesign/materialPresets'
 import { DEFAULT_CUSTOM_THEME_TOKENS } from '@/lib/uiDesign/themes'
 import { builtinExpressions } from '@/data/builtinExpressions'
-import { MIN_SEGMENT_MS, animationDuration, sampleAnimationColors, sampleAnimationEye, sampleTrack } from '@/engine/interpolate'
+import { MIN_SEGMENT_MS, animationDuration, sampleAnimationColors, sampleAnimationEye, sampleStickerKeyframes, sampleTrack } from '@/engine/interpolate'
 import { computeComboTimeline, loopCountForDuration } from '@/engine/comboPlayback'
 import { BUILTIN_STICKER_ASSETS } from '@/renderer/builtinStickers'
 import { STICKER_PRESET_BUNDLES } from '@/data/stickerPresets'
@@ -187,6 +188,7 @@ export type TimelineClipboardEntry =
   | { kind: 'sticker'; data: StickerInstance }
   | { kind: 'marker'; data: Marker }
   | { kind: 'comboClip'; data: AnimationComboClip }
+  | { kind: 'stickerKeyframe'; stickerId: string; data: StickerKeyframe }
 
 // ---------------------------------------------------------------------------------------------
 // Layers panel — six fixed rows (Eye Shape / Upper Eyelid / Lower Eyelid / Pupil / Stickers /
@@ -590,6 +592,14 @@ interface StoreState {
    * panel writes through while a pose keyframe is selected, so changing color affects only that
    * keyframe instead of the whole project. No-op for non-pose tracks (they carry no color). */
   updateTrackKeyframeColors: (keyframeId: string, partial: Partial<EyeColors>) => void
+  // ---- Sticker keyframes (mirror the eye-keyframe actions above; see StickerKeyframe) ----
+  /** Snapshots the sticker's current effective base transform into a new keyframe at `timeMs`
+   * (replacing any keyframe already at that exact time). Returns the keyframe id, or null. */
+  addStickerKeyframe: (stickerId: string, timeMs: number) => string | null
+  updateStickerKeyframe: (stickerId: string, keyframeId: string, partial: Partial<StickerKeyframe>) => void
+  setStickerKeyframeTime: (stickerId: string, keyframeId: string, timeMs: number) => void
+  setStickerKeyframeEasing: (stickerId: string, keyframeId: string, easing: EasingType, customBezier?: [number, number, number, number]) => void
+  deleteStickerKeyframe: (stickerId: string, keyframeId: string) => void
   /** Continuous-drag primitive for a sticker clip's start/end handle. */
   resizeStickerClip: (stickerId: string, edge: 'start' | 'end', newMs: number) => void
   /** Continuous-drag primitive for a Combination clip's edge handle — the Timeline's combo-mode
@@ -1264,6 +1274,10 @@ function collectClipboardEntries(project: Project, a: Animation, selection: Sele
     } else if (item.kind === 'marker') {
       const m = a.markers.find((mk) => mk.id === item.id)
       if (m) entries.push({ kind: 'marker', data: JSON.parse(JSON.stringify(m)) })
+    } else if (item.kind === 'stickerKeyframe') {
+      const sticker = a.stickers.find((st) => st.id === item.trackId)
+      const kf = sticker?.keyframes?.find((k) => k.id === item.id)
+      if (sticker && kf) entries.push({ kind: 'stickerKeyframe', stickerId: sticker.id, data: JSON.parse(JSON.stringify(kf)) })
     }
   }
   return entries
@@ -1318,6 +1332,15 @@ function insertTimelineEntriesAt(a: Animation, entries: TimelineClipboardEntry[]
       a.markers.push(copy)
       a.markers.sort((x, y) => x.timeMs - y.timeMs)
       newSelection.push({ kind: 'marker', trackId: 'marker', id: copy.id })
+    } else if (entry.kind === 'stickerKeyframe') {
+      const sticker = a.stickers.find((st) => st.id === entry.stickerId)
+      if (sticker) {
+        if (!sticker.keyframes) sticker.keyframes = []
+        const copy: StickerKeyframe = { ...entry.data, id: nanoid(10), timeMs: Math.max(0, entry.data.timeMs + delta) }
+        sticker.keyframes.push(copy)
+        sticker.keyframes.sort((x, y) => x.timeMs - y.timeMs)
+        newSelection.push({ kind: 'stickerKeyframe', trackId: sticker.id, id: copy.id })
+      }
     }
   }
   return newSelection
@@ -2556,6 +2579,83 @@ export const useStore = create<StoreState>()(
         s.dirty = true
       }),
 
+    // ---- Sticker keyframes ----
+    addStickerKeyframe: (stickerId, timeMs) => {
+      let resultId: string | null = null
+      set((s) => {
+        const a = activeAnimationOf(s.project, s.activeAnimationId)
+        const sticker = a?.stickers.find((st) => st.id === stickerId)
+        if (!sticker) return
+        if (!sticker.keyframes) sticker.keyframes = []
+        const t = Math.max(0, Math.round(timeMs))
+        // Capture the sticker's CURRENT effective base at this instant — sampled if it already has
+        // keyframes, else its static values — exactly like addKeyframeAt snapshots the live pose.
+        const base = sampleStickerKeyframes(sticker.keyframes, t) ?? {
+          x: sticker.x,
+          y: sticker.y,
+          scaleX: sticker.scaleX,
+          scaleY: sticker.scaleY,
+          rotation: sticker.rotation,
+          opacity: sticker.opacity,
+          tint: sticker.tint
+        }
+        const existing = sticker.keyframes.find((k) => k.timeMs === t)
+        if (existing) {
+          Object.assign(existing, base) // re-snapshot at an exact-time collision rather than stacking
+          resultId = existing.id
+        } else {
+          const kf: StickerKeyframe = { id: nanoid(10), timeMs: t, easing: 'easeInOut', ...base }
+          sticker.keyframes.push(kf)
+          sticker.keyframes.sort((x, y) => x.timeMs - y.timeMs)
+          resultId = kf.id
+        }
+        s.dirty = true
+      })
+      return resultId
+    },
+
+    updateStickerKeyframe: (stickerId, keyframeId, partial) =>
+      set((s) => {
+        const kf = activeAnimationOf(s.project, s.activeAnimationId)
+          ?.stickers.find((st) => st.id === stickerId)
+          ?.keyframes?.find((k) => k.id === keyframeId)
+        if (!kf) return
+        // Time is moved via setStickerKeyframeTime (which clamps against neighbours) — never here.
+        const { timeMs: _ignored, ...rest } = partial
+        Object.assign(kf, rest)
+        s.dirty = true
+      }),
+
+    setStickerKeyframeTime: (stickerId, keyframeId, timeMs) =>
+      set((s) => {
+        const list = activeAnimationOf(s.project, s.activeAnimationId)?.stickers.find((st) => st.id === stickerId)?.keyframes
+        if (!list) return
+        const idx = list.findIndex((k) => k.id === keyframeId)
+        if (idx === -1) return
+        const minT = idx > 0 ? list[idx - 1].timeMs + MIN_SEGMENT_MS : 0
+        const maxT = idx < list.length - 1 ? list[idx + 1].timeMs - MIN_SEGMENT_MS : Infinity
+        list[idx].timeMs = Math.max(minT, Math.min(Math.max(minT, maxT), Math.round(timeMs)))
+        s.dirty = true
+      }),
+
+    setStickerKeyframeEasing: (stickerId, keyframeId, easing, customBezier) =>
+      set((s) => {
+        const kf = activeAnimationOf(s.project, s.activeAnimationId)
+          ?.stickers.find((st) => st.id === stickerId)
+          ?.keyframes?.find((k) => k.id === keyframeId)
+        if (!kf) return
+        kf.easing = easing
+        kf.customBezier = customBezier
+        s.dirty = true
+      }),
+
+    deleteStickerKeyframe: (stickerId, keyframeId) =>
+      set((s) => {
+        const sticker = activeAnimationOf(s.project, s.activeAnimationId)?.stickers.find((st) => st.id === stickerId)
+        if (sticker?.keyframes) sticker.keyframes = sticker.keyframes.filter((k) => k.id !== keyframeId)
+        s.dirty = true
+      }),
+
     resizeStickerClip: (stickerId, edge, newMs) =>
       set((s) => {
         const owner = findStickerOwner(s.project, stickerId)
@@ -3063,6 +3163,9 @@ export const useStore = create<StoreState>()(
             if (owner) owner.list.splice(owner.index, 1)
           } else if (item.kind === 'marker') {
             a.markers = a.markers.filter((m) => m.id !== item.id)
+          } else if (item.kind === 'stickerKeyframe') {
+            const sticker = a.stickers.find((st) => st.id === item.trackId)
+            if (sticker?.keyframes) sticker.keyframes = sticker.keyframes.filter((k) => k.id !== item.id)
           }
         }
         s.timelineSelection = []
