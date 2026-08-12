@@ -172,6 +172,13 @@ export function PreviewCanvas() {
             rightParams = sample.rightParams
             activeAnimation = sample.anim
             timeMs = sample.animationTimeMs
+            // Colour must follow the CURRENT CLIP'S ANIMATION (its own per-keyframe palette), exactly
+            // like Animate mode below — not the live project.colors, which the Colors/Expression
+            // editor mutates. Without this the combo preview left `theme` at project.colors, so
+            // editing an expression's colour bled into the whole combination. Falls back to the base
+            // palette for any keyframe with no colour of its own, matching Animate mode.
+            theme = sampleAnimationColors(sample.anim, sample.animationTimeMs, state.project.colors)
+            rightTheme = theme
             isAnimateScrub = true
           }
         }
