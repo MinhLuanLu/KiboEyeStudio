@@ -302,6 +302,79 @@ export function drawEye(
   traceEyeBoundary()
   ctx.clip()
 
+  // "Disable Eyelid": clip the eye CONTENTS to the region the eyelids leave EXPOSED, so the
+  // covered part of the eye stays pure background. Without this, the sclera is drawn all the way
+  // to the eye's silhouette edge and the lid then covers it — but Canvas anti-aliases that shared
+  // edge, leaving a ~1px light outline hugging the covered top/bottom arc of the eye (the seam the
+  // border/glow suppression can't remove, because it's the eye's own edge). Clipping the contents
+  // to just below the upper lid / above the lower lid means no sclera reaches the covered edge, so
+  // there is nothing there to anti-alias. Studio-only: the ESP32 renders flat pixels with no AA,
+  // so its covered region is already clean (see cppExport.ts). Uses the SAME curve math as the
+  // eyelid fill (drawEyelid below), with the tilt shear applied per-point (y += slope*x) rather
+  // than via ctx.transform — a transform would need a save/restore, and restore would drop the
+  // clip along with it.
+  if (disableEyelid) {
+    const clipToExposedSide = (
+      sign: 1 | -1,
+      coveragePct: number,
+      curvaturePct: number,
+      tiltDeg: number,
+      shape: EyelidCurveShape,
+      centerYPct: number,
+      stretchYPct: number
+    ): void => {
+      const halfW = width / 2
+      if (coveragePct <= 0 || halfW < 0.01) return
+      const samples = Math.max(32, Math.ceil(width))
+      const coverage = (coveragePct / 100) * height
+      const yBase = sign === 1 ? -height / 2 + coverage : height / 2 - coverage
+      const curveOffset =
+        (curvaturePct / 100) * height * 0.5 * (Math.max(0, Math.min(200, stretchYPct)) / 100)
+      const slope = Math.tan((tiltDeg * Math.PI) / 180)
+      const centerYOffset = (Math.max(-100, Math.min(100, centerYPct)) / 100) * height * 0.25
+      const y0 = yBase + sign * centerYOffset
+      const big = (width + height) * 2
+      const exposedFarY = sign === 1 ? big : -big
+      const endLeftY = y0 + sign * curveOffset * eyelidTaper(-1, shape) + slope * -halfW
+      const endRightY = y0 + sign * curveOffset * eyelidTaper(1, shape) + slope * halfW
+      ctx.beginPath()
+      for (let i = 0; i <= samples; i++) {
+        const x = -halfW + (2 * halfW * i) / samples
+        const y = y0 + sign * curveOffset * eyelidTaper(x / halfW, shape) + slope * x
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      }
+      ctx.lineTo(big, endRightY)
+      ctx.lineTo(big, exposedFarY)
+      ctx.lineTo(-big, exposedFarY)
+      ctx.lineTo(-big, endLeftY)
+      ctx.closePath()
+      ctx.clip()
+    }
+    if (upperEyelidVisible && upperEyelid > 0) {
+      clipToExposedSide(1, upperEyelid, upperEyelidCurvature, upperEyelidTilt, {
+        leftRoundness: upperEyelidLeftRoundness,
+        rightRoundness: upperEyelidRightRoundness,
+        width: upperEyelidStretchX,
+        centerDepth: upperEyelidCenterDepth,
+        centerX: upperEyelidSkew,
+        smoothness: upperEyelidSmoothness,
+        tension: upperEyelidTension
+      }, upperEyelidCenterY, upperEyelidStretchY)
+    }
+    if (lowerEyelidVisible && lowerEyelid > 0) {
+      clipToExposedSide(-1, lowerEyelid, lowerEyelidCurvature, lowerEyelidTilt, {
+        leftRoundness: lowerEyelidLeftRoundness,
+        rightRoundness: lowerEyelidRightRoundness,
+        width: lowerEyelidStretchX,
+        centerDepth: lowerEyelidCenterDepth,
+        centerX: lowerEyelidSkew,
+        smoothness: lowerEyelidSmoothness,
+        tension: lowerEyelidTension
+      }, lowerEyelidCenterY, lowerEyelidStretchY)
+    }
+  }
+
   // Sclera — soft vertical gradient derived from the single "sclera" color for a glassy look.
   const grad = ctx.createLinearGradient(0, -height / 2, 0, height / 2)
   grad.addColorStop(0, shadeColor(theme.sclera, 6))
