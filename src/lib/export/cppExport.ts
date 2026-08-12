@@ -27,7 +27,7 @@ import {
 import { hexToRgb565, mixColors, shadeColor } from '@/lib/color'
 import { PUPIL_SHAPE_POLYGONS } from '@/renderer/pupilShapes'
 import { EYE_SHAPE_POLYGONS } from '@/renderer/eyeShapes'
-import { sampleAnimationEye } from '@/engine/interpolate'
+import { sampleAnimationEye, sampleAnimationColors } from '@/engine/interpolate'
 
 const EASING_ENUM: Record<EasingType, string> = {
   linear: 'EYE_EASE_LINEAR',
@@ -284,6 +284,22 @@ function bakeAnimationFrames(anim: Animation): BakedFrame[] {
   })
 }
 
+/** Bakes one EyeColors per baked frame (same breakpoints as bakeAnimationFrames), sampling the
+ * pose track's per-keyframe colours at each breakpoint via sampleAnimationColors — the exact
+ * palette the studio preview shows at that instant. Returns `null` when NO pose keyframe carries
+ * its own colours (sampleAnimationColors' own fast-path): the animation then exports with no
+ * colour track and the runtime keeps whatever palette is already loaded (the pre-existing
+ * "animation inherits the active expression's colours" behaviour), so animations that never
+ * touched per-keyframe colour produce byte-identical output to before this feature. When it IS
+ * returned, colours[i] pairs with frame i, and the runtime lerps between adjacent entries using
+ * the same per-frame easing the shape uses — so a Combination plays the animation with exactly
+ * the keyframe colours from the studio, not the source expression's original palette. `base` is
+ * the project's shared palette (Project.colors), the same fallback the preview/Animate mode use. */
+function bakeAnimationColors(anim: Animation, base: EyeColors): EyeColors[] | null {
+  if (!anim.keyframes.some((k) => k.colors)) return null
+  return collectAnimationBreakpoints(anim).map((t) => sampleAnimationColors(anim, t, base))
+}
+
 // Emits the baked keyframe array(s) plus count/loop flag (for anyone who wants direct/
 // low-level access), this animation's own sticker array (visible only while it's playing —
 // see the Stickers comment above), AND a single `EyeAnimation` wrapper bundling all of it —
@@ -302,11 +318,17 @@ function exportAnimation(
   customShapes: CustomPupilShape[],
   customEyeShapes: CustomEyeShape[],
   assetsById: Map<string, StickerAsset>,
-  rasterIndexByAssetId: Map<string, number>
+  rasterIndexByAssetId: Map<string, number>,
+  baseColors: EyeColors,
+  backgroundColor: string
 ): string {
   const baked = bakeAnimationFrames(anim)
   const diverges = baked.some((f) => JSON.stringify(f.leftParams) !== JSON.stringify(f.rightParams))
   const stickers = anim.stickers.filter((s) => s.visible)
+  // Per-frame colour track (see bakeAnimationColors) — one EyeColorSet per baked frame, so the
+  // firmware animates this animation's own keyframe colours instead of drawing with a single
+  // fixed palette. nullptr (no track) preserves the old "inherit the loaded palette" behaviour.
+  const bakedColors = bakeAnimationColors(anim, baseColors)
 
   const lines = [
     `// ${anim.name}${anim.loop ? ' (loops)' : ' (plays once)'}`,
@@ -323,11 +345,20 @@ function exportAnimation(
       `};`
     )
   }
+  let colorsIdent = 'nullptr'
+  if (bakedColors) {
+    colorsIdent = `Anim_${ident}_colors`
+    lines.push(
+      `const EyeColorSet ${colorsIdent}[] PROGMEM = {`,
+      bakedColors.map((c) => colorSetLiteral(c, backgroundColor)).join(',\n'),
+      `};`
+    )
+  }
   lines.push(
     `const uint16_t Anim_${ident}_count = ${baked.length};`,
     `const bool Anim_${ident}_loop = ${anim.loop ? 'true' : 'false'};`,
     ...stickerArrayLiteral(stickers, `Anim_${ident}_Stickers`, assetsById, rasterIndexByAssetId),
-    `const EyeAnimation Anim_${ident} = { Anim_${ident}_frames, Anim_${ident}_count, Anim_${ident}_loop, ${framesRightIdent}, Anim_${ident}_Stickers, Anim_${ident}_Stickers_Count };`
+    `const EyeAnimation Anim_${ident} = { Anim_${ident}_frames, Anim_${ident}_count, Anim_${ident}_loop, ${framesRightIdent}, Anim_${ident}_Stickers, Anim_${ident}_Stickers_Count, ${colorsIdent} };`
   )
   return lines.join('\n')
 }
@@ -2717,6 +2748,36 @@ inline void eyesDrawStickers(T& gfx, const StickerDef* stickers, uint8_t count,
   }
 }
 
+// Interpolates one EyeColorSet toward another — the runtime counterpart of the studio's
+// lerpColors()/sampleAnimationColors(). Every colour field blends in RGB565 (eyesBlendRgb565,
+// the same channel lerp the sticker-tint and glow paths use); the pixel-width/intensity fields
+// lerp linearly. The precomputed gradient endpoints (scleraTop/…/highlightBlend) blend directly
+// rather than being recomputed from lerped raw colours — shade()/mix() are near-linear, so the
+// two are visually identical after RGB565 quantization, and this keeps zero per-frame shading
+// cost on device. Used to animate an EyeAnimation's per-frame colour track (see eyesPlayAnimation
+// Pair()/eyesPlayCombo()).
+inline EyeColorSet eyesLerpColorSet(const EyeColorSet& a, const EyeColorSet& b, float t) {
+  if (t <= 0.0f) return a;
+  if (t >= 1.0f) return b;
+  EyeColorSet r;
+  r.sclera = eyesBlendRgb565(a.sclera, b.sclera, t);
+  r.iris = eyesBlendRgb565(a.iris, b.iris, t);
+  r.pupil = eyesBlendRgb565(a.pupil, b.pupil, t);
+  r.highlight = eyesBlendRgb565(a.highlight, b.highlight, t);
+  r.shadow = eyesBlendRgb565(a.shadow, b.shadow, t);
+  r.glow = eyesBlendRgb565(a.glow, b.glow, t);
+  r.border = eyesBlendRgb565(a.border, b.border, t);
+  r.borderWidth = (uint8_t)roundf(a.borderWidth + (b.borderWidth - a.borderWidth) * t);
+  r.shadowIntensity = (uint8_t)roundf(a.shadowIntensity + (b.shadowIntensity - a.shadowIntensity) * t);
+  r.glowIntensity = (uint8_t)roundf(a.glowIntensity + (b.glowIntensity - a.glowIntensity) * t);
+  r.scleraTop = eyesBlendRgb565(a.scleraTop, b.scleraTop, t);
+  r.scleraBottom = eyesBlendRgb565(a.scleraBottom, b.scleraBottom, t);
+  r.irisLight = eyesBlendRgb565(a.irisLight, b.irisLight, t);
+  r.irisDark = eyesBlendRgb565(a.irisDark, b.irisDark, t);
+  r.highlightBlend = eyesBlendRgb565(a.highlightBlend, b.highlightBlend, t);
+  return r;
+}
+
 // ---- Playback — call every loop() with the same (frames, count, loop, startMillis, ----
 // frameIndex) variables; advances state in-place and fills \`outLive\`. Returns true while
 // still playing, false once a non-looping animation has finished.
@@ -2777,12 +2838,14 @@ inline bool eyesPlayAnimation(const EyeAnimation& anim, unsigned long& startMill
 // eyesPlayAnimation() above) so that existing single-eye call sites/behavior stay byte-for-byte
 // unchanged — this is purely additive.
 inline bool eyesPlayAnimationPair(const EyeFrame framesLeft[], const EyeFrame framesRight[], uint16_t count, bool loop,
-                                    unsigned long& startMillis, uint16_t& frameIndex, LiveEye& outLeft, LiveEye& outRight) {
+                                    unsigned long& startMillis, uint16_t& frameIndex, LiveEye& outLeft, LiveEye& outRight,
+                                    const EyeColorSet* colorFrames = nullptr, EyeColorSet* outColor = nullptr) {
   if (count == 0) return false;
   const EyeFrame* right = framesRight ? framesRight : framesLeft;
   if (count == 1) {
     outLeft = eyesLerpFrame(framesLeft[0], framesLeft[0], 0);
     outRight = eyesLerpFrame(right[0], right[0], 0);
+    if (colorFrames && outColor) *outColor = colorFrames[0];
     frameIndex = 0;
     return false;
   }
@@ -2805,6 +2868,9 @@ inline bool eyesPlayAnimationPair(const EyeFrame framesLeft[], const EyeFrame fr
       float eased = eyesEase(t, framesLeft[i].easing, framesLeft[i].bezierX1, framesLeft[i].bezierY1, framesLeft[i].bezierX2, framesLeft[i].bezierY2);
       outLeft = eyesLerpFrame(framesLeft[i], framesLeft[next], eased);
       outRight = eyesLerpFrame(right[i], right[next], eased);
+      // Colour track (if any) advances on the exact same segment + eased t as the pose, so the
+      // palette transitions frame-for-frame with the shape — matching sampleAnimationColors().
+      if (colorFrames && outColor) *outColor = eyesLerpColorSet(colorFrames[i], colorFrames[next], eased);
       frameIndex = i;
       return !finished;
     }
@@ -2813,15 +2879,17 @@ inline bool eyesPlayAnimationPair(const EyeFrame framesLeft[], const EyeFrame fr
 
   if (loop) {
     startMillis += acc;
-    return eyesPlayAnimationPair(framesLeft, framesRight, count, loop, startMillis, frameIndex, outLeft, outRight);
+    return eyesPlayAnimationPair(framesLeft, framesRight, count, loop, startMillis, frameIndex, outLeft, outRight, colorFrames, outColor);
   }
   outLeft = eyesLerpFrame(framesLeft[count - 1], framesLeft[count - 1], 0);
   outRight = eyesLerpFrame(right[count - 1], right[count - 1], 0);
+  if (colorFrames && outColor) *outColor = colorFrames[count - 1];
   return false;
 }
 
-inline bool eyesPlayAnimationPair(const EyeAnimation& anim, unsigned long& startMillis, uint16_t& frameIndex, LiveEye& outLeft, LiveEye& outRight) {
-  return eyesPlayAnimationPair(anim.frames, anim.framesRight, anim.count, anim.loop, startMillis, frameIndex, outLeft, outRight);
+inline bool eyesPlayAnimationPair(const EyeAnimation& anim, unsigned long& startMillis, uint16_t& frameIndex, LiveEye& outLeft, LiveEye& outRight,
+                                    EyeColorSet* outColor = nullptr) {
+  return eyesPlayAnimationPair(anim.frames, anim.framesRight, anim.count, anim.loop, startMillis, frameIndex, outLeft, outRight, anim.colors, outColor);
 }
 
 // ---- Easy player: SetExpression() / PlayAnimation() / UpdateEyes() -------------------
@@ -3055,7 +3123,8 @@ inline void eyesBlendTowardClipStart(const AnimationComboClip& clip, float t, Li
 // combo-clip stickers with the clip's own time (see UpdateEyes()).
 inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, bool loop, LiveEye& outLeft, LiveEye& outRight,
                            const StickerDef** outStickers = nullptr, uint8_t* outStickerCount = nullptr,
-                           unsigned long* outStickerElapsedMs = nullptr) {
+                           unsigned long* outStickerElapsedMs = nullptr,
+                           EyeColorSet* outColor = nullptr, bool* outHasColor = nullptr) {
   if (combo.count == 0) return false;
   unsigned long totalDuration = eyesComboDurationMs(combo);
   if (totalDuration == 0) return false;
@@ -3089,7 +3158,11 @@ inline bool eyesPlayCombo(const AnimationCombo& combo, unsigned long elapsedMs, 
       if (outStickerCount) *outStickerCount = clip.animation->stickerCount;
       if (outStickerElapsedMs) *outStickerElapsedMs = animElapsed;
       uint16_t frameIndex = 0;
-      bool stillPlaying = eyesPlayAnimationPair(active, localStartMillis, frameIndex, outLeft, outRight);
+      // Report this clip's animation colour (interpolated at its own playhead) so the combo shows
+      // the animation's keyframe colours, exactly like the studio's sampleCombo()+sampleAnimation
+      // Colors(). Colour snaps at the clip boundary (no colour crossfade), matching the preview.
+      if (outHasColor) *outHasColor = (active.colors != nullptr);
+      bool stillPlaying = eyesPlayAnimationPair(active, localStartMillis, frameIndex, outLeft, outRight, outColor);
 
       // Crossfade into the next clip's own first frame during this clip's trailing
       // transitionMs window (after its play duration + endDelayMs have elapsed) — previously
@@ -3285,11 +3358,20 @@ inline LiveEye UpdateEyes() {
     const StickerDef* clipStickers = nullptr;
     uint8_t clipStickerCount = 0;
     unsigned long clipStickerMs = 0;
+    EyeColorSet comboColor;
+    bool comboHasColor = false;
     bool stillPlaying = eyesPlayCombo(*eyesPlayer.combo, elapsed, eyesPlayer.comboLoop, eyesPlayer.live, eyesPlayer.liveRight,
-                                      &clipStickers, &clipStickerCount, &clipStickerMs);
+                                      &clipStickers, &clipStickerCount, &clipStickerMs, &comboColor, &comboHasColor);
     eyesPlayer.activeStickers = clipStickers;
     eyesPlayer.activeStickerCount = clipStickerCount;
     eyesPlayer.activeStickerElapsedMs = clipStickerMs;
+    // The active clip's animation carries its own keyframe colours -> use them, so the combo looks
+    // like the studio preview. When it doesn't, keep the current palette (a colourless animation
+    // still inherits whatever expression/palette was loaded, exactly as before this feature).
+    if (comboHasColor) {
+      eyesPlayer.colorsLeft = comboColor;
+      eyesPlayer.colorsRight = comboColor;
+    }
     if (!eyesPlayer.comboLoop) {
       unsigned long totalDuration = eyesComboDurationMs(*eyesPlayer.combo);
       if (elapsed >= totalDuration) {
@@ -3311,7 +3393,14 @@ inline LiveEye UpdateEyes() {
     }
   } else if (eyesPlayer.playingAnimation) {
     unsigned long sequenceElapsed = millis() - eyesPlayer.animStart;
-    bool stillPlaying = eyesPlayAnimationPair(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live, eyesPlayer.liveRight);
+    EyeColorSet animColor;
+    bool stillPlaying = eyesPlayAnimationPair(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live, eyesPlayer.liveRight, &animColor);
+    // Animate this animation's own per-keyframe palette (nullptr colour track -> keep the loaded
+    // palette, preserving the pre-feature "inherit the expression's colours" behaviour).
+    if (eyesPlayer.animation.colors != nullptr) {
+      eyesPlayer.colorsLeft = animColor;
+      eyesPlayer.colorsRight = animColor;
+    }
     // Public completion flag (AnimationFinished()): a non-looping animation is finished once
     // playback ends and it holds the final frame; a looping animation never finishes. Set before
     // the sequence-advance below so a mid-sequence hand-off (which restarts via eyesStartAnimation,
@@ -4513,6 +4602,13 @@ struct EyeAnimation {
   const EyeFrame* framesRight;
   const StickerDef* stickers;
   uint8_t stickerCount;
+  // Per-frame colour palette (one EyeColorSet per frame, same count), or nullptr when this
+  // animation authored no per-keyframe colours. Non-null makes playback animate the palette
+  // itself (sclera/iris/pupil/border/eyelid/highlight/…) in lockstep with the shape, so a
+  // Combination shows the animation's own keyframe colours instead of the loaded expression's —
+  // see UpdateEyes()/eyesPlayCombo(). Shared across both eyes (per-keyframe colour is a whole-eye
+  // concern in the studio), so there is no colorsRight counterpart.
+  const EyeColorSet* colors;
 };
 
 // A single clip inside a reusable animation combination. It references an existing
@@ -4558,7 +4654,7 @@ ${PLAYER_CODE}
 
 // ---- Animations -----------------------------------------------------------
 
-${project.animations.map((a) => exportAnimation(a, animIdents.get(a.id)!, project.customPupilShapes, project.customEyeShapes, stickersExport.assetsById, stickersExport.rasterIndexByAssetId)).join('\n\n')}
+${project.animations.map((a) => exportAnimation(a, animIdents.get(a.id)!, project.customPupilShapes, project.customEyeShapes, stickersExport.assetsById, stickersExport.rasterIndexByAssetId, project.colors, project.display.backgroundColor)).join('\n\n')}
 
 ${exportAnimationCombos(project)}
 
