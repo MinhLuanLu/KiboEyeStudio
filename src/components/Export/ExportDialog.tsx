@@ -3,12 +3,14 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useStore, getActiveAnimation } from '@/state/store'
 import { projectToJson, animationToJson } from '@/lib/export/jsonExport'
 import { generateCppHeader } from '@/lib/export/cppExport'
+import { generateEyeControllerHeader } from '@/lib/export/eyeControllerExport'
+import { createZip } from '@/lib/export/zip'
 import { validateStickerExport, type StickerValidationResult } from '@/lib/export/validateStickers'
 import { validatePupilShapeExport, type PupilShapeValidationResult } from '@/lib/export/validatePupilShapes'
 import { validateTimelineTiming, type TimelineTimingValidationResult } from '@/lib/export/validateTimelineTiming'
 import { validateEyeRotationExport, type EyeRotationValidationResult } from '@/lib/export/validateEyeRotation'
 import { parseAnimationJson } from '@/lib/import/jsonImport'
-import { exportFile, importJsonDialog } from '@/state/persistence'
+import { exportFile, exportBinaryFile, importJsonDialog } from '@/state/persistence'
 
 type Tab = 'json-project' | 'json-animation' | 'cpp'
 type ValidationStatus = 'passed' | 'warning' | 'failed'
@@ -141,12 +143,30 @@ export function ExportDialog() {
 
   const [tab, setTab] = useState<Tab>('json-project')
   const [status, setStatus] = useState<string | null>(null)
+  // Default-on "extra file" option for the C++ export: bundle the eyeController.h arbitration
+  // layer next to eyes.h (see generateEyeControllerHeader). When on, the C++ export saves a zip
+  // of both files (eyes.h + eyeController.h) so the controller's `#include "eyes.h"` resolves;
+  // when off, it saves the single eyes.h exactly as before.
+  const [includeController, setIncludeController] = useState(true)
 
   if (!open) return null
 
   const content = tab === 'json-project' ? projectToJson(project) : tab === 'json-animation' ? (anim ? animationToJson(anim) : '// no animation selected') : generateCppHeader(project)
 
   const handleExport = async () => {
+    // C++ export with the controller option on -> zip both files. The eyes header is named
+    // exactly "eyes.h" inside the zip (not "<name>_eyes.h") so eyeController.h's own
+    // `#include "eyes.h"` resolves against it without editing.
+    if (tab === 'cpp' && includeController) {
+      const zipName = `${project.name.replace(/\s+/g, '_')}_eyes.zip`
+      const zipBytes = createZip([
+        { name: 'eyes.h', content },
+        { name: 'eyeController.h', content: generateEyeControllerHeader() }
+      ])
+      const ok = await exportBinaryFile(zipName, zipBytes, ['zip'])
+      setStatus(ok ? `Exported ${zipName} (eyes.h + eyeController.h)` : null)
+      return
+    }
     const filename = tab === 'cpp' ? `${project.name.replace(/\s+/g, '_')}_eyes.h` : tab === 'json-animation' ? `${(anim?.name ?? 'animation').replace(/\s+/g, '_')}.json` : `${project.name.replace(/\s+/g, '_')}.json`
     const ext = tab === 'cpp' ? ['h'] : ['json']
     const ok = await exportFile(filename, content, ext)
@@ -210,6 +230,16 @@ export function ExportDialog() {
           {tab === 'cpp' && <TimelineTimingValidationPanel project={project} />}
           {tab === 'cpp' && <PupilShapeValidationPanel project={project} />}
           {tab === 'cpp' && <StickerValidationPanel project={project} />}
+
+          {tab === 'cpp' && (
+            <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+              <input type="checkbox" className="mt-0.5" checked={includeController} onChange={(e) => setIncludeController(e.target.checked)} />
+              <span>
+                <span className="font-medium">Generate eye controller</span>
+                <span className="text-studio-muted"> — also emit <code>eyeController.h</code>, a priority-based arbitration layer over <code>eyes.h</code> for juggling multiple input sources (sensors, buttons, events). Saves both files as a <code>.zip</code>.</span>
+              </span>
+            </label>
+          )}
 
           <pre className="flex-1 overflow-auto p-3 text-xs font-mono bg-studio-bg m-3 rounded-md border border-studio-border whitespace-pre">
             {content}
