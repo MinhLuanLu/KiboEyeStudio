@@ -2023,7 +2023,8 @@ template <typename T>
 inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius, bool isUpper,
                             float coveragePct, float tiltDeg, float curvaturePct, float leftRoundnessPct, float rightRoundnessPct,
                             float stretchXPct, float stretchYPct, float skewPct, float centerDepthPct, float centerYPct,
-                            float smoothnessPct, float tensionPct, const EyeShapeCtx& eyeShape, float rotRad, uint16_t color) {
+                            float smoothnessPct, float tensionPct, const EyeShapeCtx& eyeShape, float rotRad, uint16_t color,
+                            bool hardCut = false) {
   if (coveragePct <= 0) return;
   float hx = w / 2.0f;
   float hy = h / 2.0f;
@@ -2050,6 +2051,20 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
 
   if (rotRad == 0.0f) {
     int16_t halfWi = (int16_t)ceilf(hx);
+    int16_t halfHi = (int16_t)ceilf(hy);
+    // "Disable Eyelid" over-cover. color here is the display background, and the covered part of
+    // the eye must read as pure background. But the sclera (eyesFillEyeSclera) is rasterised by
+    // outward-rounded HORIZONTAL scanlines (floor(loX)..ceil(hiX)), whereas this lid fill sweeps
+    // VERTICAL columns bounded to the silhouette — the two disagree by up to 1px at the edge, so a
+    // thin sclera rim survives on real hardware (the studio preview instead CLIPS the contents to
+    // the exposed region, so it never had this). Fix: when hardCut, over-cover by 1px — fill each
+    // covered column from ABOVE the eye's top (upper) / BELOW its bottom (lower) instead of the
+    // silhouette edge, and paint columns just outside the silhouette down to their raw cutoff too.
+    // Every extra pixel is background-over-background (invisible); yBottom (upper)/yTop (lower)
+    // stay pinned to the cutoff so the EXPOSED sclera is never touched. Restricted to the analytic
+    // convex shapes (points == null: the default rounded-rect / circle / oval, where a column has
+    // one span) — polygon shapes keep the exact original fill.
+    bool overCover = hardCut && (eyeShape.points == nullptr);
     float eyeLoYs[EYE_MAX_SHAPE_SPANS], eyeHiYs[EYE_MAX_SHAPE_SPANS];
     for (int16_t dx = -halfWi; dx <= halfWi; dx++) {
       uint8_t n;
@@ -2063,7 +2078,6 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
           eyeHiYs[0] = eyeHiY;
         }
       }
-      if (n == 0) continue; // this column falls entirely outside the eye's own silhouette
 
       float u = hx > 0.01f ? (float)dx / hx : 0.0f;
       if (u > 1.0f) u = 1.0f;
@@ -2071,6 +2085,25 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
       float taper = eyesEyelidTaper(u, leftRoundFrac, rightRoundFrac, centerDepthFrac, skewFrac, widthFrac, smoothFrac, tensionFrac);
       float yCutoff = yBase + slope * (float)dx + offset * taper;
       int16_t worldX = cx + dx;
+
+      if (n == 0) {
+        // Column outside the silhouette. Normally skipped; under over-cover, still paint the
+        // background band on the covered side down to the raw cutoff, so a scanline-rounded sclera
+        // overhang pixel at this edge column is hidden. Bounded to the eye's own bounding box.
+        if (!overCover) continue;
+        int16_t cut = cy + (int16_t)roundf(yCutoff);
+        if (isUpper) {
+          int16_t yTop = cy - halfHi - 1;
+          int16_t yBottom = cut > cy + halfHi + 1 ? (int16_t)(cy + halfHi + 1) : cut;
+          if (yBottom >= yTop) gfx.drawFastVLine(worldX, yTop, yBottom - yTop + 1, color);
+        } else {
+          int16_t yTop = cut < cy - halfHi - 1 ? (int16_t)(cy - halfHi - 1) : cut;
+          int16_t yBottom = cy + halfHi + 1;
+          if (yBottom >= yTop) gfx.drawFastVLine(worldX, yTop, yBottom - yTop + 1, color);
+        }
+        continue;
+      }
+
       // Applied per span — for a non-convex eye shape (Crescent, Star, Bean, Cloud) a column
       // can cross the silhouette more than once, and the lid's cutoff line only actually
       // intersects whichever span it falls inside; a span entirely on the covered/uncovered
@@ -2086,11 +2119,11 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
         if (clampedCutoff < eyeLoY) clampedCutoff = eyeLoY;
         int16_t yTop, yBottom;
         if (isUpper) {
-          yTop = cy + (int16_t)floorf(eyeLoY);
+          yTop = overCover ? (int16_t)(cy - halfHi - 1) : (int16_t)(cy + (int16_t)floorf(eyeLoY));
           yBottom = cy + (int16_t)roundf(clampedCutoff);
         } else {
           yTop = cy + (int16_t)roundf(clampedCutoff);
-          yBottom = cy + (int16_t)ceilf(eyeHiY);
+          yBottom = overCover ? (int16_t)(cy + halfHi + 1) : (int16_t)(cy + (int16_t)ceilf(eyeHiY));
         }
         if (yBottom < yTop) continue;
         gfx.drawFastVLine(worldX, yTop, yBottom - yTop + 1, color);
@@ -3790,12 +3823,12 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   if (e.upperEyelidVisible) {
     eyesFillEyelid(gfx, cx, cy, w, h, radius, true, e.upperEyelid, e.upperEyelidTilt, e.upperEyelidCurvature,
                    e.upperEyelidLeftRoundness, e.upperEyelidRightRoundness, e.upperEyelidStretchX, e.upperEyelidStretchY, e.upperEyelidSkew,
-                   e.upperEyelidCenterDepth, e.upperEyelidCenterY, e.upperEyelidSmoothness, e.upperEyelidTension, eyeShape, rotRad, bgColor);
+                   e.upperEyelidCenterDepth, e.upperEyelidCenterY, e.upperEyelidSmoothness, e.upperEyelidTension, eyeShape, rotRad, bgColor, e.disableEyelid);
   }
   if (e.lowerEyelidVisible) {
     eyesFillEyelid(gfx, cx, cy, w, h, radius, false, e.lowerEyelid, e.lowerEyelidTilt, e.lowerEyelidCurvature,
                    e.lowerEyelidLeftRoundness, e.lowerEyelidRightRoundness, e.lowerEyelidStretchX, e.lowerEyelidStretchY, e.lowerEyelidSkew,
-                   e.lowerEyelidCenterDepth, e.lowerEyelidCenterY, e.lowerEyelidSmoothness, e.lowerEyelidTension, eyeShape, rotRad, bgColor);
+                   e.lowerEyelidCenterDepth, e.lowerEyelidCenterY, e.lowerEyelidSmoothness, e.lowerEyelidTension, eyeShape, rotRad, bgColor, e.disableEyelid);
   }
 }
 
