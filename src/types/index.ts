@@ -909,6 +909,9 @@ export interface StickerKeyframe {
   customBezier?: [number, number, number, number]
   x: number
   y: number
+  /** Base size in px (independent per keyframe, interpolated) — the rendered size is width×scale. */
+  width: number
+  height: number
   scaleX: number
   scaleY: number
   rotation: number

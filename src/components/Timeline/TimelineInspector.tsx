@@ -443,7 +443,7 @@ export function TimelineInspector() {
     const sticker = anim.stickers.find((s) => s.id === item.trackId)
     const kf = sticker?.keyframes?.find((k) => k.id === item.id)
     if (!sticker || !kf) return null
-    const num = (label: string, value: number, key: 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation' | 'opacity', min: number, max: number, step = 1) => (
+    const num = (label: string, value: number, key: 'x' | 'y' | 'width' | 'height' | 'scaleX' | 'scaleY' | 'rotation' | 'opacity', min: number, max: number, step = 1) => (
       <div className="flex flex-col gap-1">
         <span className="studio-label">{label}</span>
         <input
@@ -479,6 +479,8 @@ export function TimelineInspector() {
           </div>
           {num('X (px)', kf.x, 'x', -240, 240)}
           {num('Y (px)', kf.y, 'y', -240, 240)}
+          {num('Width (px)', kf.width, 'width', 0, 240)}
+          {num('Height (px)', kf.height, 'height', 0, 240)}
           {num('Scale X (%)', kf.scaleX, 'scaleX', 0, 500)}
           {num('Scale Y (%)', kf.scaleY, 'scaleY', 0, 500)}
           {num('Rotation (°)', kf.rotation, 'rotation', -360, 360)}

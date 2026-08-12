@@ -271,6 +271,8 @@ export function sampleAnimation(anim: Animation, timeMs: number): SampleResult {
 export interface StickerSample {
   x: number
   y: number
+  width: number
+  height: number
   scaleX: number
   scaleY: number
   rotation: number
@@ -286,7 +288,7 @@ function lerpTint(a: string | null, b: string | null, t: number): string | null 
   return mixColors(a, b, t)
 }
 function stickerKeyframeSample(kf: StickerKeyframe): StickerSample {
-  return { x: kf.x, y: kf.y, scaleX: kf.scaleX, scaleY: kf.scaleY, rotation: kf.rotation, opacity: kf.opacity, tint: kf.tint }
+  return { x: kf.x, y: kf.y, width: kf.width, height: kf.height, scaleX: kf.scaleX, scaleY: kf.scaleY, rotation: kf.rotation, opacity: kf.opacity, tint: kf.tint }
 }
 
 /**
@@ -311,6 +313,8 @@ export function sampleStickerKeyframes(kfs: StickerKeyframe[] | undefined, animM
       return {
         x: numLerp(from.x, to.x, eased),
         y: numLerp(from.y, to.y, eased),
+        width: numLerp(from.width, to.width, eased),
+        height: numLerp(from.height, to.height, eased),
         scaleX: numLerp(from.scaleX, to.scaleX, eased),
         scaleY: numLerp(from.scaleY, to.scaleY, eased),
         rotation: numLerp(from.rotation, to.rotation, eased),

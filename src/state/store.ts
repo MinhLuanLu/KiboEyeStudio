@@ -2593,6 +2593,8 @@ export const useStore = create<StoreState>()(
         const base = sampleStickerKeyframes(sticker.keyframes, t) ?? {
           x: sticker.x,
           y: sticker.y,
+          width: sticker.width,
+          height: sticker.height,
           scaleX: sticker.scaleX,
           scaleY: sticker.scaleY,
           rotation: sticker.rotation,

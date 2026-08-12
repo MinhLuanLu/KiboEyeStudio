@@ -108,6 +108,8 @@ export function drawSticker(ctx: CanvasRenderingContext2D, instance: StickerInst
   const base = sampleStickerKeyframes(instance.keyframes, elapsedMs)
   const baseX = base?.x ?? instance.x
   const baseY = base?.y ?? instance.y
+  const baseWidth = base?.width ?? instance.width
+  const baseHeight = base?.height ?? instance.height
   const baseScaleX = base?.scaleX ?? instance.scaleX
   const baseScaleY = base?.scaleY ?? instance.scaleY
   const baseRotation = base?.rotation ?? instance.rotation
@@ -124,8 +126,8 @@ export function drawSticker(ctx: CanvasRenderingContext2D, instance: StickerInst
   const liveOpacity = Math.max(0, Math.min(1, (baseOpacity / 100) * Math.max(0, pulseOpacityMul))) * alpha
   if (liveOpacity <= 0.002) return
 
-  const hw = (instance.width / 2) * liveScaleX
-  const hh = (instance.height / 2) * liveScaleY
+  const hw = (baseWidth / 2) * liveScaleX
+  const hh = (baseHeight / 2) * liveScaleY
   if (hw <= 0 || hh <= 0) return
 
   ctx.save()

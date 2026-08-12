@@ -844,6 +844,8 @@ function stickerKeyframeLiteral(kf: StickerKeyframe): string {
     Math.max(0, Math.round(kf.timeMs)),
     Math.round(kf.x),
     Math.round(kf.y),
+    Math.max(0, Math.round(kf.width)),
+    Math.max(0, Math.round(kf.height)),
     Math.max(0, Math.round(kf.scaleX)),
     Math.max(0, Math.round(kf.scaleY)),
     Math.round(kf.rotation),
@@ -960,6 +962,7 @@ function exportStickers(project: Project): { code: string; assetsById: Map<strin
     'struct StickerKeyframe {',
     '  uint16_t timeMs;',
     '  int16_t x, y;',
+    '  uint16_t width, height;  // px, base size (independent per keyframe)',
     '  uint16_t scaleX, scaleY; // %',
     '  int16_t rotation;        // degrees',
     '  uint8_t opacity;         // 0-100',
@@ -2533,9 +2536,9 @@ struct StickerLive {
 
 inline uint16_t eyesBlendRgb565(uint16_t a, uint16_t b, float t); // defined further below
 
-struct StickerKfSample { int16_t x, y; float scaleX, scaleY; float rotation; float opacity; uint16_t tintColor; bool hasTint; };
+struct StickerKfSample { int16_t x, y; float width, height; float scaleX, scaleY; float rotation; float opacity; uint16_t tintColor; bool hasTint; };
 inline void eyesStickerKfFill(const StickerKeyframe& k, StickerKfSample& out) {
-  out.x = k.x; out.y = k.y; out.scaleX = k.scaleX; out.scaleY = k.scaleY;
+  out.x = k.x; out.y = k.y; out.width = k.width; out.height = k.height; out.scaleX = k.scaleX; out.scaleY = k.scaleY;
   out.rotation = k.rotation; out.opacity = k.opacity; out.tintColor = k.tintColor; out.hasTint = k.hasTint != 0;
 }
 // Sticker counterpart of the eye-frame sampler — eases a sticker's keyframes into a base transform at
@@ -2556,6 +2559,8 @@ inline bool eyesSampleStickerKeyframes(const StickerKeyframe* kfs, uint8_t count
       float eased = eyesEase(localT, from.easing, from.bezierX1, from.bezierY1, from.bezierX2, from.bezierY2);
       out.x = (int16_t)roundf(from.x + (to.x - from.x) * eased);
       out.y = (int16_t)roundf(from.y + (to.y - from.y) * eased);
+      out.width = from.width + (to.width - from.width) * eased;
+      out.height = from.height + (to.height - from.height) * eased;
       out.scaleX = from.scaleX + (to.scaleX - from.scaleX) * eased;
       out.scaleY = from.scaleY + (to.scaleY - from.scaleY) * eased;
       out.rotation = from.rotation + (to.rotation - from.rotation) * eased;
@@ -2590,6 +2595,8 @@ inline StickerLive eyesComputeStickerLive(const StickerDef& s, unsigned long ela
   bool hasKf = eyesSampleStickerKeyframes(s.keyframes, s.keyframeCount, elapsedMs, kfBase);
   int16_t baseX = hasKf ? kfBase.x : s.x;
   int16_t baseY = hasKf ? kfBase.y : s.y;
+  float baseWidth = hasKf ? kfBase.width : (float)s.width;
+  float baseHeight = hasKf ? kfBase.height : (float)s.height;
   float baseScaleX = hasKf ? kfBase.scaleX : (float)s.scaleX;
   float baseScaleY = hasKf ? kfBase.scaleY : (float)s.scaleY;
   float baseRotation = hasKf ? kfBase.rotation : (float)s.rotation;
@@ -2623,8 +2630,8 @@ inline StickerLive eyesComputeStickerLive(const StickerDef& s, unsigned long ela
   }
   float scaleX = (baseScaleX / 100.0f) * pulseMul;
   float scaleY = (baseScaleY / 100.0f) * pulseMul;
-  live.rx = (int16_t)roundf((s.width / 2.0f) * scaleX) * (s.flipH ? -1 : 1);
-  live.ry = (int16_t)roundf((s.height / 2.0f) * scaleY) * (s.flipV ? -1 : 1);
+  live.rx = (int16_t)roundf((baseWidth / 2.0f) * scaleX) * (s.flipH ? -1 : 1);
+  live.ry = (int16_t)roundf((baseHeight / 2.0f) * scaleY) * (s.flipV ? -1 : 1);
   live.cx = baseX + (int16_t)roundf(s.driftX * tSec);
   live.cy = baseY + (int16_t)roundf(s.driftY * tSec);
   live.rotationDeg = baseRotation + s.spin * tSec;

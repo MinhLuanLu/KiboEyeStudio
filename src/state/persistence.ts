@@ -174,7 +174,7 @@ function normalizeStyleOverrides(raw: unknown): string[] | null {
 /** Coerces one sticker's timeline keyframes (drops malformed entries, backfills defaults) and keeps
  * them sorted by timeMs — the invariant sampleStickerKeyframes()/the Timeline both assume. Old
  * projects have no `keyframes` field → empty array → the sticker stays static. */
-function normalizeStickerKeyframes(raw: unknown): StickerKeyframe[] {
+function normalizeStickerKeyframes(raw: unknown, defaultWidth: number, defaultHeight: number): StickerKeyframe[] {
   if (!Array.isArray(raw)) return []
   const out: StickerKeyframe[] = []
   for (const k of raw) {
@@ -188,6 +188,9 @@ function normalizeStickerKeyframes(raw: unknown): StickerKeyframe[] {
       customBezier: Array.isArray(r.customBezier) && r.customBezier.length === 4 ? (r.customBezier as [number, number, number, number]) : undefined,
       x: typeof r.x === 'number' ? r.x : 0,
       y: typeof r.y === 'number' ? r.y : 0,
+      // Older sticker keyframes (pre width/height animation) fall back to the sticker's own size.
+      width: typeof r.width === 'number' ? r.width : defaultWidth,
+      height: typeof r.height === 'number' ? r.height : defaultHeight,
       scaleX: typeof r.scaleX === 'number' ? r.scaleX : 100,
       scaleY: typeof r.scaleY === 'number' ? r.scaleY : 100,
       rotation: typeof r.rotation === 'number' ? r.rotation : 0,
@@ -238,7 +241,7 @@ export function normalizeStickerInstances(raw: unknown): StickerInstance[] {
       // below (which knows the real track ids) — '' here just means "unresolved yet"; it's
       // never treated as a real track id.
       trackId: typeof r.trackId === 'string' ? r.trackId : '',
-      keyframes: normalizeStickerKeyframes(r.keyframes)
+      keyframes: normalizeStickerKeyframes(r.keyframes, typeof r.width === 'number' ? r.width : 48, typeof r.height === 'number' ? r.height : 48)
     })
   }
   return out
