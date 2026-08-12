@@ -103,7 +103,9 @@ export function drawSticker(ctx: CanvasRenderingContext2D, instance: StickerInst
   const { anim } = instance
   // Keyframes (if any) set the BASE transform for this instant; Drift/Spin/Pulse then layer on top
   // exactly as before. No keyframes → the static instance values, i.e. today's behavior unchanged.
-  const base = sampleStickerKeyframes(instance.keyframes, animMs)
+  // Sampled at the ABSOLUTE animation time (elapsedMs) since keyframe.timeMs is absolute — unlike the
+  // sticker-local `animMs` (elapsedMs minus start/delay) that drives Drift/Spin/Pulse below.
+  const base = sampleStickerKeyframes(instance.keyframes, elapsedMs)
   const baseX = base?.x ?? instance.x
   const baseY = base?.y ?? instance.y
   const baseScaleX = base?.scaleX ?? instance.scaleX

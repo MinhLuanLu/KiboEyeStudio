@@ -11,6 +11,7 @@ import type {
   Project,
   PupilShapeId,
   StickerAsset,
+  StickerKeyframe,
   StickerInstance
 } from '@/types'
 import {
@@ -821,9 +822,40 @@ function stickerDefLiteral(s: StickerInstance, asset: StickerAsset | undefined, 
     Math.round(anim.spin),
     Math.max(0, Math.min(100, Math.round(anim.pulseScale))),
     Math.max(0, Math.min(100, Math.round(anim.pulseOpacity))),
-    Math.max(1, Math.round(s.strokeWidth ?? 5)) // stroke thickness % for stroke-based procedurals
+    Math.max(1, Math.round(s.strokeWidth ?? 5)), // stroke thickness % for stroke-based procedurals
+    (s.keyframes && s.keyframes.length > 0 ? stickerKfArrayName(s) : 'nullptr'),
+    s.keyframes?.length ?? 0
   ]
   return `  { ${fields.join(', ')} }`
+}
+
+/** Unique PROGMEM array name for a sticker's timeline keyframes (its id is globally unique across
+ * scopes, so this never collides). */
+function stickerKfArrayName(s: StickerInstance): string {
+  return `SKF_${s.id.replace(/[^A-Za-z0-9]/g, '_')}`
+}
+
+/** One StickerKeyframe brace literal, in struct-field order — mirrors eyeFrameLiteral's easing/bezier
+ * emission (bezier defaults [42,0,58,100]) and bakes tint to RGB565 (hasTint=0 for a null tint). */
+function stickerKeyframeLiteral(kf: StickerKeyframe): string {
+  const [bx1, by1, bx2, by2] = kf.customBezier ?? [42, 0, 58, 100]
+  const hasTint = kf.tint !== null
+  return `  { ${[
+    Math.max(0, Math.round(kf.timeMs)),
+    Math.round(kf.x),
+    Math.round(kf.y),
+    Math.max(0, Math.round(kf.scaleX)),
+    Math.max(0, Math.round(kf.scaleY)),
+    Math.round(kf.rotation),
+    Math.max(0, Math.min(100, Math.round(kf.opacity))),
+    toRgb565Hex(hasTint ? (kf.tint as string) : '#ffffff'),
+    hasTint ? 1 : 0,
+    EASING_ENUM[kf.easing],
+    Math.round(bx1),
+    Math.round(by1),
+    Math.round(bx2),
+    Math.round(by2)
+  ].join(', ')} }`
 }
 
 // Emits one scope's `const StickerDef <ident>[] PROGMEM = {...}; const uint8_t <ident>_Count = N;`
@@ -844,7 +876,20 @@ function stickerArrayLiteral(
   if (stickers.length === 0) {
     return [`const StickerDef ${ident}[] = {};`, `const uint8_t ${ident}_Count = 0;`]
   }
+  // Each sticker's own timeline-keyframe array must be declared BEFORE the StickerDef array that
+  // points at it (see StickerDef.keyframes). Names are keyed by the globally-unique sticker id.
+  const kfArrays: string[] = []
+  for (const s of stickers) {
+    if (s.keyframes && s.keyframes.length > 0) {
+      kfArrays.push(
+        `const StickerKeyframe ${stickerKfArrayName(s)}[] PROGMEM = {`,
+        s.keyframes.map(stickerKeyframeLiteral).join(',\n'),
+        `};`
+      )
+    }
+  }
   return [
+    ...kfArrays,
     `const StickerDef ${ident}[] PROGMEM = {`,
     stickers
       .map((s) => `  // "${s.name}" (${s.layer})\n${stickerDefLiteral(s, assetsById.get(s.assetId), rasterIndexByAssetId)}`)
@@ -908,6 +953,22 @@ function exportStickers(project: Project): { code: string; assetsById: Map<strin
     STICKER_BUILTIN_ENUM_ORDER.map((id, i) => `  ${stickerBuiltinEnumName(id)}${i === 0 ? ' = 0' : ''}`).join(',\n'),
     '};',
     '',
+    '// One keyframe animating a sticker\'s BASE transform along the timeline (the sticker counterpart',
+    '// of EyeFrame). timeMs is ABSOLUTE animation-timeline ms; eyesSampleStickerKeyframes() below eases',
+    '// between them and the existing drift/spin/pulse still layer on top. hasTint=0 means "no tint at',
+    '// this keyframe" (use the asset\'s native colours), matching the studio\'s null-tint step.',
+    'struct StickerKeyframe {',
+    '  uint16_t timeMs;',
+    '  int16_t x, y;',
+    '  uint16_t scaleX, scaleY; // %',
+    '  int16_t rotation;        // degrees',
+    '  uint8_t opacity;         // 0-100',
+    '  uint16_t tintColor;      // RGB565',
+    '  uint8_t hasTint;         // 1 = tint applies, 0 = asset-native colours',
+    '  uint8_t easing;',
+    '  int8_t bezierX1, bezierY1, bezierX2, bezierY2;',
+    '};',
+    '',
     '// One placed sticker (Project.stickers export as PROJECT_STICKERS below; each Expression',
     '// and Animation exports its own array the same way — see exportExpression()/',
     '// exportAnimation() and their _Stickers/_Stickers_Count constants).',
@@ -934,6 +995,8 @@ function exportStickers(project: Project): { code: string; assetsById: Map<strin
     '  int16_t spin;           // deg/s',
     '  uint8_t pulseScale, pulseOpacity; // 0-100',
     '  uint8_t strokeWidth;    // % stroke thickness for stroke-based procedurals (e.g. Circle Expanding)',
+    '  const StickerKeyframe* keyframes; // null = static (no timeline keyframes)',
+    '  uint8_t keyframeCount;',
     '};',
     '',
     '// One imported raster (PNG/GIF) sticker asset\'s pixel data — frames are RGB565 with',
@@ -2465,20 +2528,75 @@ struct StickerLive {
   int16_t cx, cy;
   int16_t rx, ry;
   float rotationDeg;
+  uint16_t tintColor;  // procedural tint for this instant (keyframed, or the static s.tintColor)
 };
+
+inline uint16_t eyesBlendRgb565(uint16_t a, uint16_t b, float t); // defined further below
+
+struct StickerKfSample { int16_t x, y; float scaleX, scaleY; float rotation; float opacity; uint16_t tintColor; bool hasTint; };
+inline void eyesStickerKfFill(const StickerKeyframe& k, StickerKfSample& out) {
+  out.x = k.x; out.y = k.y; out.scaleX = k.scaleX; out.scaleY = k.scaleY;
+  out.rotation = k.rotation; out.opacity = k.opacity; out.tintColor = k.tintColor; out.hasTint = k.hasTint != 0;
+}
+// Sticker counterpart of the eye-frame sampler — eases a sticker's keyframes into a base transform at
+// animMs (ABSOLUTE animation-timeline ms). Rotation is plain-lerped (multi-turn spins animate
+// literally); tint colour-lerps in RGB565, a null-tint endpoint stepping at the midpoint. Returns
+// false when there are no keyframes. Kept in lockstep with sampleStickerKeyframes() (interpolate.ts).
+inline bool eyesSampleStickerKeyframes(const StickerKeyframe* kfs, uint8_t count, unsigned long animMs, StickerKfSample& out) {
+  if (kfs == nullptr || count == 0) return false;
+  if (count == 1 || animMs <= kfs[0].timeMs) { eyesStickerKfFill(kfs[0], out); return true; }
+  const StickerKeyframe& last = kfs[count - 1];
+  if (animMs >= last.timeMs) { eyesStickerKfFill(last, out); return true; }
+  for (uint8_t i = 0; i < count - 1; i++) {
+    const StickerKeyframe& from = kfs[i];
+    const StickerKeyframe& to = kfs[i + 1];
+    if (animMs <= to.timeMs) {
+      float span = (float)(to.timeMs - from.timeMs); if (span < 1.0f) span = 1.0f;
+      float localT = (float)(animMs - from.timeMs) / span; if (localT < 0) localT = 0; if (localT > 1) localT = 1;
+      float eased = eyesEase(localT, from.easing, from.bezierX1, from.bezierY1, from.bezierX2, from.bezierY2);
+      out.x = (int16_t)roundf(from.x + (to.x - from.x) * eased);
+      out.y = (int16_t)roundf(from.y + (to.y - from.y) * eased);
+      out.scaleX = from.scaleX + (to.scaleX - from.scaleX) * eased;
+      out.scaleY = from.scaleY + (to.scaleY - from.scaleY) * eased;
+      out.rotation = from.rotation + (to.rotation - from.rotation) * eased;
+      out.opacity = from.opacity + (to.opacity - from.opacity) * eased;
+      if (!from.hasTint || !to.hasTint) {
+        const StickerKeyframe& pick = eased < 0.5f ? from : to;
+        out.tintColor = pick.tintColor; out.hasTint = pick.hasTint != 0;
+      } else {
+        out.tintColor = eyesBlendRgb565(from.tintColor, to.tintColor, eased); out.hasTint = true;
+      }
+      return true;
+    }
+  }
+  eyesStickerKfFill(last, out);
+  return true;
+}
 
 inline StickerLive eyesComputeStickerLive(const StickerDef& s, unsigned long elapsedMs) {
   StickerLive live;
   live.visible = false;
   live.cx = live.cy = live.rx = live.ry = 0;
   live.rotationDeg = 0;
+  live.tintColor = s.tintColor;
   if (elapsedMs < s.startDelayMs) return live;
   unsigned long localMs = elapsedMs - s.startDelayMs;
   if (localMs < (unsigned long)s.startTimeMs) return live;
   if (s.endTimeMs >= 0 && localMs > (unsigned long)s.endTimeMs) return live;
 
+  // Keyframes set the BASE transform (sampled at the ABSOLUTE animation time = elapsedMs, since
+  // keyframe.timeMs is absolute) — drift/spin/pulse below still layer on top. No keyframes → static.
+  StickerKfSample kfBase;
+  bool hasKf = eyesSampleStickerKeyframes(s.keyframes, s.keyframeCount, elapsedMs, kfBase);
+  int16_t baseX = hasKf ? kfBase.x : s.x;
+  int16_t baseY = hasKf ? kfBase.y : s.y;
+  float baseScaleX = hasKf ? kfBase.scaleX : (float)s.scaleX;
+  float baseScaleY = hasKf ? kfBase.scaleY : (float)s.scaleY;
+  float baseRotation = hasKf ? kfBase.rotation : (float)s.rotation;
+  live.tintColor = (hasKf && kfBase.hasTint) ? kfBase.tintColor : s.tintColor;
+
   float tSec = localMs / 1000.0f;
-  float opacity = s.opacity;
+  float opacity = hasKf ? kfBase.opacity : (float)s.opacity;
   unsigned long sinceStart = localMs - (unsigned long)s.startTimeMs;
   if (s.fadeInMs > 0 && sinceStart < (unsigned long)s.fadeInMs) {
     opacity *= (float)sinceStart / (float)s.fadeInMs;
@@ -2503,13 +2621,13 @@ inline StickerLive eyesComputeStickerLive(const StickerDef& s, unsigned long ela
     float pulse = sinf(tSec * 2.0f * (float)PI);
     pulseMul = 1.0f + (s.pulseScale / 100.0f) * 0.3f * pulse;
   }
-  float scaleX = (s.scaleX / 100.0f) * pulseMul;
-  float scaleY = (s.scaleY / 100.0f) * pulseMul;
+  float scaleX = (baseScaleX / 100.0f) * pulseMul;
+  float scaleY = (baseScaleY / 100.0f) * pulseMul;
   live.rx = (int16_t)roundf((s.width / 2.0f) * scaleX) * (s.flipH ? -1 : 1);
   live.ry = (int16_t)roundf((s.height / 2.0f) * scaleY) * (s.flipV ? -1 : 1);
-  live.cx = s.x + (int16_t)roundf(s.driftX * tSec);
-  live.cy = s.y + (int16_t)roundf(s.driftY * tSec);
-  live.rotationDeg = s.rotation + s.spin * tSec;
+  live.cx = baseX + (int16_t)roundf(s.driftX * tSec);
+  live.cy = baseY + (int16_t)roundf(s.driftY * tSec);
+  live.rotationDeg = baseRotation + s.spin * tSec;
   live.visible = true;
   return live;
 }
@@ -2578,7 +2696,7 @@ inline void eyesDrawStickers(T& gfx, const StickerDef* stickers, uint8_t count,
     int16_t drawCx = screenCx + live.cx;
     int16_t drawCy = screenCy + live.cy;
     if (s.kind == STICKER_KIND_PROCEDURAL) {
-      eyesDrawStickerProcedural(gfx, s.assetIndex, drawCx, drawCy, live.rx, live.ry, live.rotationDeg, s.tintColor, localMs / 1000.0f, s.strokeWidth, s.loopMode != STICKER_LOOP_ONCE);
+      eyesDrawStickerProcedural(gfx, s.assetIndex, drawCx, drawCy, live.rx, live.ry, live.rotationDeg, live.tintColor, localMs / 1000.0f, s.strokeWidth, s.loopMode != STICKER_LOOP_ONCE);
     } else if (s.assetIndex < rasterCount) {
       const StickerRasterAsset& asset = rasterAssets[s.assetIndex];
       uint8_t frame = eyesPickStickerFrame(asset, s, localMs);
