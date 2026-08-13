@@ -15,6 +15,7 @@ import type {
   StickerInstance
 } from '@/types'
 import {
+  animationColorBase,
   clampFps,
   expressionLeftColors,
   expressionLeftParams,
@@ -296,7 +297,15 @@ function bakeAnimationFrames(anim: Animation): BakedFrame[] {
  * the keyframe colours from the studio, not the source expression's original palette. `base` is
  * the project's shared palette (Project.colors), the same fallback the preview/Animate mode use. */
 function bakeAnimationColors(anim: Animation, base: EyeColors): EyeColors[] | null {
-  if (!anim.keyframes.some((k) => k.colors)) return null
+  // Emit a baked colour track when EITHER a pose keyframe carries its own colours, OR this
+  // animation owns a pupil that diverges from the shared base (animationColorBase) — the latter
+  // covers a colourless animation the user gave its own pupil, so that owned pupil reaches the
+  // device instead of the runtime falling back to the loaded/base palette. When neither holds
+  // (owned pupil == base, no per-keyframe colours) we keep the nullptr fast-path, so every
+  // untouched animation stays byte-identical to before. sampleAnimationColors folds the owned
+  // pupil into every frame either way, so a colourless-but-owned animation bakes a constant track.
+  const ownPupilDiverges = animationColorBase(anim, base).pupil !== base.pupil
+  if (!anim.keyframes.some((k) => k.colors) && !ownPupilDiverges) return null
   return collectAnimationBreakpoints(anim).map((t) => sampleAnimationColors(anim, t, base))
 }
 
