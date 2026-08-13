@@ -3570,7 +3570,16 @@ export const useStore = create<StoreState>()(
       set((s) => {
         const owner = findStickerOwner(s.project, id)
         if (!owner) return
-        Object.assign(owner.list[owner.index], partial)
+        const st = owner.list[owner.index]
+        // Changing anything the recolored-SVG cache (resolvedSvg) depends on must INVALIDATE it, so
+        // the stale bitmap — e.g. the previous colour, or a colour copied in from another sticker /
+        // another Animation — is never reused by the preview or the export. The global resolver
+        // (useResolveStickerSvgs) rebuilds any null resolvedSvg for the new tint/mode/asset, and
+        // does so for EVERY sticker, not just whichever one is open in the controls panel (the old
+        // per-panel effect missed non-selected stickers and could be cancelled mid-rasterize).
+        const invalidatesSvg = 'tint' in partial || 'svgColorMode' in partial || 'assetId' in partial
+        Object.assign(st, partial)
+        if (invalidatesSvg) st.resolvedSvg = null
         s.dirty = true
       }),
 

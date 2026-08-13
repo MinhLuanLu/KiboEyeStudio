@@ -1,10 +1,7 @@
-import { useEffect, useRef } from 'react'
 import { useStore } from '@/state/store'
 import type { StickerAnimSettings, StickerInstance, StickerLayer, StickerLoopMode, StickerSvgColorMode } from '@/types'
 import { Slider } from '@/components/ui/Slider'
 import { ColorField } from '@/components/ui/ColorField'
-import { recolorSvgSource } from '@/lib/svgRecolor'
-import { rasterizeSvgText } from '@/lib/import/stickerImport'
 
 const LAYERS: { value: StickerLayer; label: string }[] = [
   { value: 'behind', label: 'Behind' },
@@ -44,7 +41,6 @@ function SegmentedPicker<T extends string>({ value, options, onChange }: { value
  * changes," not two. */
 export function StickerControls({ sticker }: { sticker: StickerInstance }) {
   const updateSticker = useStore((s) => s.updateSticker)
-  const setStickerResolvedSvg = useStore((s) => s.setStickerResolvedSvg)
   const asset = useStore((s) => s.project.stickerAssets.find((a) => a.id === sticker.assetId))
   const checkpoint = useStore((s) => s.checkpoint)
 
@@ -52,34 +48,11 @@ export function StickerControls({ sticker }: { sticker: StickerInstance }) {
   const setAnim = <K extends keyof StickerAnimSettings>(key: K, value: StickerAnimSettings[K]) =>
     updateSticker(sticker.id, { anim: { ...sticker.anim, [key]: value } })
 
-  // Recomputes this instance's resolvedSvg (the baked recolored bitmap — see its own comment
-  // in types/index.ts) whenever the asset/tint/color-mode combination it depends on changes.
-  // Deliberately does NOT depend on `sticker.resolvedSvg` itself, so writing the result back
-  // via setStickerResolvedSvg doesn't re-trigger this effect. Runs once for a freshly-added svg
-  // sticker too (its resolvedSvg starts null), so it renders correctly without ever touching
-  // the color controls.
-  const stickerId = sticker.id
-  const svgSource = asset?.kind === 'svg' ? asset.svgSource : undefined
-  const tint = sticker.tint
-  const svgColorMode = sticker.svgColorMode
-  const cancelledRef = useRef(false)
-  useEffect(() => {
-    cancelledRef.current = false
-    if (!svgSource) return
-    const recolored = recolorSvgSource(svgSource, svgColorMode, tint)
-    rasterizeSvgText(recolored)
-      .then(({ dataUrl, rgba }) => {
-        if (!cancelledRef.current) setStickerResolvedSvg(stickerId, { dataUrl, rgba })
-      })
-      .catch(() => {
-        // Malformed/unrasterizable recolor result — leave resolvedSvg as whatever it was
-        // (falls back to the asset's own natural-colors preview in drawSticker.ts) rather than
-        // crash the controls panel over a bad SVG.
-      })
-    return () => {
-      cancelledRef.current = true
-    }
-  }, [stickerId, svgSource, tint, svgColorMode, setStickerResolvedSvg])
+  // resolvedSvg (the baked recolored bitmap) is now rebuilt globally by useResolveStickerSvgs()
+  // whenever updateSticker() nulls it on a tint/svgColorMode/assetId change — for every sticker,
+  // not just this selected one, and without an async cancel-on-deselect race. So there is no
+  // per-panel recolor effect here anymore (that one left non-selected stickers' colours stale,
+  // which read as a sticker keeping the previous Animation's colour inside a Combination).
 
   return (
     <div className="flex flex-col gap-4 p-3 border-t border-studio-border">

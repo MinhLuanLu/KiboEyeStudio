@@ -16,6 +16,7 @@ import { VisualReferencePanel } from '@/components/VisualReference/VisualReferen
 import { StickerManagerPanel } from '@/components/Stickers/StickerManagerPanel'
 import { LayersPanel } from '@/components/Layers/LayersPanel'
 import { PanelTabs } from '@/components/ui/PanelTabs'
+import { useResolveStickerSvgs } from '@/hooks/useResolveStickerSvgs'
 
 const LEFT_TABS: { value: LeftTab; label: string }[] = [
   { value: 'animations', label: 'Animations' },
@@ -52,6 +53,10 @@ export function EyeStudioWorkspace({ toolbarActions }: { toolbarActions: Toolbar
   const setLeftTab = useStore((s) => s.setLeftTab)
   const rightTab = useStore((s) => s.rightTab)
   const setRightTab = useStore((s) => s.setRightTab)
+  // Keep every SVG sticker's recolored bitmap current for its own colour, across all scopes —
+  // mounted here (always present in the eye studio) so it never depends on which sticker/panel is
+  // open. See the hook's own comment for the Combination sticker-colour bug this fixes.
+  useResolveStickerSvgs()
 
   return (
     <div className="flex flex-col h-full">
