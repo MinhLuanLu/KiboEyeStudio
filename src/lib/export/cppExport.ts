@@ -3405,12 +3405,21 @@ inline LiveEye UpdateEyes() {
     eyesPlayer.activeStickers = clipStickers;
     eyesPlayer.activeStickerCount = clipStickerCount;
     eyesPlayer.activeStickerElapsedMs = clipStickerMs;
-    // The active clip's animation carries its own keyframe colours -> use them, so the combo looks
-    // like the studio preview. When it doesn't, keep the current palette (a colourless animation
-    // still inherits whatever expression/palette was loaded, exactly as before this feature).
+    // Colour the eyes from the ACTIVE CLIP's own animation, so each clip keeps its own palette and
+    // switching clips can never leak the previous clip's colours into the next one:
+    //   - clip's animation has a per-keyframe colour track -> use it (its saved Expression colours).
+    //   - no track (a colourless animation) -> RESET to the project's base palette, NOT keep the
+    //     previous clip's colours. This both prevents the leak and matches the studio combo preview,
+    //     whose sampleAnimationColors() falls back to project.colors for a colourless clip. (A
+    //     standalone PlayAnimation still inherits the loaded palette — see the animation branch
+    //     below — but a Combination is a self-contained sequence and must not carry colour across
+    //     its clip boundaries.)
     if (comboHasColor) {
       eyesPlayer.colorsLeft = comboColor;
       eyesPlayer.colorsRight = comboColor;
+    } else {
+      eyesPlayer.colorsLeft = EYE_COLORS_LEFT;
+      eyesPlayer.colorsRight = EYE_COLORS_RIGHT;
     }
     if (!eyesPlayer.comboLoop) {
       unsigned long totalDuration = eyesComboDurationMs(*eyesPlayer.combo);
