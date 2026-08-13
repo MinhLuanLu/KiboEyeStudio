@@ -4494,6 +4494,16 @@ function generateKiboUIParts(
   h.push('// Call every loop() iteration — pumps LVGL\'s timer handler.')
   h.push('void Update();')
   h.push('')
+  h.push('// Single source of truth for the active display mode: false = the eyes overlay (from a')
+  h.push('// combined eyes.h build) is the active display, true = a UI screen is. Defaults true.')
+  h.push('// The active-screen navigation dispatch (FocusNext/FocusPrevious/PressFocused, i.e.')
+  h.push('// UI.focusNext()/etc.) is gated on it, so the encoder only moves focus while a UI screen')
+  h.push('// is actually the top layer — never a screen sitting hidden under the eye overlay. Do NOT')
+  h.push('// use ACTIVE_SCREEN as an "eyes vs UI" proxy: it only distinguishes UI screens from each')
+  h.push('// other (and never changes in a single-screen project). Flip this only through the')
+  h.push('// KiboShowUiScreen()/KiboShowEyes() helpers below, which coordinate both display halves.')
+  h.push('extern bool s_uiMode;')
+  h.push('')
   for (const { showFnName, screen } of screenFns) {
     h.push(`// Shows the "${screen.name}" screen.`)
     h.push(`void ${showFnName}();`)
@@ -4630,6 +4640,45 @@ function generateKiboUIParts(
   h.push('};')
   h.push(`extern ${ns}_Api UI;`)
   h.push('')
+  h.push('// ---- Eyes overlay <-> UI display-mode coordination ------------------------------------------')
+  h.push('// Only compiled where EYES_USE_LVGL is defined (the sketch that includes eyes.h before ui.h);')
+  h.push('// a UI-only build skips this whole block, so ui.h stays identical for UI-only projects. A')
+  h.push('// combined project renders the Eye Expressions as an LVGL overlay on lv_layer_top() while UI')
+  h.push('// screens live underneath, and exactly ONE may be the active display at a time. These two')
+  h.push('// helpers are the correct single-call way to switch: each coordinates the eye controller\'s')
+  h.push('// suspend gate, the eye render timer, and s_uiMode in the right order, so there is no flicker')
+  h.push('// and the eye animation resumes exactly where it left off (state preserved, never restarted).')
+  h.push('#if defined(EYES_USE_LVGL)')
+  h.push('// Pull in the eye controller\'s suspend gate when that companion header is present, so the')
+  h.push('// helpers can freeze/thaw eye arbitration. Absent is fine — those calls compile out.')
+  h.push('// eyeController.h #includes eyes.h, already included above in this build (guard-safe).')
+  h.push('#if defined(__has_include)')
+  h.push('#  if __has_include("eyeController.h")')
+  h.push('#    include "eyeController.h"')
+  h.push('#    define KIBO_UI_HAS_EYE_CONTROLLER 1')
+  h.push('#  endif')
+  h.push('#endif')
+  h.push('')
+  h.push('// Eyes -> UI: suspend eye arbitration, pause+hide the eyes, load screenName, enter UI mode.')
+  h.push('inline void KiboShowUiScreen(const char* screenName) {')
+  h.push('#ifdef KIBO_UI_HAS_EYE_CONTROLLER')
+  h.push('  EyeControllerSetSuspended(true);   // refuse eye requests while the paused player cannot advance')
+  h.push('#endif')
+  h.push('  EyesLvgl::Pause();                  // hide overlay + pause the eye render timer')
+  h.push(`  ${ns}::ShowScreen(screenName);      // load the UI screen underneath`)
+  h.push(`  ${ns}::s_uiMode = true;             // encoder now drives the UI`)
+  h.push('}')
+  h.push('')
+  h.push('// UI -> Eyes: bring the eyes back on top (redraws the preserved frame), re-enable arbitration.')
+  h.push('inline void KiboShowEyes() {')
+  h.push('  EyesLvgl::Resume();                 // show overlay + resume timer + one Render()')
+  h.push('#ifdef KIBO_UI_HAS_EYE_CONTROLLER')
+  h.push('  EyeControllerSetSuspended(false);')
+  h.push('#endif')
+  h.push(`  ${ns}::s_uiMode = false;            // encoder no longer touches the UI`)
+  h.push('}')
+  h.push('#endif  // EYES_USE_LVGL')
+  h.push('')
 
   // ---- Styles — folded directly into ui.cpp (see generateUiCpp) rather than a separate file,
   // per the "few files, clearly organized" export goal; the section banner below is what keeps
@@ -4758,6 +4807,13 @@ function generateKiboUIParts(
   core.push('  return nullptr;')
   core.push('}')
   core.push('')
+  // Single source of truth for the active display mode (see ui.h's own extern + doc comment):
+  // false = the eyes overlay is the active display, true = a UI screen is. Defaults true so a
+  // UI-only project (no eyes) is always in UI mode and the encoder navigates normally; a combined
+  // eyes+UI build flips it through KiboShowUiScreen()/KiboShowEyes() (ui.h). The FocusNext/
+  // FocusPrevious/PressFocused dispatch below is gated on it.
+  core.push(`bool ${ns}::s_uiMode = true;`)
+  core.push('')
   core.push('// ---- Per-screen LVGL focus groups — each screen owns exactly one, so switching screens')
   core.push('// can never leave focus pointing at a widget that belongs to a different screen (every')
   core.push('// focusable widget is added to its own screen\'s group only — see the per-widget')
@@ -4805,9 +4861,19 @@ function generateKiboUIParts(
   // simply empty and these no-op, and there is no per-screen helper to be left undefined. For
   // keyboard-specific key navigation, call that screen's own keyboard-aware *_screen_focus_next().
   if (screenFns.length > 0) {
-    core.push(`void ${ns}::FocusNext()     { lv_group_t* g = ActiveScreenFocusGroup(); if (g) lv_group_focus_next(g); }`)
-    core.push(`void ${ns}::FocusPrevious() { lv_group_t* g = ActiveScreenFocusGroup(); if (g) lv_group_focus_prev(g); }`)
+    // Display-mode gate: these active-screen-aware dispatch functions are what encoder/button code
+    // calls (UI.focusNext()/focusPrevious()/pressFocused()). They no-op unless a UI screen is the
+    // ACTIVE DISPLAY (s_uiMode). ACTIVE_SCREEN alone can't tell that apart — it's initialized to
+    // the first screen and, in a single-screen project, never changes, so it stays "true" even
+    // while the eyes overlay (from a combined eyes.h build) is the thing actually on-screen with a
+    // UI screen loaded HIDDEN underneath. Without this guard the encoder would move focus on that
+    // hidden screen, invalidating widgets that then redraw behind the eyes. s_uiMode defaults true
+    // (a UI-only project is always in UI mode); a combined project flips it via the coordination
+    // helpers in ui.h (KiboShowUiScreen/KiboShowEyes).
+    core.push(`void ${ns}::FocusNext()     { if (!s_uiMode) return; lv_group_t* g = ActiveScreenFocusGroup(); if (g) lv_group_focus_next(g); }`)
+    core.push(`void ${ns}::FocusPrevious() { if (!s_uiMode) return; lv_group_t* g = ActiveScreenFocusGroup(); if (g) lv_group_focus_prev(g); }`)
     core.push(`void ${ns}::PressFocused() {`)
+    core.push('  if (!s_uiMode) return;')
     core.push('  lv_group_t* g = ActiveScreenFocusGroup();')
     core.push('  if (!g) return;')
     core.push('  lv_obj_t* focused = lv_group_get_focused(g);')
@@ -5475,15 +5541,23 @@ void InitializeLVGL() {
 //   2) In setup() (inside the USER CODE region), AFTER UI.begin():
 //          EyesLvgl::Attach();        // place the eye overlay on top (survives UI screen switches)
 //          Combo(Idle, true);         // start an expression/animation (see eyes.h Quick Reference)
+//          KiboShowEyes();            // mark the eyes as the active display, so the encoder does NOT
+//                                     // navigate the UI screen loaded hidden underneath them
 //
 //   3) In loop(): nothing extra to call — the eyes redraw from their OWN lv_timer, driven by the
 //      same LVGL tick that UI.update() already pumps. Just keep loop() non-blocking.
 //
 //   4) Switching between an LVGL screen and the eyes (show ONE at a time, never both fighting for
-//      the top layer):
-//          EyesLvgl::Pause();  UI.showScreen("Main");  // hide+stop the eyes, let the screen draw
-//          EyesLvgl::Resume();                          // bring the eyes back on top (screen stays under)
-//      Change expressions anytime: SetExpression(Expr_Neutral);  PlayAnimation(Anim_Blink);  Combo(Idle);
+//      the top layer). ALWAYS switch through these two helpers (from ui.h) — do NOT call
+//      EyesLvgl::Pause()/Resume() yourself. They coordinate all three of: the eye controller's
+//      suspend gate, the eye render timer, and s_uiMode (which gates the encoder), in the right
+//      order — so there's no flicker, the hidden UI can't be nudged by the encoder, and the eye
+//      animation resumes exactly where it left off instead of restarting:
+//          KiboShowUiScreen("Main");  // eyes -> UI: suspend eye requests, hide+pause the eyes, load "Main"
+//          KiboShowEyes();            // UI -> eyes: show+resume the eyes, re-enable eye requests
+//      Change expressions anytime (while in eyes mode): SetExpression(Expr_Neutral); PlayAnimation(Anim_Blink); Combo(Idle);
+//      Drive the encoder as usual (UI.focusNext()/focusPrevious()/pressFocused()); those already
+//      no-op while the eyes are the active display, so you don't guard them yourself.
 //
 // Display-conflict rules: one display + one flush (never init a separate driver for the eyes);
 // show EITHER an LVGL screen OR the eye overlay as the top layer; and no blocking in loop().

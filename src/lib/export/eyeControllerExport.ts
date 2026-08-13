@@ -58,6 +58,15 @@ export function generateEyeControllerHeader(): string {
  *   if (myButtonPressed())                                   // 1. read your input
  *     EyeControllerRequestCombo(Wink, EYE_PRIORITY_SENSOR);  // 2. request it at a priority
  *   // 3. done - if something higher owns the eyes, the request is ignored automatically.
+ *
+ * -- Sharing the screen with an LVGL UI (see the UI export) --------------------------------------
+ *
+ *   When the eyes hand the display over to an LVGL screen, the eye render timer is PAUSED, so a
+ *   clip can never finish and any sensor still calling EyeControllerRequest* would mutate a frozen
+ *   player. Call EyeControllerSetSuspended(true) while the eyes are hidden so every request is
+ *   refused; call EyeControllerSetSuspended(false) once they are shown again. The eyes then resume
+ *   exactly where they left off. The UI export's mode-switch glue does this for you in the right
+ *   order (suspend -> EyesLvgl::Pause; EyesLvgl::Resume -> unsuspend).
  */
 
 #include "eyes.h"
@@ -77,6 +86,20 @@ enum EyePriority
 // equal-priority source may cut in). Plain globals, matching eyes.h's own non-inline globals.
 EyePriority eyeControllerActive = EYE_PRIORITY_NONE;
 bool        eyeControllerLocked = false;
+
+// Suspend gate. While true, EyeControllerCanControl() returns false, so EVERY EyeControllerRequest*
+// is refused and the eyes player is never touched. Set this true whenever the eyes are hidden
+// behind an LVGL UI screen (EyesLvgl::Pause()): the eye render timer is paused then, so a one-shot
+// clip would otherwise never reach "finished" and could wedge this controller, and any sensor still
+// requesting a clip would mutate a frozen player and make the eyes jump on return. Suspending
+// freezes arbitration so the eyes resume EXACTLY where they left off. Flip it via
+// EyeControllerSetSuspended() from your display-mode switch (see the "Wiring" note up top).
+bool eyeControllerSuspended = false;
+
+void EyeControllerSetSuspended(bool s)
+{
+    eyeControllerSuspended = s;
+}
 
 // True only while a ONE-SHOT clip is still transitioning. A looping clip (a looping combo or a
 // looping animation) is a resting state - it never ends, so it must never block arbitration - and
@@ -114,6 +137,7 @@ void EyeControllerUpdate()
 //   - unlocked -> an equal-or-higher priority may take over
 bool EyeControllerCanControl(EyePriority p)
 {
+    if (eyeControllerSuspended) return false;   // eyes are hidden -> refuse every request
     if (eyeControllerActive == EYE_PRIORITY_NONE || !EyeControllerIsPlaying())
         return true;
     if (eyeControllerLocked)
