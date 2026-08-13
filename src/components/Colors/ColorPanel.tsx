@@ -28,6 +28,7 @@ export function ColorPanel({ editTarget = 'live' }: { editTarget?: 'live' | 'vis
   const setColorLive = useStore((s) => s.setColor)
   const setVisualReferenceColor = useStore((s) => s.setVisualReferenceColor)
   const updateTrackKeyframeColors = useStore((s) => s.updateTrackKeyframeColors)
+  const setAnimationPupilColor = useStore((s) => s.setAnimationPupilColor)
   const checkpoint = useStore((s) => s.checkpoint)
 
   // Which single pose ("Expression") track keyframe (if any) the Timeline currently has
@@ -41,15 +42,25 @@ export function ColorPanel({ editTarget = 'live' }: { editTarget?: 'live' | 'vis
       ? anim.keyframes.find((k) => k.id === timelineSelection[0].id)
       : undefined
 
-  const colors: EyeColors =
+  // While an animation is selected in Animate mode (and no single pose keyframe is selected), the
+  // PUPIL is owned by the animation itself (see Animation.pupilColor) rather than the shared
+  // project palette — so the pupil field reads/writes the animation's own pupil. Every other
+  // colour field still edits the shared palette (pupil-first slice of per-component ownership).
+  const pupilOwnedByAnimation = editTarget === 'live' && mode === 'animate' && !!anim && !selectedPoseKeyframe
+
+  const baseColors: EyeColors =
     editTarget === 'visual-reference'
       ? effectiveVisualReferenceColors(project.visualReference, eyeTarget)
       : selectedPoseKeyframe
         ? keyframeColors(selectedPoseKeyframe, project.colors)
         : effectiveEyeColors(project, eyeTarget)
 
+  const colors: EyeColors =
+    pupilOwnedByAnimation && anim ? { ...baseColors, pupil: anim.pupilColor ?? baseColors.pupil } : baseColors
+
   const setColor = <K extends keyof EyeColors>(key: K, value: EyeColors[K]) => {
-    if (editTarget === 'visual-reference') setVisualReferenceColor(key, value)
+    if (pupilOwnedByAnimation && key === 'pupil') setAnimationPupilColor(value as string)
+    else if (editTarget === 'visual-reference') setVisualReferenceColor(key, value)
     else if (selectedPoseKeyframe) updateTrackKeyframeColors(selectedPoseKeyframe.id, { [key]: value } as Partial<EyeColors>)
     else setColorLive(key, value)
   }

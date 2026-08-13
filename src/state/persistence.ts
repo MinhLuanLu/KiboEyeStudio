@@ -831,7 +831,15 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
       // folderId defaults to null (root), order backfills from array index so the flat list renders
       // exactly as before. animation.id itself is never touched, so references stay valid.
       folderId: typeof a.folderId === 'string' ? a.folderId : null,
-      order: typeof a.order === 'number' ? a.order : animIndex
+      order: typeof a.order === 'number' ? a.order : animIndex,
+      // Owned pupil (see Animation.pupilColor). Old projects predate the field: backfill from the
+      // first pose keyframe that carries its own colours (its saved pupil), else the project's base
+      // pupil — either way the animation loads self-contained and looks exactly as it did, while
+      // no longer following the shared palette's pupil across Combination clips going forward.
+      pupilColor:
+        typeof a.pupilColor === 'string'
+          ? a.pupilColor
+          : poseKeyframes.find((k) => k.colors)?.colors?.pupil ?? colors.pupil
     }
   })
   const animationIds = new Set(animations.map((a) => a.id))

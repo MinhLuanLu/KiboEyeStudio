@@ -1,5 +1,5 @@
 import type { Animation, EyeColors, EyeParams, EyeSide, Keyframe, StickerKeyframe } from '@/types'
-import { PUPIL_TRACK_FIELDS, EYELID_TRACK_FIELDS, SHAPE_TRACK_FIELDS, keyframeParamsFor, keyframeColors } from '@/types'
+import { PUPIL_TRACK_FIELDS, EYELID_TRACK_FIELDS, SHAPE_TRACK_FIELDS, keyframeParamsFor, keyframeColors, animationColorBase } from '@/types'
 import { mixColors } from '@/lib/color'
 import { applyEasing } from './easing'
 
@@ -227,8 +227,12 @@ export function lerpColors(a: EyeColors, b: EyeColors, t: number): EyeColors {
  * had a colors field) plays back with exactly the old flat base palette, unchanged. */
 export function sampleAnimationColors(anim: Animation, timeMs: number, base: EyeColors): EyeColors {
   const kfs = anim.keyframes
-  if (kfs.length === 0 || !kfs.some((k) => k.colors)) return base
-  const at = (kf: Keyframe): EyeColors => keyframeColors(kf, base)
+  // Resolve the animation's OWN pupil into the base first (see animationColorBase) so every
+  // colorless frame — and the whole-animation fast-path below — carries this animation's saved
+  // pupil rather than the shared palette's. A keyframe with its own `colors` still overrides it.
+  const b = animationColorBase(anim, base)
+  if (kfs.length === 0 || !kfs.some((k) => k.colors)) return b
+  const at = (kf: Keyframe): EyeColors => keyframeColors(kf, b)
   if (kfs.length === 1) return at(kfs[0])
 
   const t = wrapMs(timeMs, anim.durationMs, anim.loop)

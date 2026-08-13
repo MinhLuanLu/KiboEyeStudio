@@ -495,6 +495,11 @@ interface StoreState {
   selectAnimation: (id: string) => void
   addAnimation: (name?: string, folderId?: string | null) => string
   duplicateAnimation: (id: string) => string
+  /** Set an animation's OWN pupil colour (see Animation.pupilColor). This is how the Colors panel
+   * edits the pupil while an animation is selected in Animate mode — it writes to the animation's
+   * self-owned pupil instead of the shared project palette, so the change sticks to this animation
+   * only and can't bleed into others. `id` defaults to the active animation. */
+  setAnimationPupilColor: (hex: string, id?: string) => void
   renameAnimation: (id: string, name: string) => void
   deleteAnimation: (id: string) => void
   reorderAnimation: (id: string, newIndex: number) => void
@@ -2001,6 +2006,10 @@ export const useStore = create<StoreState>()(
           order,
           loop: false,
           durationMs: 500,
+          // Owned pupil — captured from the current palette so this animation carries its own
+          // pupil from birth (see Animation.pupilColor / animationColorBase). Independent of the
+          // per-keyframe colours below so it still governs any keyframe later left colourless.
+          pupilColor: capturedColors.pupil,
           keyframes: [
             { id: nanoid(10), timeMs: 0, easing: 'easeInOut', params: { ...s.project.eyeBase }, leftParams: null, rightParams: null, colors: { ...capturedColors }, styleOverrides: overrides },
             { id: nanoid(10), timeMs: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, leftParams: null, rightParams: null, colors: { ...capturedColors }, styleOverrides: overrides }
@@ -2049,6 +2058,15 @@ export const useStore = create<StoreState>()(
       })
       return newId
     },
+
+    setAnimationPupilColor: (hex, id) =>
+      set((s) => {
+        const a = activeAnimationOf(s.project, id ?? s.activeAnimationId)
+        if (!a || a.pupilColor === hex) return
+        checkpointDraft(s)
+        a.pupilColor = hex
+        s.dirty = true
+      }),
 
     renameAnimation: (id, name) =>
       set((s) => {
@@ -2171,6 +2189,9 @@ export const useStore = create<StoreState>()(
         const copy: Animation = {
           ...animation,
           id: nanoid(10),
+          // External/older animation JSON may predate owned pupil — fall back to the current
+          // palette's pupil so the imported animation is still self-contained (see pupilColor).
+          pupilColor: animation.pupilColor ?? s.project.colors.pupil,
           // Older/external animation JSON predates styleOverrides — fall back to computing
           // it fresh against the current Visual Reference, same as loading a legacy project.
           keyframes: animation.keyframes.map((k) => ({

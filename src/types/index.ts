@@ -537,6 +537,15 @@ export interface Animation {
    * above animations within a parent). Absent on old projects — normalizeProject backfills it
    * from array index. */
   order?: number
+  /** This animation's OWN pupil color — the first slice of per-component color ownership (see
+   * animationColorBase). Independent of the shared project palette so a colorless animation (one
+   * whose pose keyframes carry no `colors`) never inherits another item's pupil at playback time:
+   * inside a Combination that's what keeps Idle blue after a red Heart, instead of the shared
+   * palette bleeding across clips. A pose keyframe's own `colors.pupil` still wins when present
+   * (explicit per-keyframe pupil animation); this only supplies the pupil for colorless frames.
+   * `null`/absent on old data = fall back to the base palette's pupil, but normalizeProject
+   * backfills it so it is effectively always set after load. */
+  pupilColor?: string | null
 }
 
 /** A folder in the Animation panel's tree — an editor-only organization layer (VS Code Explorer
@@ -1463,6 +1472,19 @@ export function keyframeParamsFor(kf: Keyframe, side: EyeSide): EyeParams {
  * selected keyframe. */
 export function keyframeColors(kf: Keyframe, base: EyeColors): EyeColors {
   return kf.colors ?? base
+}
+
+/** The base palette an Animation samples its (colorless) frames against — the project's shared
+ * `base` palette with ONLY the pupil replaced by the animation's own owned `pupilColor`. This is
+ * the single place per-animation pupil ownership is applied: every studio sampler and the C++
+ * export route their base through here (via sampleAnimationColors), so a colorless animation
+ * resolves its pupil from its own saved value instead of whatever the shared palette currently
+ * holds — the fix for pupil colour leaking between clips in a Combination. Returns `base`
+ * unchanged when the animation has no owned pupil (old data), so nothing else shifts. Non-pupil
+ * fields (sclera/iris/eyelid/highlight/…) still follow `base` — this is deliberately the
+ * pupil-only first slice of per-component colour ownership. */
+export function animationColorBase(anim: Pick<Animation, 'pupilColor'>, base: EyeColors): EyeColors {
+  return anim.pupilColor == null ? base : { ...base, pupil: anim.pupilColor }
 }
 
 export function expressionLeftParams(e: Expression): EyeParams {
