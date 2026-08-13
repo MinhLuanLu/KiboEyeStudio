@@ -101,6 +101,11 @@ void EyeControllerSetSuspended(bool s)
     eyeControllerSuspended = s;
 }
 
+bool EyeControllerIsSuspended()
+{
+    return eyeControllerSuspended;
+}
+
 // True only while a ONE-SHOT clip is still transitioning. A looping clip (a looping combo or a
 // looping animation) is a resting state - it never ends, so it must never block arbitration - and
 // so reports false. Reads eyes.h's player state directly (see eyes.h for these symbols).
