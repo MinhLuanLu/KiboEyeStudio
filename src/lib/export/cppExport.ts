@@ -2047,7 +2047,14 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
   float smoothFrac = smoothnessPct < 0 ? 0 : (smoothnessPct > 100 ? 1.0f : smoothnessPct / 100.0f);
   float tensionFrac = tensionPct < 0 ? 0 : (tensionPct > 100 ? 1.0f : tensionPct / 100.0f);
   float ampScale = stretchYPct < 0 ? 0 : (stretchYPct > 200 ? 2.0f : stretchYPct / 100.0f);
-  float offset = curveOffset * ampScale;
+  // Curve amplitude, SIGNED per lid to match the studio's eyelidCurvePoints() (drawEye.ts). The
+  // taper is a 0..1 height that pulls the lid's edge TOWARD the eye's centre; toward-centre is +y
+  // (downward) for the UPPER lid but -y (upward) for the LOWER lid. The studio applies exactly
+  // this as sign*curveOffset*taper (sign = +1 upper / -1 lower). Without the sign here the lower
+  // lid's curvature came out INVERTED on hardware (concave-down instead of concave-up) — the
+  // studio-vs-device eyelid-curve mismatch. offset feeds both the fast and rotated fill paths
+  // below, so signing it once fixes both. (curvature == 0 -> offset 0, so flat lids are unaffected.)
+  float offset = curveOffset * ampScale * (isUpper ? 1.0f : -1.0f);
 
   if (rotRad == 0.0f) {
     int16_t halfWi = (int16_t)ceilf(hx);
