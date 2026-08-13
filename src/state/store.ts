@@ -1985,6 +1985,15 @@ export const useStore = create<StoreState>()(
       set((s) => {
         const overrides = computeStyleOverrides(s.project.eyeBase, null, s.project.visualReference)
         const order = s.project.animations.filter((a) => (a.folderId ?? null) === (folderId ?? null)).length
+        // Capture the CURRENT palette (project.colors — i.e. the applied Expression's colours, or
+        // the base if none is applied) onto the pose keyframes, so the animation carries its own
+        // colours instead of following whatever palette happens to be loaded later. Without this a
+        // "colourless" animation resolves to the single global project.colors at playback, so a
+        // Combination of several such animations shows them all in the same colour (and the colour
+        // it captured at creation appears to "change"). Storing it per-keyframe makes Expression →
+        // Animation → Combination → ESP32 all show the same colours. A fresh, independent copy
+        // (EyeColors is flat) so editing the source Expression later can't mutate this animation.
+        const capturedColors = { ...s.project.colors }
         s.project.animations.push({
           id,
           name: uniqueName(name, s.project.animations.map((a) => a.name)),
@@ -1993,8 +2002,8 @@ export const useStore = create<StoreState>()(
           loop: false,
           durationMs: 500,
           keyframes: [
-            { id: nanoid(10), timeMs: 0, easing: 'easeInOut', params: { ...s.project.eyeBase }, leftParams: null, rightParams: null, styleOverrides: overrides },
-            { id: nanoid(10), timeMs: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, leftParams: null, rightParams: null, styleOverrides: overrides }
+            { id: nanoid(10), timeMs: 0, easing: 'easeInOut', params: { ...s.project.eyeBase }, leftParams: null, rightParams: null, colors: { ...capturedColors }, styleOverrides: overrides },
+            { id: nanoid(10), timeMs: 500, easing: 'easeInOut', params: { ...s.project.eyeBase }, leftParams: null, rightParams: null, colors: { ...capturedColors }, styleOverrides: overrides }
           ],
           leftEyeKeyframes: [],
           rightEyeKeyframes: [],
