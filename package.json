@@ -11,7 +11,8 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "dist": "electron-vite build && electron-builder",
-    "verify:eye-geometry": "npx tsx scripts/verifyEyeGeometryParity.ts"
+    "verify:eye-geometry": "npx tsx scripts/verifyEyeGeometryParity.ts",
+    "verify:screen-only": "npx tsx --tsconfig tsconfig.web.json scripts/verifyScreenOnlyIsolation.ts"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.3",

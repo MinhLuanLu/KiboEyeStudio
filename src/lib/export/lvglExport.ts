@@ -3045,6 +3045,19 @@ export function deriveUiScreenSnakeName(name: string): string {
   return snakeRaw.replace(/_?screen$/, '') || snakeRaw
 }
 
+/** The single sanitized symbol PREFIX every Screen-Only export uses for its internal namespace
+ * AND its public API — so a whole screen's generated symbols share one collision-free prefix
+ * derived from the screen's own name (item 8 of the isolation contract), rather than each symbol
+ * being fixed up by hand. Built on deriveUiScreenSnakeName so it always agrees with the screen's
+ * filename (`<prefix>.h`): "WiFi Screen" -> "wifi_screen", "Main-Settings" -> "main_settings_screen",
+ * "About / Info" -> "about_info_screen". Used to build `<prefix>_internal` (the namespace holding
+ * every internal variable/helper/callback/registry/style/focus symbol) and the public forwarders
+ * (`<prefix>_create()`, `<prefix>_Register()`, `<prefix>_focus_next()`, …), so no Screen-Only
+ * header can ever collide with a Complete Project export or with another Screen-Only header. */
+export function screenSymbolPrefix(screenName: string): string {
+  return `${deriveUiScreenSnakeName(screenName)}_screen`
+}
+
 /** `customName`, when non-empty, overrides the screen's own name for filenames/function names
  * only (`create_<name>_screen()`/`show_<name>_screen()`, `<name>_screen.h/.cpp`) — doc comments
  * and USAGE.md still reference the screen's real name for semantic identity. Lets a user export
@@ -3064,6 +3077,11 @@ export async function generateUiScreenExport(project: Project, screenId: string,
 
   const trimmedScreenName = customName?.trim() || screen.name
   const snake = deriveUiScreenSnakeName(trimmedScreenName)
+  // One sanitized prefix for this whole screen (item 8) — `<prefix>` is the public API prefix and
+  // `<prefix>_internal` is the namespace every internal symbol below lives in, so nothing this
+  // header defines can collide with a Complete Project export or another Screen-Only header.
+  const symPrefix = screenSymbolPrefix(trimmedScreenName)
+  const internalNs = `${symPrefix}_internal`
   const createFnName = `create_${snake}_screen`
   const showFnName = `show_${snake}_screen`
   const headerFilename = `${snake}_screen.h`
@@ -3217,24 +3235,24 @@ export async function generateUiScreenExport(project: Project, screenId: string,
  *
 ${
   widgets.length > 0
-    ? ` * Finding a widget by its ID: call \`${findWidgetFnName}("id")\` — every widget on this screen
- * is registered under its Properties-panel ID (or its auto-generated fallback id for a widget
- * with no ID set, e.g. \`w_7wF5T4_obj\` -> "7wF5T4") the moment it's created, via
- * Project_Register(). Its \`lv_obj_t*\` is also just an \`inline\` variable named the same way (e.g.
- * id="wifiButton" -> wifiButton_obj) if you'd rather reference it directly — declare a matching
- * \`extern lv_obj_t* wifiButton_obj;\` in your own .cpp for that. Use
- * ${snake}_focus_group()/lv_group_get_focused() if you just need "whichever widget is currently
- * focused," or clearFocus() to drop focus entirely (e.g. right before switching screens).
+    ? ` * Finding a widget by its ID: call \`${symPrefix}_find_widget("id")\` — every widget on this
+ * screen is registered under its Properties-panel ID (or its auto-generated fallback id for a
+ * widget with no ID set, e.g. \`w_7wF5T4_obj\` -> "7wF5T4") the moment it's created, via
+ * ${symPrefix}_Register(). Its \`lv_obj_t*\` is an \`inline\` variable inside \`namespace
+ * ${internalNs}\` (e.g. id="wifiButton" -> ${internalNs}::wifiButton_obj) if you'd rather
+ * reference it directly — declare a matching \`namespace ${internalNs} { extern lv_obj_t*
+ * wifiButton_obj; }\` in your own .cpp for that. Use ${symPrefix}_focus_group()/
+ * lv_group_get_focused() if you just need "whichever widget is currently focused," or
+ * ${symPrefix}_clear_focus() to drop focus entirely (e.g. right before switching screens).
  *
- * NOTE if you export more than one screen this way and #include them in the same .cpp:
- * Project_Register/s_widgetIds/s_widgetObjs/s_widgetCount/clearFocus are deliberately named to
- * match Complete Project mode's own registry (not screen-scoped) — ${maxWidgetsMacro} and
- * ${findWidgetFnName}()/${snake}_focus_group()/${focusGroupVarName} already are screen-scoped and
- * never collide, but two Screen-Only headers included together WILL collide on those unscoped
- * names — and because every declaration here is now \`inline\` (not \`static\`), a mismatch there
- * (e.g. two screens' different widget counts) is a hard compile/link error, not just a
- * silently-wrong duplicate. Rename them by hand in one of the files if you hit that, or export
- * "Complete Project" instead for a real shared registry across every screen.
+ * FULLY SELF-CONTAINED — export as many screens this way as you like and #include them all in the
+ * same .cpp (alongside a Complete Project export's "ui.h") without a single redefinition/
+ * conflicting-declaration/duplicate-symbol error: every internal symbol (the widget registry,
+ * ${symPrefix}_Register, the focus group, clear-focus, styles, each widget's \`lv_obj_t*\`, every
+ * event callback and builder) lives inside \`namespace ${internalNs}\`, private to this screen.
+ * Only the screen-prefixed public API (${symPrefix}_create/show/find_widget/Register/focus_next/
+ * focus_previous/press/clear_focus/focus_group) is global, and each name carries this screen's own
+ * prefix so two screens never clash. (${maxWidgetsMacro} is likewise screen-specific.)
  *`
     : ` * This screen has no widgets yet, so there's nothing to register or focus.`
 }
@@ -3271,6 +3289,17 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
       c.push('')
     }
   }
+  // ---- Everything below is wrapped in `namespace <screen>_internal` so that EVERY generated
+  // symbol — the style init + style vars, the focus group, clearFocus, the widget-by-ID registry
+  // (widgetIds/widgetObjs/widgetCount/Project_Register/find), every per-widget `lv_obj_t*`, every
+  // event callback, and every named builder function — is private to THIS screen. That is what lets
+  // any number of Screen-Only headers, plus a Complete Project export, be #include'd into the same
+  // translation unit without a single redefinition/conflicting-declaration/duplicate-symbol error.
+  // A readable, screen-prefixed public API (see the forwarders after the namespace closes) is the
+  // only thing exposed globally. The internal symbols keep their short generic names purely because
+  // the namespace already guarantees uniqueness — no per-symbol renaming needed. ----
+  c.push(`namespace ${internalNs} {`)
+  c.push('')
   c.push(stylesCode)
   c.push('')
 
@@ -3576,6 +3605,43 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
   c.push('  }')
   c.push('}')
   c.push('')
+  c.push(`}  // namespace ${internalNs}`)
+  c.push('')
+
+  // ---- Public API — the ONLY symbols this header exposes at global scope. Every name is prefixed
+  // with this screen's own sanitized name (see screenSymbolPrefix), so it can never clash with a
+  // Complete Project export or another Screen-Only header. Everything they call lives in the
+  // namespace above. The original `create_<screen>_screen()` / `show_<screen>_screen()` names are
+  // also kept working (via `using`) so existing code and older USAGE.md snippets still compile. ----
+  c.push('// ---- Public API (screen-prefixed; internals are namespaced above) ----')
+  c.push(`inline lv_obj_t* ${symPrefix}_create() { return ${internalNs}::${createFnName}(); }`)
+  c.push(`inline void ${symPrefix}_show() { ${internalNs}::${showFnName}(); }`)
+  if (nonTemplateWidgets.length > 0) {
+    c.push(`inline lv_obj_t* ${symPrefix}_find_widget(const char* id) { return ${internalNs}::${findWidgetFnName}(id); }`)
+    c.push(`inline void ${symPrefix}_Register(const char* id, lv_obj_t* obj) { ${internalNs}::Project_Register(id, obj); }`)
+  }
+  c.push(`inline lv_group_t* ${symPrefix}_focus_group() { return ${internalNs}::${snake}_focus_group(); }`)
+  c.push(`inline void ${symPrefix}_clear_focus() { ${internalNs}::clearFocus(); }`)
+  if (firstFocusableVar) {
+    c.push(`inline void ${symPrefix}_focus_next() { ${internalNs}::${focusNextFnName}(); }`)
+    c.push(`inline void ${symPrefix}_focus_previous() { ${internalNs}::${focusPrevFnName}(); }`)
+    c.push(`inline void ${symPrefix}_press() { ${internalNs}::${pressFnName}(); }`)
+  }
+  c.push('')
+  c.push('// ---- Back-compat aliases: the pre-namespace public names still resolve (these bring the')
+  c.push('// screen-scoped — and therefore already collision-free — public functions into global')
+  c.push('// scope). The generic internals (clearFocus/Project_Register/the registry) are NOT among')
+  c.push('// them; use the screen-prefixed public API above for those. ----')
+  c.push(`using ${internalNs}::${createFnName};`)
+  c.push(`using ${internalNs}::${showFnName};`)
+  c.push(`using ${internalNs}::${snake}_focus_group;`)
+  if (nonTemplateWidgets.length > 0) c.push(`using ${internalNs}::${findWidgetFnName};`)
+  if (firstFocusableVar) {
+    c.push(`using ${internalNs}::${focusNextFnName};`)
+    c.push(`using ${internalNs}::${focusPrevFnName};`)
+    c.push(`using ${internalNs}::${pressFnName};`)
+  }
+  c.push('')
 
   const files: LvglExportFile[] = [{ name: headerFilename, content: c.join('\n') }]
   if (identByAssetId.size > 0) {
@@ -3595,7 +3661,8 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
       notes,
       exampleWidgetId,
       widgets.length > 0 ? findWidgetFnName : null,
-      firstFocusableVar ? { focusNextFnName, focusPrevFnName, clickFocusedFnName: pressFnName } : null
+      firstFocusableVar ? { focusNextFnName, focusPrevFnName, clickFocusedFnName: pressFnName } : null,
+      symPrefix
     )
   })
 
@@ -3612,7 +3679,8 @@ function generateUsageMd(
   notes: string[],
   exampleWidgetId: string | null,
   findWidgetFnName: string | null,
-  encoderHelpers: { focusNextFnName: string; focusPrevFnName: string; clickFocusedFnName: string } | null
+  encoderHelpers: { focusNextFnName: string; focusPrevFnName: string; clickFocusedFnName: string } | null,
+  symPrefix: string
 ): string {
   return `# ${screen.name} — LVGL Screen
 
@@ -3645,22 +3713,22 @@ can trigger the same callback manually (as if a touch/mouse/keyboard/encoder had
 \`lv_obj_send_event()\`:
 
 \`\`\`cpp
-${exampleWidgetId ? `lv_obj_send_event(${toCIdentifier(exampleWidgetId)}_obj, LV_EVENT_CLICKED, nullptr);` : '// (no named widget on this screen yet — give one an ID in the Properties panel to reference it here)'}
-lv_obj_send_event(${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'someWidget_obj'}, LV_EVENT_PRESSED, nullptr);
-lv_obj_send_event(${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'someWidget_obj'}, LV_EVENT_RELEASED, nullptr);
-lv_obj_send_event(${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'someWidget_obj'}, LV_EVENT_VALUE_CHANGED, nullptr);
+${exampleWidgetId ? `lv_obj_t* w = ${symPrefix}_find_widget("${exampleWidgetId}");  // look a widget up by its Properties-panel ID
+lv_obj_send_event(w, LV_EVENT_CLICKED, nullptr);` : '// (no named widget on this screen yet — give one an ID in the Properties panel to reference it here)'}
+${exampleWidgetId ? `lv_obj_send_event(w, LV_EVENT_PRESSED, nullptr);
+lv_obj_send_event(w, LV_EVENT_RELEASED, nullptr);
+lv_obj_send_event(w, LV_EVENT_VALUE_CHANGED, nullptr);` : ''}
 \`\`\`
 
-(This screen's widget variables — e.g. \`${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'wifiButton_obj'}\` — are \`inline\` (real, single-instance, not per-.cpp-copy) in \`${snake}_screen.h\`; reference
-them from your own \`.cpp\` file by adding your own \`extern\` declaration.${
+${
     findWidgetFnName
-      ? ` Or skip the \`extern\`
-entirely and call \`${findWidgetFnName}("${exampleWidgetId ?? 'wifiButton'}")\` — every widget is registered under its
-Properties-panel ID (or its auto-generated fallback id, e.g. \`w_7wF5T4_obj\` -> "7wF5T4") the
-moment it's created, via \`Project_Register()\`.`
+      ? `Every widget is registered under its Properties-panel ID (or its auto-generated fallback id, e.g.
+\`w_7wF5T4_obj\` -> "7wF5T4") the moment it's created, via \`${symPrefix}_Register()\`. Look one up
+with \`${symPrefix}_find_widget("id")\` as above. If you'd rather reference a widget's \`lv_obj_t*\`
+variable directly, it lives inside \`namespace ${symPrefix}_internal\` (e.g. \`${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'wifiButton_obj'}\`),
+so declare a matching \`namespace ${symPrefix}_internal { extern lv_obj_t* ${exampleWidgetId ? `${toCIdentifier(exampleWidgetId)}_obj` : 'wifiButton_obj'}; }\` in your own \`.cpp\`. `
       : ''
-  } Call \`lv_group_get_focused(${snake}_focus_group())\`
-if you just need "whatever's focused right now".)
+  }Call \`lv_group_get_focused(${symPrefix}_focus_group())\` if you just need "whatever's focused right now".
 
 ## Focus (keyboard / rotary encoder / physical buttons)
 
