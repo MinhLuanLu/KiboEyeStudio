@@ -3594,15 +3594,25 @@ ${nonTemplateWidgets.length > 0 ? '#include <cstring>   // for strcmp() — used
   c.push('  return screen;')
   c.push('}')
   c.push('')
+  // Persistent-screen lifecycle (must match Complete Project mode, which builds each screen once
+  // and only ever lv_screen_load()s between them). This screen is built ONCE, cached here, and
+  // reused on every later show — so navigating away and back is a pure switch, never a rebuild.
+  c.push('// This screen, built once and cached — see the show function below for why it is never')
+  c.push('// rebuilt or deleted.')
+  c.push(`inline lv_obj_t* ${symPrefix}_obj = nullptr;`)
+  c.push('')
   c.push(`inline void ${showFnName}() {`)
-  c.push(`  lv_obj_t* screen = ${createFnName}();`)
+  c.push('  // Build once, then only ever SWITCH to it. Two hard rules make this safe inside a host')
+  c.push('  // project (e.g. a Complete Project export) that owns its own screens:')
+  c.push('  //   1. Never rebuild — reuse the cached object, so back-navigation returns to the same')
+  c.push('  //      screen instance instead of leaking a new one every time.')
+  c.push("  //   2. Never lv_obj_delete()/lv_obj_clean() the outgoing screen. It may be a screen the")
+  c.push('  //      host still holds a pointer to; deleting it would dangle that pointer and the next')
+  c.push('  //      lv_screen_load() of it would fault (ESP32 guru-meditation reboot). Screen teardown')
+  c.push('  //      is the host project\'s responsibility, not a per-switch side effect.')
+  c.push(`  if (${symPrefix}_obj == nullptr) { ${symPrefix}_obj = ${createFnName}(); }`)
   c.push(`  ACTIVE_SCREEN = ${screenEnumName};`)
-  c.push('  lv_obj_t* old_screen = lv_screen_active();')
-  c.push('  lv_screen_load(screen);')
-  c.push('  lv_refr_now(NULL);')
-  c.push('  if (old_screen != NULL && old_screen != screen) {')
-  c.push('    lv_obj_delete(old_screen);')
-  c.push('  }')
+  c.push(`  lv_screen_load(${symPrefix}_obj);   // pure switch — the normal lv_timer_handler() refresh repaints it; no forced synchronous refresh`)
   c.push('}')
   c.push('')
   c.push(`}  // namespace ${internalNs}`)
@@ -3702,8 +3712,17 @@ void setup() {
 }
 \`\`\`
 
-Call \`${createFnName}()\` instead of \`${showFnName}()\` if you want to build the screen without
-immediately showing it (e.g. to pre-create it at startup and show it later).
+\`${showFnName}()\` builds this screen **once** (the first time you call it) and caches it; every
+later call just switches back to that same screen with \`lv_screen_load()\`. It never rebuilds and
+never deletes the screen you're leaving — so it's safe to call repeatedly, and safe to combine with
+a "Complete Project" export (which owns its own screens the same persistent way). Navigate back to
+this screen simply by calling \`${showFnName}()\` again. Tearing a screen down (if you ever need to)
+is the host project's job, not something this switch does for you.
+
+\`${createFnName}()\` is the low-level builder \`${showFnName}()\` uses under the hood; it returns a
+brand-new screen object every call and does **not** populate the cache, so prefer \`${showFnName}()\`
+for normal navigation and only call \`${createFnName}()\` directly if you're managing a screen
+instance yourself.
 
 ## Event callbacks
 
@@ -3821,6 +3840,7 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
   const nonTemplateWidgets = widgets.filter((w) => !templateDescendantIds.has(w.id))
 
   const snake = deriveUiScreenSnakeName(screen.name)
+  const symPrefix = screenSymbolPrefix(screen.name)
   const createFnName = `create_${snake}_screen`
   const showFnName = `show_${snake}_screen`
   const stylesNsPrefix = 'Ui'
@@ -4097,15 +4117,15 @@ export function generateLiveScreenCode(uiDesign: UiDesignProject, screenId: stri
   out.push('  return screen;')
   out.push('}')
   out.push('')
+  // Persistent-screen lifecycle — identical model to the real exports: build once, cache, and only
+  // ever lv_screen_load() between screens. Never rebuild and never delete the outgoing screen (a
+  // host project may still own it — deleting it dangles its pointer and the next load faults).
+  out.push(`static lv_obj_t* ${symPrefix}_obj = nullptr;`)
+  out.push('')
   out.push(`void ${showFnName}() {`)
-  out.push(`  lv_obj_t* screen = ${createFnName}();`)
+  out.push(`  if (${symPrefix}_obj == nullptr) { ${symPrefix}_obj = ${createFnName}(); }  // build once, then reuse`)
   out.push(`  ACTIVE_SCREEN = ${screenEnumName};`)
-  out.push('  lv_obj_t* old_screen = lv_screen_active();')
-  out.push('  lv_screen_load(screen);')
-  out.push('  lv_refr_now(NULL);')
-  out.push('  if (old_screen != NULL && old_screen != screen) {')
-  out.push('    lv_obj_delete(old_screen);')
-  out.push('  }')
+  out.push(`  lv_screen_load(${symPrefix}_obj);   // pure switch — never delete the previous screen; lv_timer_handler() repaints`)
   out.push('}')
 
   if (firstFocusableVar) {

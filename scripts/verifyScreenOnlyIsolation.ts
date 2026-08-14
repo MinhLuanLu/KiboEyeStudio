@@ -17,7 +17,7 @@
  * Screen-Only header).
  */
 import { useStore } from '../src/state/store'
-import { generateUiScreenExport, generateLvglExport, screenSymbolPrefix } from '../src/lib/export/lvglExport'
+import { generateUiScreenExport, generateLvglExport, generateLiveScreenCode, screenSymbolPrefix } from '../src/lib/export/lvglExport'
 import { KIBO_PROJECT_PRESET } from '../src/lib/export/exportTarget'
 
 function fail(msg: string): never {
@@ -153,4 +153,29 @@ for (const [name, code, pfx] of [['wifi_screen.h', wifiH, prefixW], ['settings_s
 }
 ok('both headers expose the full screen-prefixed public API (create/show/Register/find_widget/focus_next/focus_previous/press/clear_focus)')
 
-console.log('\nSCREEN-ONLY ISOLATION VERIFIED — Complete Project + wifi_screen + settings_screen coexist with no symbol conflicts.')
+// ---- Screen LIFECYCLE contract (use-after-free fix): every generated screen must build once,
+// cache in a per-screen pointer, and switch with a pure lv_screen_load() — NEVER lv_obj_delete()
+// the outgoing screen (it may belong to the host project) and NEVER force lv_refr_now() mid-switch. ----
+// Strip // line-comments so a comment that merely NAMES the anti-pattern isn't a false positive.
+const stripComments = (code: string) => code.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')
+for (const [name, code, pfx] of [['wifi_screen.h', wifiH, prefixW], ['settings_screen.h', setH, prefixS]] as const) {
+  const active = stripComments(code)
+  if (!code.includes(`inline lv_obj_t* ${pfx}_obj = nullptr;`)) fail(`${name} is missing the cached screen pointer ${pfx}_obj`)
+  if (!active.includes(`if (${pfx}_obj == nullptr) { ${pfx}_obj = create_`)) fail(`${name} show() does not build-once into the cache`)
+  if (!active.includes(`lv_screen_load(${pfx}_obj)`)) fail(`${name} show() does not switch to the cached screen`)
+  if (active.includes('lv_obj_delete(')) fail(`${name} still calls lv_obj_delete() — must never delete a screen on switch`)
+  if (active.includes('lv_refr_now(')) fail(`${name} still forces lv_refr_now() — switching must be a pure lv_screen_load()`)
+}
+ok('both Screen-Only headers build-once + cache + pure-switch, with no lv_obj_delete / lv_refr_now')
+
+// Complete Project ui.cpp must likewise never delete a screen on switch (persistent model).
+if (uiCpp.includes('lv_obj_delete(old_screen')) fail('ui.cpp deletes the previous screen on switch — must be persistent')
+ok('Complete Project ui.cpp uses the persistent (never-delete) screen model')
+
+// The studio live code-preview panel must show the same safe pattern (users may copy it).
+const live = generateLiveScreenCode(project.uiDesign, wifiScreenId)
+if (live.includes('lv_obj_delete(') || live.includes('lv_refr_now(')) fail('live code preview still shows the delete/refr_now anti-pattern')
+if (!/static lv_obj_t\* \w+_obj = nullptr;/.test(live)) fail('live code preview does not use a cached screen pointer')
+ok('live code-preview panel shows the persistent build-once/never-delete pattern')
+
+console.log('\nSCREEN-ONLY ISOLATION + LIFECYCLE VERIFIED — Complete Project + wifi_screen + settings_screen coexist, and navigating between them never rebuilds or deletes a screen.')
