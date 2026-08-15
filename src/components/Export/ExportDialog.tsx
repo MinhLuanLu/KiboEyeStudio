@@ -147,10 +147,15 @@ export function ExportDialog() {
   // of both files (eyes.h + eyeController.h) so the controller's `#include "eyes.h"` resolves;
   // when off, it saves the single eyes.h exactly as before.
   const [includeController, setIncludeController] = useState(true)
+  // Default-on "Include Expressions" — when unchecked, the C++ export leaves out every standalone
+  // Expression's code/data (Expr_* poses/colours/stickers + the demo's expression cycling) to
+  // shrink the file. Animations & combinations are self-contained and always exported (see
+  // generateCppHeader's GenerateCppOptions), so disabling this never breaks their playback.
+  const [includeExpressions, setIncludeExpressions] = useState(true)
 
   if (!open) return null
 
-  const content = tab === 'json-project' ? projectToJson(project) : tab === 'json-animation' ? (anim ? animationToJson(anim) : '// no animation selected') : generateCppHeader(project)
+  const content = tab === 'json-project' ? projectToJson(project) : tab === 'json-animation' ? (anim ? animationToJson(anim) : '// no animation selected') : generateCppHeader(project, { includeExpressions })
 
   const handleExport = async () => {
     // C++ export with the controller option on -> save TWO plain .h files (no zip). Both are
@@ -230,6 +235,16 @@ export function ExportDialog() {
           {tab === 'cpp' && <TimelineTimingValidationPanel project={project} />}
           {tab === 'cpp' && <PupilShapeValidationPanel project={project} />}
           {tab === 'cpp' && <StickerValidationPanel project={project} />}
+
+          {tab === 'cpp' && (
+            <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+              <input type="checkbox" className="mt-0.5" checked={includeExpressions} onChange={(e) => setIncludeExpressions(e.target.checked)} />
+              <span>
+                <span className="font-medium">Include Expressions</span>
+                <span className="text-studio-muted"> — export each standalone Expression (its pose, colors, and stickers) so you can call <code>SetExpression(...)</code>. Uncheck to leave all expression code out and shrink the file; animations and combinations still export and play normally.</span>
+              </span>
+            </label>
+          )}
 
           {tab === 'cpp' && (
             <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">

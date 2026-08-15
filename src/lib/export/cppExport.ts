@@ -4280,7 +4280,26 @@ function exportDemo(project: Project): string {
   return lines.join('\n')
 }
 
-export function generateCppHeader(project: Project): string {
+export interface GenerateCppOptions {
+  /** When false, no standalone Expression code/data is emitted — Expr_* frames, colour sets,
+   * sticker arrays, the EYES_ENABLE_DEMO expression-cycling block, and the Quick Reference's
+   * expression list are all left out — to shrink the file for projects with many expressions.
+   * Animations and combinations are unaffected: they bake their own frames/colours and never
+   * reference an Expr_* symbol (see exportAnimation/exportAnimationCombos), so excluding
+   * expressions can never produce a missing reference or break playback. Defaults to `true`. */
+  includeExpressions?: boolean
+}
+
+export function generateCppHeader(projectInput: Project, options: GenerateCppOptions = {}): string {
+  const includeExpressions = options.includeExpressions !== false
+  // Excluding expressions is a single, safe swap: run the whole exporter against a project whose
+  // expression list is empty. Every expression-dependent section below (the cross-scope sticker
+  // asset table, exprIdents, the Expressions section itself, exportQuickReference, exportDemo)
+  // already reads `project.expressions` and already handles the empty case, so nothing else needs
+  // to change and no Expr_* symbol is ever emitted or referenced. Animations/combos read none of
+  // this, so they export byte-for-byte the same and keep working.
+  const expressionsWereExcluded = !includeExpressions && projectInput.expressions.length > 0
+  const project: Project = includeExpressions ? projectInput : { ...projectInput, expressions: [] }
   const guard = `EYES_EYE_ANIMATIONS_${toIdentifier(project.name).toUpperCase() || 'PROJECT'}_H`
   // Computed once up front: builds the cross-scope raster-asset table (project + every
   // expression + every animation) so exportAnimation()/exportExpression() below can each emit
@@ -4717,12 +4736,20 @@ ${project.animations.map((a) => exportAnimation(a, animIdents.get(a.id)!, projec
 ${exportAnimationCombos(project)}
 
 // ---- Expressions (static poses) -------------------------------------------
-
+${
+  expressionsWereExcluded
+    ? `
+// Excluded from this export ("Include Expressions" was unchecked) to reduce file size.
+// No Expr_* poses/colours/stickers are emitted here. Animations and combinations above are
+// self-contained and unaffected. Re-export with "Include Expressions" enabled to get the
+// per-expression data and SetExpression(Expr_*) constants back.`
+    : `
 ${project.expressions
   .map((e) =>
     exportExpression(e, exprIdents.get(e.id)!, project.customPupilShapes, project.customEyeShapes, project.display.backgroundColor, stickersExport.assetsById, stickersExport.rasterIndexByAssetId)
   )
-  .join('\n\n')}
+  .join('\n\n')}`
+}
 
 ${exportDemo(project)}
 
