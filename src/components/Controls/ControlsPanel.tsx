@@ -10,9 +10,10 @@ import {
   keyframeColors,
   EYE_PARAM_RANGES,
   EYE_COLOR_RANGES,
-  DEFAULT_EYE_PARAMS
+  DEFAULT_EYE_PARAMS,
+  MAX_HIGHLIGHTS
 } from '@/types'
-import type { EyeParams, EyeColors, EyeShapeId, PupilShapeId, Keyframe, EyeSide } from '@/types'
+import type { EyeParams, EyeColors, EyeShapeId, PupilShapeId, Keyframe, EyeSide, EyeHighlight } from '@/types'
 import { Slider } from '@/components/ui/Slider'
 import { ColorField } from '@/components/ui/ColorField'
 import { EyeTargetSelector } from '@/components/ui/EyeTargetSelector'
@@ -677,22 +678,67 @@ export function ControlsPanel({ editTarget = 'live' }: { editTarget?: 'live' | '
             </Section>
 
             <Section title="Highlight">
-              <label className="flex items-center justify-between text-sm cursor-pointer select-none">
-                <span className="studio-label">Highlight</span>
-                <span className="flex items-center gap-1.5 text-xs text-studio-muted">
+              {/* Highlight 1 — the primary/always-present glint (EyeParams.highlightX/Y/Size/Visible). */}
+              <div className="flex items-center justify-between">
+                <span className="studio-label">Highlight 1</span>
+                <label className="flex items-center gap-1.5 text-xs text-studio-muted cursor-pointer select-none">
                   <input type="checkbox" checked={target.highlightVisible} onChange={(e) => { checkpoint(); setParam('highlightVisible', e.target.checked) }} />
                   Visible
-                </span>
-              </label>
+                </label>
+              </div>
               <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('highlightX')} onReset={() => resetStyleField('highlightX')}>
-                <Slider label="Highlight Position X" value={target.highlightX} min={EYE_PARAM_RANGES.highlightX[0]} max={EYE_PARAM_RANGES.highlightX[1]} onCommitStart={checkpoint} onChange={(v) => setParam('highlightX', v)} />
+                <Slider label="Position X" value={target.highlightX} min={EYE_PARAM_RANGES.highlightX[0]} max={EYE_PARAM_RANGES.highlightX[1]} onCommitStart={checkpoint} onChange={(v) => setParam('highlightX', v)} />
               </StyleFieldRow>
               <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('highlightY')} onReset={() => resetStyleField('highlightY')}>
-                <Slider label="Highlight Position Y" value={target.highlightY} min={EYE_PARAM_RANGES.highlightY[0]} max={EYE_PARAM_RANGES.highlightY[1]} onCommitStart={checkpoint} onChange={(v) => setParam('highlightY', v)} />
+                <Slider label="Position Y" value={target.highlightY} min={EYE_PARAM_RANGES.highlightY[0]} max={EYE_PARAM_RANGES.highlightY[1]} onCommitStart={checkpoint} onChange={(v) => setParam('highlightY', v)} />
               </StyleFieldRow>
               <StyleFieldRow active={!!editingContext} overridden={isStyleOverridden('highlightSize')} onReset={() => resetStyleField('highlightSize')}>
-                <Slider label="Highlight Size" value={target.highlightSize} min={EYE_PARAM_RANGES.highlightSize[0]} max={EYE_PARAM_RANGES.highlightSize[1]} onCommitStart={checkpoint} onChange={(v) => setParam('highlightSize', v)} />
+                <Slider label="Size" value={target.highlightSize} min={EYE_PARAM_RANGES.highlightSize[0]} max={EYE_PARAM_RANGES.highlightSize[1]} onCommitStart={checkpoint} onChange={(v) => setParam('highlightSize', v)} />
               </StyleFieldRow>
+
+              {/* Extra highlights — each fully independent position/size/visibility, sharing the one
+                  Highlight color (Colors panel). Written as a whole array through the same setParam
+                  target routing the primary uses, so they honor Both/Left/Right + keyframe context. */}
+              {(target.extraHighlights ?? []).map((h, i) => {
+                const setExtras = (next: EyeHighlight[]) => setParam('extraHighlights', next)
+                const patch = (p: Partial<EyeHighlight>) => setExtras((target.extraHighlights ?? []).map((x, idx) => (idx === i ? { ...x, ...p } : x)))
+                return (
+                  <div key={i} className="flex flex-col gap-2.5 border-t border-studio-border pt-3 mt-1">
+                    <div className="flex items-center justify-between">
+                      <span className="studio-label">Highlight {i + 2}</span>
+                      <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-1.5 text-xs text-studio-muted cursor-pointer select-none">
+                          <input type="checkbox" checked={h.visible} onChange={() => { checkpoint(); patch({ visible: !h.visible }) }} />
+                          Visible
+                        </label>
+                        <button className="text-xs text-studio-muted hover:text-studio-text" onClick={() => { checkpoint(); setExtras((target.extraHighlights ?? []).filter((_, idx) => idx !== i)) }}>
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                    <Slider label="Position X" value={h.x} min={EYE_PARAM_RANGES.highlightX[0]} max={EYE_PARAM_RANGES.highlightX[1]} onCommitStart={checkpoint} onChange={(v) => patch({ x: v })} />
+                    <Slider label="Position Y" value={h.y} min={EYE_PARAM_RANGES.highlightY[0]} max={EYE_PARAM_RANGES.highlightY[1]} onCommitStart={checkpoint} onChange={(v) => patch({ y: v })} />
+                    <Slider label="Size" value={h.size} min={EYE_PARAM_RANGES.highlightSize[0]} max={EYE_PARAM_RANGES.highlightSize[1]} onCommitStart={checkpoint} onChange={(v) => patch({ size: v })} />
+                  </div>
+                )
+              })}
+
+              <button
+                className="studio-btn text-xs self-start mt-1"
+                disabled={1 + (target.extraHighlights ?? []).length >= MAX_HIGHLIGHTS}
+                onClick={() => {
+                  checkpoint()
+                  setParam('extraHighlights', [
+                    ...(target.extraHighlights ?? []),
+                    { x: DEFAULT_EYE_PARAMS.highlightX, y: DEFAULT_EYE_PARAMS.highlightY, size: DEFAULT_EYE_PARAMS.highlightSize, visible: true }
+                  ])
+                }}
+              >
+                + Add Highlight{1 + (target.extraHighlights ?? []).length >= MAX_HIGHLIGHTS ? ` (max ${MAX_HIGHLIGHTS})` : ''}
+              </button>
+              <p className="text-[11px] text-studio-muted leading-snug">
+                All highlights share the single Highlight color set in the Colors panel.
+              </p>
             </Section>
           </div>
         )}

@@ -1,6 +1,24 @@
 import type { UiDesignProject, UiWorkspaceViewSettings } from './uiDesign'
 import { defaultUiWorkspaceView } from './uiDesign'
 
+/** One extra eye-glint highlight beyond the primary (EyeParams.highlightX/Y/Size/Visible). Its
+ * x/y/size use the exact same units and ranges as the primary highlight (x/y are -40..40 percent
+ * of the pupil/iris radius, size 0..60 percent), and it renders identically — same color (the
+ * shared EyeColors.highlight), same 92% alpha, same silhouette clip and per-eye sign-mirroring.
+ * See EyeParams.extraHighlights and MAX_EXTRA_HIGHLIGHTS. */
+export interface EyeHighlight {
+  x: number
+  y: number
+  size: number
+  visible: boolean
+}
+
+/** Total highlights an eye can show (the always-present primary + the extras). Bounds the
+ * fixed-size firmware export array; the UI's "Add highlight" stops here. */
+export const MAX_HIGHLIGHTS = 6
+/** Extras beyond the primary highlight (MAX_HIGHLIGHTS - 1). */
+export const MAX_EXTRA_HIGHLIGHTS = MAX_HIGHLIGHTS - 1
+
 export interface EyeParams {
   width: number
   height: number
@@ -153,6 +171,13 @@ export interface EyeParams {
   /** Highlight (eye glint) visibility — false hides it entirely, keeping its size/position so
    * re-enabling restores them. A real exported behavior mirroring pupilVisible/irisVisible. */
   highlightVisible: boolean
+  /** ADDITIONAL highlight glints beyond the primary one above (highlightX/Y/Size/Visible stay the
+   * always-present highlight #1, so old projects and every existing code path are unchanged). Each
+   * extra highlight owns its own position/size/visibility and is drawn exactly like the primary,
+   * sharing the single Highlight color from EyeColors. Empty on legacy data. Capped at
+   * MAX_EXTRA_HIGHLIGHTS so the fixed-size firmware export stays bounded. Rides in EyeParams (so it
+   * animates per-keyframe like the primary and is copied wholesale with the pose). */
+  extraHighlights: EyeHighlight[]
   /** "Disable Eyelid" toggle (Eyelid settings). When true, the eye-shape BORDER/outline ring is
    * not drawn at all. The border is normally an outer ring one borderWidth larger than the eye
    * shape (see drawEye.ts), so it sits OUTSIDE the eyelid's clip and stays visible around the
@@ -1171,6 +1196,7 @@ export const DEFAULT_EYE_PARAMS: EyeParams = {
   highlightY: -18,
   highlightSize: 22,
   highlightVisible: true,
+  extraHighlights: [],
   disableEyelid: false
 }
 
@@ -1285,6 +1311,7 @@ export const EYE_PARAM_RANGES: Record<
     | 'upperEyelidLocked'
     | 'lowerEyelidLocked'
     | 'disableEyelid'
+    | 'extraHighlights'
   >,
   [number, number]
 > = {

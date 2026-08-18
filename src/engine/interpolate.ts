@@ -1,4 +1,4 @@
-import type { Animation, EyeColors, EyeParams, EyeSide, Keyframe, StickerKeyframe } from '@/types'
+import type { Animation, EyeColors, EyeHighlight, EyeParams, EyeSide, Keyframe, StickerKeyframe } from '@/types'
 import { PUPIL_TRACK_FIELDS, EYELID_TRACK_FIELDS, SHAPE_TRACK_FIELDS, keyframeParamsFor, keyframeColors, animationColorBase } from '@/types'
 import { mixColors } from '@/lib/color'
 import { applyEasing } from './easing'
@@ -92,6 +92,30 @@ export function lerpParams(a: EyeParams, b: EyeParams, t: number): EyeParams {
   out.upperEyelidLocked = t < 0.5 ? a.upperEyelidLocked : b.upperEyelidLocked
   out.lowerEyelidLocked = t < 0.5 ? a.lowerEyelidLocked : b.lowerEyelidLocked
   out.disableEyelid = t < 0.5 ? a.disableEyelid : b.disableEyelid
+  out.extraHighlights = lerpExtraHighlights(a.extraHighlights, b.extraHighlights, t)
+  return out
+}
+
+/** Interpolates the extra-highlight arrays by index — x/y/size lerp linearly, visible steps at the
+ * midpoint, exactly like the primary highlight. When the two poses have different extra counts, an
+ * extra present on only one side holds its own values across the whole segment (no pop-in/out): the
+ * missing side is treated as an identical copy, so the result length is the larger of the two. Kept
+ * in lockstep with eyesLerpExtraHighlights() in cppExport.ts so studio and firmware agree. */
+function lerpExtraHighlights(a: EyeHighlight[] | undefined, b: EyeHighlight[] | undefined, t: number): EyeHighlight[] {
+  const av = a ?? []
+  const bv = b ?? []
+  const n = Math.max(av.length, bv.length)
+  const out: EyeHighlight[] = []
+  for (let i = 0; i < n; i++) {
+    const h0 = av[i] ?? bv[i]
+    const h1 = bv[i] ?? av[i]
+    out.push({
+      x: h0.x + (h1.x - h0.x) * t,
+      y: h0.y + (h1.y - h0.y) * t,
+      size: h0.size + (h1.size - h0.size) * t,
+      visible: t < 0.5 ? h0.visible : h1.visible
+    })
+  }
   return out
 }
 

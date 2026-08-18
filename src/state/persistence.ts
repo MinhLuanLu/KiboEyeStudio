@@ -11,6 +11,7 @@ import type {
   EditorState,
   Expression,
   EyeColors,
+  EyeHighlight,
   EyeParams,
   EyeSide,
   Keyframe,
@@ -33,6 +34,7 @@ import {
   DEFAULT_STICKER_ANIM,
   DEFAULT_TIMING,
   FIXED_TRACK_KINDS,
+  MAX_EXTRA_HIGHLIGHTS,
   PROJECT_FILE_VERSION,
   computeStyleOverrides,
   defaultEditorState
@@ -151,7 +153,25 @@ function migrateEyelidRoundness(params: Partial<EyeParams>): Partial<EyeParams> 
 }
 
 function normalizeEyeParams(params: Partial<EyeParams> | undefined): EyeParams {
-  return { ...DEFAULT_EYE_PARAMS, ...(params ?? {}), ...migrateEyelidRoundness(params ?? {}) }
+  const merged = { ...DEFAULT_EYE_PARAMS, ...(params ?? {}), ...migrateEyelidRoundness(params ?? {}) }
+  // extraHighlights: coerce to a clean array of well-formed highlights, dropping malformed entries
+  // and capping at MAX_EXTRA_HIGHLIGHTS. Old projects have no field -> DEFAULT's [] rides through.
+  merged.extraHighlights = normalizeExtraHighlights((params ?? {}).extraHighlights)
+  return merged
+}
+
+function normalizeExtraHighlights(raw: unknown): EyeHighlight[] {
+  if (!Array.isArray(raw)) return []
+  const num = (v: unknown, fallback: number) => (typeof v === 'number' && Number.isFinite(v) ? v : fallback)
+  return raw
+    .filter((h): h is Record<string, unknown> => !!h && typeof h === 'object')
+    .slice(0, MAX_EXTRA_HIGHLIGHTS)
+    .map((h) => ({
+      x: num(h.x, DEFAULT_EYE_PARAMS.highlightX),
+      y: num(h.y, DEFAULT_EYE_PARAMS.highlightY),
+      size: num(h.size, DEFAULT_EYE_PARAMS.highlightSize),
+      visible: h.visible !== false
+    }))
 }
 
 function normalizeEyeParamsOverride(params: Partial<EyeParams> | null | undefined): EyeParams | null {

@@ -209,7 +209,8 @@ export function drawEye(
     disableEyelid,
     highlightX,
     highlightY,
-    highlightSize
+    highlightSize,
+    extraHighlights
   } = params
   const sign = mirrorX ? -1 : 1
 
@@ -471,10 +472,13 @@ export function drawEye(
   const highlightBaseX = pupilVisible && pupilRX > 0.1 ? pupilRX : irisRX
   const highlightBaseY = pupilVisible && pupilRY > 0.1 ? pupilRY : irisRY
   const highlightBase = (highlightBaseX + highlightBaseY) / 2
-  const hR = Math.max(0, (highlightSize / 100) * highlightBase)
-  if (highlightVisible && hR > 0.1 && highlightBase > 0.1) {
-    const hx = pcx + sign * (highlightX / 100) * highlightBaseX
-    const hy = pcy + (highlightY / 100) * highlightBaseY
+  // The primary highlight plus every extra glint (see EyeParams.extraHighlights) all draw the same
+  // way: same base sizing, same sign-mirroring for the right eye, same shared color + 92% alpha.
+  const drawHighlight = (hx100: number, hy100: number, size: number, visible: boolean) => {
+    const hR = Math.max(0, (size / 100) * highlightBase)
+    if (!visible || hR <= 0.1 || highlightBase <= 0.1) return
+    const hx = pcx + sign * (hx100 / 100) * highlightBaseX
+    const hy = pcy + (hy100 / 100) * highlightBaseY
     ctx.beginPath()
     ctx.fillStyle = theme.highlight
     ctx.globalAlpha = 0.92
@@ -482,6 +486,8 @@ export function drawEye(
     ctx.fill()
     ctx.globalAlpha = 1
   }
+  drawHighlight(highlightX, highlightY, highlightSize, highlightVisible)
+  for (const h of extraHighlights ?? []) drawHighlight(h.x, h.y, h.size, h.visible)
 
   // Eyelids — slide in from top/bottom, softly curved, clipped to the eye shape. Always
   // matches the display's black background so it reads as the lid occluding the eye.
