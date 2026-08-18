@@ -15,6 +15,7 @@ import type {
   StickerInstance
 } from '@/types'
 import {
+  MAX_EXTRA_HIGHLIGHTS,
   animationColorBase,
   clampFps,
   expressionLeftColors,
@@ -138,7 +139,11 @@ function eyeFrameLiteral(
   easing: EasingType,
   customShapes: CustomPupilShape[],
   customEyeShapes: CustomEyeShape[],
-  bezier?: [number, number, number, number]
+  bezier?: [number, number, number, number],
+  // Number of EXTRA-highlight slots the EyeFrame struct carries (the project-wide max, see
+  // projectMaxExtraHighlights). 0 = this project uses no extra highlights, so nothing is appended
+  // and the frame literal is byte-for-byte identical to before the multi-highlight feature.
+  exHlSlots = 0
 ): string {
   const [bx1, by1, bx2, by2] = bezier ?? [42, 0, 58, 100]
   // eyeShapeVisible=false folds down to EYE_SHAPE_DEFAULT here (rather than a separate exported
@@ -209,6 +214,21 @@ function eyeFrameLiteral(
     params.highlightVisible ? 'true' : 'false',
     params.disableEyelid ? 'true' : 'false'
   ]
+  if (exHlSlots > 0) {
+    // Extra highlights: a count + four fixed-size arrays (x/y/size/visible), padded with zeros/
+    // false up to exHlSlots so every EyeFrame in the project has the same struct layout (required
+    // for the PROGMEM array). Matches the field order appended to `struct EyeFrame` and lerped by
+    // eyesLerpFrame()/eyesLerpLive() (see the studio's playerCode()).
+    const ex = (params.extraHighlights ?? []).slice(0, exHlSlots)
+    const pad = <T,>(fn: (h: (typeof ex)[number]) => T, def: T): T[] => Array.from({ length: exHlSlots }, (_, i) => (i < ex.length ? fn(ex[i]) : def))
+    fields.push(
+      String(ex.length),
+      `{ ${pad((h) => clampByte(h.x), 0).join(', ')} }`,
+      `{ ${pad((h) => clampByte(h.y), 0).join(', ')} }`,
+      `{ ${pad((h) => Math.round(h.size), 0).join(', ')} }`,
+      `{ ${pad((h) => (h.visible ? 'true' : 'false'), 'false').join(', ')} }`
+    )
+  }
   return `  { ${fields.join(', ')} }`
 }
 
@@ -329,7 +349,8 @@ function exportAnimation(
   assetsById: Map<string, StickerAsset>,
   rasterIndexByAssetId: Map<string, number>,
   baseColors: EyeColors,
-  backgroundColor: string
+  backgroundColor: string,
+  exHlSlots: number
 ): string {
   const baked = bakeAnimationFrames(anim)
   const diverges = baked.some((f) => JSON.stringify(f.leftParams) !== JSON.stringify(f.rightParams))
@@ -342,7 +363,7 @@ function exportAnimation(
   const lines = [
     `// ${anim.name}${anim.loop ? ' (loops)' : ' (plays once)'}`,
     `const EyeFrame Anim_${ident}_frames[] PROGMEM = {`,
-    baked.map((f) => eyeFrameLiteral(f.leftParams, f.durationMs, f.easing, customShapes, customEyeShapes, f.customBezier)).join(',\n'),
+    baked.map((f) => eyeFrameLiteral(f.leftParams, f.durationMs, f.easing, customShapes, customEyeShapes, f.customBezier, exHlSlots)).join(',\n'),
     `};`
   ]
   let framesRightIdent = 'nullptr'
@@ -350,7 +371,7 @@ function exportAnimation(
     framesRightIdent = `Anim_${ident}_framesRight`
     lines.push(
       `const EyeFrame ${framesRightIdent}[] PROGMEM = {`,
-      baked.map((f) => eyeFrameLiteral(f.rightParams, f.durationMs, f.easing, customShapes, customEyeShapes, f.customBezier)).join(',\n'),
+      baked.map((f) => eyeFrameLiteral(f.rightParams, f.durationMs, f.easing, customShapes, customEyeShapes, f.customBezier, exHlSlots)).join(',\n'),
       `};`
     )
   }
@@ -389,7 +410,8 @@ function exportExpression(
   customEyeShapes: CustomEyeShape[],
   backgroundColor: string,
   assetsById: Map<string, StickerAsset>,
-  rasterIndexByAssetId: Map<string, number>
+  rasterIndexByAssetId: Map<string, number>,
+  exHlSlots: number
 ): string {
   const leftColors = expressionLeftColors(expr)
   const rightColors = expressionRightColors(expr)
@@ -406,7 +428,7 @@ function exportExpression(
 
   if (!expressionShapeDiverges(expr)) {
     return [
-      `const EyeFrame Expr_${ident}_Frame PROGMEM = \n${eyeFrameLiteral(expr.params, 0, 'linear', customShapes, customEyeShapes)};`,
+      `const EyeFrame Expr_${ident}_Frame PROGMEM = \n${eyeFrameLiteral(expr.params, 0, 'linear', customShapes, customEyeShapes, undefined, exHlSlots)};`,
       ...colorLines,
       ...stickerLines,
       `const EyeExpression Expr_${ident} = { &Expr_${ident}_Frame, &Expr_${ident}_ColorsLeft, &Expr_${ident}_ColorsRight, Expr_${ident}_Stickers, Expr_${ident}_Stickers_Count };`
@@ -417,8 +439,8 @@ function exportExpression(
     `// shared pose, so this exports as separate pieces for manual eyesDrawEye()/`,
     `// eyesDrawStickers() use instead of one bundled EyeExpression (see the Quick Reference`,
     `// below).`,
-    `const EyeFrame Expr_${ident}_L PROGMEM = \n${eyeFrameLiteral(expressionLeftParams(expr), 0, 'linear', customShapes, customEyeShapes)};`,
-    `const EyeFrame Expr_${ident}_R PROGMEM = \n${eyeFrameLiteral(expressionRightParams(expr), 0, 'linear', customShapes, customEyeShapes)};`,
+    `const EyeFrame Expr_${ident}_L PROGMEM = \n${eyeFrameLiteral(expressionLeftParams(expr), 0, 'linear', customShapes, customEyeShapes, undefined, exHlSlots)};`,
+    `const EyeFrame Expr_${ident}_R PROGMEM = \n${eyeFrameLiteral(expressionRightParams(expr), 0, 'linear', customShapes, customEyeShapes, undefined, exHlSlots)};`,
     ...colorLines,
     ...stickerLines
   ].join('\n')
@@ -1129,7 +1151,11 @@ function exportTiming(display: Project['display']): string {
 // plug-and-play — no separate companion file needed. Own nested include guard so two
 // exported headers (different projects) can both be #included in the same sketch without
 // a duplicate-definition error; only the outer EYES_EYE_ANIMATIONS_* guard differs per file.
-const PLAYER_CODE = `#ifndef EYES_EYE_PLAYER_H
+// The player/runtime C++ (structs, interpolation, drawing, playback). A function — not a const —
+// so it can size the per-frame EXTRA-highlight arrays (LiveEye/eyesLerpFrame/eyesLerpLive/draw) to
+// the project's actual max. exHlN === 0 emits byte-for-byte the pre-multi-highlight code.
+function playerCode(exHlN: number): string {
+  return `#ifndef EYES_EYE_PLAYER_H
 #define EYES_EYE_PLAYER_H
 
 #include <math.h>
@@ -1215,7 +1241,14 @@ struct LiveEye {
   bool upperEyelidVisible;
   bool lowerEyelidVisible;
   bool disableEyelid;
-};
+${exHlN > 0 ? `  // Extra highlight glints (see EyeParams.extraHighlights) — interpolated to float like the
+  // primary highlight above; exHlCount says how many of the ${exHlN} slots are live this frame.
+  uint8_t exHlCount;
+  float exHlX[${exHlN}];
+  float exHlY[${exHlN}];
+  float exHlSize[${exHlN}];
+  bool exHlVisible[${exHlN}];
+` : ''}};
 
 // Shortest-path interpolation between two angles in degrees, wrapping through 0/360 rather
 // than always going the "long way" (e.g. 350deg -> 10deg at t=0.5 gives 0deg, not 180deg).
@@ -1288,7 +1321,14 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   r.upperEyelidVisible = t < 0.5f ? a.upperEyelidVisible : b.upperEyelidVisible;
   r.lowerEyelidVisible = t < 0.5f ? a.lowerEyelidVisible : b.lowerEyelidVisible;
   r.disableEyelid = t < 0.5f ? a.disableEyelid : b.disableEyelid;
-  return r;
+${exHlN > 0 ? `  r.exHlCount = t < 0.5f ? a.exHlCount : b.exHlCount;
+  for (uint8_t i = 0; i < ${exHlN}; i++) {
+    r.exHlX[i] = a.exHlX[i] + (b.exHlX[i] - a.exHlX[i]) * t;
+    r.exHlY[i] = a.exHlY[i] + (b.exHlY[i] - a.exHlY[i]) * t;
+    r.exHlSize[i] = a.exHlSize[i] + (b.exHlSize[i] - a.exHlSize[i]) * t;
+    r.exHlVisible[i] = t < 0.5f ? a.exHlVisible[i] : b.exHlVisible[i];
+  }
+` : ''}  return r;
 }
 
 // Same as eyesLerpFrame above, but both endpoints are already-interpolated LiveEye poses
@@ -1353,7 +1393,14 @@ inline LiveEye eyesLerpLive(const LiveEye& a, const LiveEye& b, float t) {
   r.upperEyelidVisible = t < 0.5f ? a.upperEyelidVisible : b.upperEyelidVisible;
   r.lowerEyelidVisible = t < 0.5f ? a.lowerEyelidVisible : b.lowerEyelidVisible;
   r.disableEyelid = t < 0.5f ? a.disableEyelid : b.disableEyelid;
-  return r;
+${exHlN > 0 ? `  r.exHlCount = t < 0.5f ? a.exHlCount : b.exHlCount;
+  for (uint8_t i = 0; i < ${exHlN}; i++) {
+    r.exHlX[i] = a.exHlX[i] + (b.exHlX[i] - a.exHlX[i]) * t;
+    r.exHlY[i] = a.exHlY[i] + (b.exHlY[i] - a.exHlY[i]) * t;
+    r.exHlSize[i] = a.exHlSize[i] + (b.exHlSize[i] - a.exHlSize[i]) * t;
+    r.exHlVisible[i] = t < 0.5f ? a.exHlVisible[i] : b.exHlVisible[i];
+  }
+` : ''}  return r;
 }
 
 // Adafruit_GFX has no fillEllipse — fill one via horizontal scanlines using the ellipse
@@ -3844,7 +3891,21 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
     // the studio's fixed-alpha look (RGB565 can't do the real per-pixel alpha blend here).
     eyesFillHighlightClipped(gfx, cx, cy, hCenterLocalX, hCenterLocalY, hR, eyeHx, eyeHy, eyeRx, eyeRy, eyeShape, rotRad, colors.highlightBlend);
   }
-
+${exHlN > 0 ? `  // Extra highlight glints — each drawn exactly like the primary above (same base sizing,
+  // sign-mirroring, silhouette clip, and shared highlightBlend color). Invisible/zero-size slots
+  // are skipped. Matches the studio's drawEye.ts extra-highlight loop.
+  for (uint8_t hi = 0; hi < e.exHlCount; hi++) {
+    if (!e.exHlVisible[hi]) continue;
+    int16_t exHRr = (int16_t)((e.exHlSize[hi] / 100.0f) * hlBase);
+    if (exHRr <= 0 || hlBase <= 0) continue;
+    float exHCX = (float)pxLocal + sign * (e.exHlX[hi] / 100.0f) * hlBaseX;
+    float exHCY = (float)pyLocal + (e.exHlY[hi] / 100.0f) * hlBaseY;
+    float exHeyeHx = w / 2.0f, exHeyeHy = h / 2.0f;
+    float exHeyeRx = radius < exHeyeHx ? (float)radius : exHeyeHx;
+    float exHeyeRy = radius < exHeyeHy ? (float)radius : exHeyeHy;
+    eyesFillHighlightClipped(gfx, cx, cy, exHCX, exHCY, exHRr, exHeyeHx, exHeyeHy, exHeyeRx, exHeyeRy, eyeShape, rotRad, colors.highlightBlend);
+  }
+` : ''}
   if (e.upperEyelidVisible) {
     eyesFillEyelid(gfx, cx, cy, w, h, radius, true, e.upperEyelid, e.upperEyelidTilt, e.upperEyelidCurvature,
                    e.upperEyelidLeftRoundness, e.upperEyelidRightRoundness, e.upperEyelidStretchX, e.upperEyelidStretchY, e.upperEyelidSkew,
@@ -4097,6 +4158,7 @@ inline void Detach() {
 
 #endif // EYES_EYE_PLAYER_H
 `
+}
 
 // Lists every identifier SetExpression()/PlayAnimation() actually accept, so you don't have
 // to go hunting through the generated data below to find the right name.
@@ -4290,6 +4352,32 @@ export interface GenerateCppOptions {
   includeExpressions?: boolean
 }
 
+/** Project-wide maximum number of EXTRA highlights (beyond the primary) any exported pose uses —
+ * across every expression and every animation keyframe (all tracks, both eyes). Clamped to
+ * MAX_EXTRA_HIGHLIGHTS. This sizes the fixed per-frame arrays in the firmware export; 0 means the
+ * export is byte-identical to the pre-multi-highlight output. */
+function projectMaxExtraHighlights(project: Project): number {
+  let max = 0
+  const consider = (p: EyeParams | null | undefined) => {
+    if (p?.extraHighlights && p.extraHighlights.length > max) max = p.extraHighlights.length
+  }
+  for (const e of project.expressions) {
+    consider(e.params)
+    consider(e.leftParams)
+    consider(e.rightParams)
+  }
+  for (const a of project.animations) {
+    for (const arr of [a.keyframes, a.leftEyeKeyframes, a.rightEyeKeyframes, a.pupilKeyframes, a.eyelidKeyframes]) {
+      for (const kf of arr) {
+        consider(kf.params)
+        consider(kf.leftParams)
+        consider(kf.rightParams)
+      }
+    }
+  }
+  return Math.min(MAX_EXTRA_HIGHLIGHTS, max)
+}
+
 export function generateCppHeader(projectInput: Project, options: GenerateCppOptions = {}): string {
   const includeExpressions = options.includeExpressions !== false
   // Excluding expressions is a single, safe swap: run the whole exporter against a project whose
@@ -4300,6 +4388,10 @@ export function generateCppHeader(projectInput: Project, options: GenerateCppOpt
   // this, so they export byte-for-byte the same and keep working.
   const expressionsWereExcluded = !includeExpressions && projectInput.expressions.length > 0
   const project: Project = includeExpressions ? projectInput : { ...projectInput, expressions: [] }
+  // How many EXTRA-highlight slots every EyeFrame carries (project-wide max). 0 = no exported pose
+  // uses extra highlights, so EyeFrame/LiveEye/the lerps/the draw all emit exactly the pre-feature
+  // code (byte-identical export for existing projects). See playerCode()/eyeFrameLiteral().
+  const exHlN = projectMaxExtraHighlights(project)
   const guard = `EYES_EYE_ANIMATIONS_${toIdentifier(project.name).toUpperCase() || 'PROJECT'}_H`
   // Computed once up front: builds the cross-scope raster-asset table (project + every
   // expression + every animation) so exportAnimation()/exportExpression() below can each emit
@@ -4615,7 +4707,15 @@ struct EyeFrame {
   bool disableEyelid;    // "Disable Eyelid" — true skips the eye-shape border ring entirely so no
                          // outline shows around the eyelid-covered part of the eye (eye contents +
                          // eyelid clip are untouched). Mirrors the studio's drawEye.ts.
-};
+${exHlN > 0 ? `  // Extra highlight glints beyond the primary highlight above (see EyeParams.extraHighlights).
+  // exHlCount live slots of ${exHlN}; each x/y is -40..40 (% of pupil/iris radius), size 0..60 (%).
+  // All share the single highlight color (EYE_COLOR_HIGHLIGHT / EyeColorSet.highlightBlend).
+  uint8_t exHlCount;
+  int8_t exHlX[${exHlN}];
+  int8_t exHlY[${exHlN}];
+  uint8_t exHlSize[${exHlN}];
+  bool exHlVisible[${exHlN}];
+` : ''}};
 
 // One eye's full color palette (RGB565) plus its border thickness — the studio's Eye
 // Target: Left/Right editing lets the two eyes end up with different palettes (and
@@ -4727,11 +4827,11 @@ struct EyeExpression {
 
 // ---- Player (easing, interpolation, drawing, playback) -----------------------
 
-${PLAYER_CODE}
+${playerCode(exHlN)}
 
 // ---- Animations -----------------------------------------------------------
 
-${project.animations.map((a) => exportAnimation(a, animIdents.get(a.id)!, project.customPupilShapes, project.customEyeShapes, stickersExport.assetsById, stickersExport.rasterIndexByAssetId, project.colors, project.display.backgroundColor)).join('\n\n')}
+${project.animations.map((a) => exportAnimation(a, animIdents.get(a.id)!, project.customPupilShapes, project.customEyeShapes, stickersExport.assetsById, stickersExport.rasterIndexByAssetId, project.colors, project.display.backgroundColor, exHlN)).join('\n\n')}
 
 ${exportAnimationCombos(project)}
 
@@ -4746,7 +4846,7 @@ ${
     : `
 ${project.expressions
   .map((e) =>
-    exportExpression(e, exprIdents.get(e.id)!, project.customPupilShapes, project.customEyeShapes, project.display.backgroundColor, stickersExport.assetsById, stickersExport.rasterIndexByAssetId)
+    exportExpression(e, exprIdents.get(e.id)!, project.customPupilShapes, project.customEyeShapes, project.display.backgroundColor, stickersExport.assetsById, stickersExport.rasterIndexByAssetId, exHlN)
   )
   .join('\n\n')}`
 }
