@@ -2,14 +2,15 @@ import { useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore, getActiveAnimation } from '@/state/store'
 import { projectToJson, animationToJson } from '@/lib/export/jsonExport'
-import { generateCppHeader } from '@/lib/export/cppExport'
+import { generateCppHeader, generateArduinoSketch, generateArduinoReadme, arduinoSketchName } from '@/lib/export/cppExport'
 import { generateEyeControllerHeader } from '@/lib/export/eyeControllerExport'
+import { createZip } from '@/lib/export/zip'
 import { validateStickerExport, type StickerValidationResult } from '@/lib/export/validateStickers'
 import { validatePupilShapeExport, type PupilShapeValidationResult } from '@/lib/export/validatePupilShapes'
 import { validateTimelineTiming, type TimelineTimingValidationResult } from '@/lib/export/validateTimelineTiming'
 import { validateEyeRotationExport, type EyeRotationValidationResult } from '@/lib/export/validateEyeRotation'
 import { parseAnimationJson } from '@/lib/import/jsonImport'
-import { exportFile, importJsonDialog } from '@/state/persistence'
+import { exportFile, exportBinaryFile, importJsonDialog } from '@/state/persistence'
 
 type Tab = 'json-project' | 'json-animation' | 'cpp'
 type ValidationStatus = 'passed' | 'warning' | 'failed'
@@ -152,12 +153,32 @@ export function ExportDialog() {
   // shrink the file. Animations & combinations are self-contained and always exported (see
   // generateCppHeader's GenerateCppOptions), so disabling this never breaks their playback.
   const [includeExpressions, setIncludeExpressions] = useState(true)
+  // "Export Complete Arduino Project" — when on, the C++ export produces a ready-to-compile Arduino
+  // sketch folder as a single .zip (<name>/<name>.ino + eyes.h [+ eyeController.h] + README) instead
+  // of saving the bare eyes.h. Off by default so the plain-header workflow is unchanged.
+  const [exportArduinoProject, setExportArduinoProject] = useState(false)
 
   if (!open) return null
 
   const content = tab === 'json-project' ? projectToJson(project) : tab === 'json-animation' ? (anim ? animationToJson(anim) : '// no animation selected') : generateCppHeader(project, { includeExpressions })
 
   const handleExport = async () => {
+    // "Export Complete Arduino Project" -> one .zip laid out as a ready-to-compile sketch folder:
+    //   <name>/<name>.ino, <name>/eyes.h, [<name>/eyeController.h], <name>/README.md
+    // The folder and the .ino share `arduinoSketchName(...)` (Arduino requires that), and eyes.h is
+    // named exactly "eyes.h" so both the .ino's and eyeController.h's `#include "eyes.h"` resolve.
+    if (tab === 'cpp' && exportArduinoProject) {
+      const folder = arduinoSketchName(project.name)
+      const entries = [
+        { name: `${folder}/${folder}.ino`, content: generateArduinoSketch(project, { includeExpressions }) },
+        { name: `${folder}/eyes.h`, content },
+        ...(includeController ? [{ name: `${folder}/eyeController.h`, content: generateEyeControllerHeader() }] : []),
+        { name: `${folder}/README.md`, content: generateArduinoReadme(project, { includeExpressions, includeController }) }
+      ]
+      const ok = await exportBinaryFile(`${folder}.zip`, createZip(entries), ['zip'])
+      setStatus(ok ? `Exported ${folder}.zip` : 'Export cancelled')
+      return
+    }
     // C++ export with the controller option on -> save TWO plain .h files (no zip). Both are
     // dropped straight into the Arduino sketch folder. The eyes header is named exactly "eyes.h"
     // (not "<name>_eyes.h") so eyeController.h's own `#include "eyes.h"` resolves without editing.
@@ -238,6 +259,16 @@ export function ExportDialog() {
 
           {tab === 'cpp' && (
             <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+              <input type="checkbox" className="mt-0.5" checked={exportArduinoProject} onChange={(e) => setExportArduinoProject(e.target.checked)} />
+              <span>
+                <span className="font-medium">Export Complete Arduino Project</span>
+                <span className="text-studio-muted"> — download a ready-to-compile sketch as a single <code>.zip</code>: a folder containing <code>{arduinoSketchName(project.name)}.ino</code>, <code>eyes.h</code>{includeController ? <>, <code>eyeController.h</code></> : null}, and a README. Open the <code>.ino</code>, set your display pins, and upload. (Without this, only the <code>eyes.h</code> header is saved.)</span>
+              </span>
+            </label>
+          )}
+
+          {tab === 'cpp' && (
+            <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
               <input type="checkbox" className="mt-0.5" checked={includeExpressions} onChange={(e) => setIncludeExpressions(e.target.checked)} />
               <span>
                 <span className="font-medium">Include Expressions</span>
@@ -263,7 +294,7 @@ export function ExportDialog() {
           <div className="flex items-center justify-between p-3 border-t border-studio-border">
             <span className="text-xs text-studio-muted">{status}</span>
             <button className="studio-btn-primary" onClick={handleExport}>
-              Save to File...
+              {tab === 'cpp' && exportArduinoProject ? `Download ${arduinoSketchName(project.name)}.zip` : 'Save to File...'}
             </button>
           </div>
         </motion.div>
