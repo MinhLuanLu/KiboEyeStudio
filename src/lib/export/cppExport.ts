@@ -27,6 +27,7 @@ import {
   rightEyeColors
 } from '@/types'
 import { hexToRgb565, mixColors, shadeColor } from '@/lib/color'
+import { computeBackgroundRect } from '@/renderer/backgroundLayout'
 import { PUPIL_SHAPE_POLYGONS } from '@/renderer/pupilShapes'
 import { EYE_SHAPE_POLYGONS } from '@/renderer/eyeShapes'
 import { sampleAnimationEye, sampleAnimationColors } from '@/engine/interpolate'
@@ -1154,7 +1155,7 @@ function exportTiming(display: Project['display']): string {
 // The player/runtime C++ (structs, interpolation, drawing, playback). A function — not a const —
 // so it can size the per-frame EXTRA-highlight arrays (LiveEye/eyesLerpFrame/eyesLerpLive/draw) to
 // the project's actual max. exHlN === 0 emits byte-for-byte the pre-multi-highlight code.
-function playerCode(exHlN: number): string {
+function playerCode(exHlN: number, backgroundCode: string): string {
   return `#ifndef EYES_EYE_PLAYER_H
 #define EYES_EYE_PLAYER_H
 
@@ -3957,10 +3958,10 @@ inline LiveEye eyesMirroredEyelid(const LiveEye& e) {
   return m;
 }
 
-template <typename T>
+${backgroundCode}template <typename T>
 inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& left, const LiveEye& right, uint16_t bgColor,
                              const EyeColorSet& leftColors, const EyeColorSet& rightColors) {
-  // Per-eye spacing: each eye is placed using ITS OWN distance, exactly like the studio's
+${backgroundCode ? '  eyesDrawBackground(gfx);  // whole-display background image, drawn first (behind eyes/pupils/eyelids/stickers)\n' : ''}  // Per-eye spacing: each eye is placed using ITS OWN distance, exactly like the studio's
   // faceRenderer.ts (halfLeft = params.distance/2 for the left eye, halfRight = rightParams.distance/2
   // for the right). A single shared half taken from the left eye would misplace the RIGHT eye
   // whenever left/right distance diverge (independent per-eye animation), producing a studio<->device
@@ -4352,6 +4353,85 @@ export interface GenerateCppOptions {
   includeExpressions?: boolean
 }
 
+/** Emits the whole-display background image: an RGB565 PROGMEM bitmap (the uploaded PNG/SVG,
+ * pre-composited over the display background colour at its opacity so the device needs no alpha
+ * blending) plus a template eyesDrawBackground(gfx) that blits it — nearest-neighbour scaled into
+ * the destination rect computed by the SAME computeBackgroundRect() the studio preview uses, and
+ * clipped to the display's own ellipse on a round panel. Returns { code:'', hasBackground:false }
+ * when there's no (visible, non-transparent) background, so a project without one exports exactly
+ * as before. Called once per frame at the very top of eyesDrawEyePair(), behind every eye/sticker. */
+function exportBackground(project: Project): { code: string; hasBackground: boolean } {
+  const bg = project.backgroundImage
+  if (!bg || !bg.visible || bg.opacity <= 0 || !bg.rgba || bg.rgba.data.length === 0 || bg.rgba.width <= 0 || bg.rgba.height <= 0) {
+    return { code: '', hasBackground: false }
+  }
+  const dispW = project.display.width
+  const dispH = project.display.height
+  const rect = computeBackgroundRect(bg, bg.naturalWidth, bg.naturalHeight, dispW, dispH)
+  const destX = Math.round(rect.x)
+  const destY = Math.round(rect.y)
+  const destW = Math.max(1, Math.round(rect.w))
+  const destH = Math.max(1, Math.round(rect.h))
+  const srcW = bg.rgba.width
+  const srcH = bg.rgba.height
+  const bgHex = project.display.backgroundColor
+  const op = Math.max(0, Math.min(1, bg.opacity / 100))
+  const data = bg.rgba.data
+  // Pre-composite every source pixel over the display background colour at the image opacity, then
+  // pack to RGB565 — so the device blits a flat opaque bitmap with no per-pixel alpha work.
+  const words: string[] = []
+  for (let i = 0; i < srcW * srcH; i++) {
+    const r = data[i * 4] ?? 0
+    const g = data[i * 4 + 1] ?? 0
+    const b = data[i * 4 + 2] ?? 0
+    const alpha8 = data[i * 4 + 3] ?? 255
+    const alpha = (alpha8 / 255) * op
+    const pixelHex = `#${[r, g, b].map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('')}`
+    words.push(toRgb565Hex(mixColors(bgHex, pixelHex, alpha)))
+  }
+  const rows: string[] = []
+  for (let i = 0; i < words.length; i += 16) rows.push('  ' + words.slice(i, i + 16).join(', '))
+
+  const roundClip = project.display.shape === 'circle'
+  const code = `// ---- Display background image (${bg.kind.toUpperCase()}, ${srcW}x${srcH} source) -----------------------
+// One image drawn behind the eyes for every expression/animation, pre-composited over
+// EYE_COLOR_BACKGROUND at ${bg.opacity}% opacity and packed to RGB565. eyesDrawBackground() blits it
+// nearest-neighbour into the fit-mode destination rect (matching the studio's Display panel), clipped
+// to the display. This is a full-screen redraw each frame (the eyes paint over it) — heaviest part of
+// a frame; keep the source small if you need more FPS.
+#define BG_SRC_W ${srcW}
+#define BG_SRC_H ${srcH}
+static const int16_t BG_DEST_X = ${destX};
+static const int16_t BG_DEST_Y = ${destY};
+static const int16_t BG_DEST_W = ${destW};
+static const int16_t BG_DEST_H = ${destH};
+const uint16_t BG_IMAGE[BG_SRC_W * BG_SRC_H] PROGMEM = {
+${rows.join(',\n')}
+};
+
+template <typename T>
+inline void eyesDrawBackground(T& gfx) {
+  const int16_t bcx = EYE_DISPLAY_WIDTH / 2;
+  const int16_t bcy = EYE_DISPLAY_HEIGHT / 2;
+  for (int16_t py = BG_DEST_Y; py < BG_DEST_Y + BG_DEST_H; py++) {
+    if (py < 0 || py >= EYE_DISPLAY_HEIGHT) continue;
+    int32_t sy = ((int32_t)(py - BG_DEST_Y) * BG_SRC_H) / BG_DEST_H;
+    if (sy < 0) sy = 0; else if (sy >= BG_SRC_H) sy = BG_SRC_H - 1;
+    for (int16_t px = BG_DEST_X; px < BG_DEST_X + BG_DEST_W; px++) {
+      if (px < 0 || px >= EYE_DISPLAY_WIDTH) continue;
+${roundClip ? `      int32_t dx = px - bcx, dy = py - bcy;
+      if ((int64_t)dx * dx * bcy * bcy + (int64_t)dy * dy * bcx * bcx > (int64_t)bcx * bcx * bcy * bcy) continue; // outside the round display
+` : ''}      int32_t sx = ((int32_t)(px - BG_DEST_X) * BG_SRC_W) / BG_DEST_W;
+      if (sx < 0) sx = 0; else if (sx >= BG_SRC_W) sx = BG_SRC_W - 1;
+      gfx.drawPixel(px, py, pgm_read_word(&BG_IMAGE[sy * BG_SRC_W + sx]));
+    }
+  }
+}
+
+`
+  return { code, hasBackground: true }
+}
+
 /** Project-wide maximum number of EXTRA highlights (beyond the primary) any exported pose uses —
  * across every expression and every animation keyframe (all tracks, both eyes). Clamped to
  * MAX_EXTRA_HIGHLIGHTS. This sizes the fixed per-frame arrays in the firmware export; 0 means the
@@ -4502,6 +4582,9 @@ export function generateCppHeader(projectInput: Project, options: GenerateCppOpt
   // uses extra highlights, so EyeFrame/LiveEye/the lerps/the draw all emit exactly the pre-feature
   // code (byte-identical export for existing projects). See playerCode()/eyeFrameLiteral().
   const exHlN = projectMaxExtraHighlights(project)
+  // Whole-display background image (behind everything) — emits nothing when the project has none,
+  // so the output is unchanged for projects without a background. See exportBackground().
+  const background = exportBackground(project)
   const guard = `EYES_EYE_ANIMATIONS_${toIdentifier(project.name).toUpperCase() || 'PROJECT'}_H`
   // Computed once up front: builds the cross-scope raster-asset table (project + every
   // expression + every animation) so exportAnimation()/exportExpression() below can each emit
@@ -4937,7 +5020,7 @@ struct EyeExpression {
 
 // ---- Player (easing, interpolation, drawing, playback) -----------------------
 
-${playerCode(exHlN)}
+${playerCode(exHlN, background.code)}
 
 // ---- Animations -----------------------------------------------------------
 
