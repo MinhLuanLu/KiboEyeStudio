@@ -109,6 +109,10 @@ export function DisplayPanel() {
                 onChange={(v) => setDisplay('fps', clampFps(v))}
               />
             </div>
+
+            <div className="border-t border-studio-border pt-4">
+              <BackgroundImageControls />
+            </div>
           </div>
         )}
 
@@ -134,9 +138,9 @@ export function DisplayPanel() {
               />
             </label>
 
-            <div className="border-t border-studio-border pt-4">
-              <BackgroundImageControls />
-            </div>
+            <p className="text-[11px] text-studio-muted leading-snug">
+              Background image lives on the <span className="text-studio-text">Screen</span> tab.
+            </p>
           </div>
         )}
       </div>
