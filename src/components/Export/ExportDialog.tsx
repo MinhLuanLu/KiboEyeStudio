@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore, getActiveAnimation } from '@/state/store'
 import { projectToJson, animationToJson } from '@/lib/export/jsonExport'
-import { generateCppHeader, generateArduinoSketch, generateArduinoReadme, arduinoSketchName } from '@/lib/export/cppExport'
+import { generateCppHeader, generateArduinoSketch, generateArduinoReadme, arduinoSketchName, projectUsesEyeRotation, DEFAULT_ARDUINO_PINS, type ArduinoDisplayPins } from '@/lib/export/cppExport'
 import { generateEyeControllerHeader } from '@/lib/export/eyeControllerExport'
 import { createZip } from '@/lib/export/zip'
 import { validateStickerExport, type StickerValidationResult } from '@/lib/export/validateStickers'
@@ -157,10 +157,17 @@ export function ExportDialog() {
   // sketch folder as a single .zip (<name>/<name>.ino + eyes.h [+ eyeController.h] + README) instead
   // of saving the bare eyes.h. Off by default so the plain-header workflow is unchanged.
   const [exportArduinoProject, setExportArduinoProject] = useState(false)
+  // Display wiring for the generated .ino's TFT_* pins — same idea as the LVGL Complete Project
+  // export's pin form. Only used when exportArduinoProject is on.
+  const [pins, setPins] = useState<ArduinoDisplayPins>(DEFAULT_ARDUINO_PINS)
+  // "Force eye rotation on device" — emits #define EYES_FORCE_ROTATION so tilted eyes render on
+  // soft-float ESP32-C6/C3 (where rotation is otherwise auto-disabled). Default ON when the project
+  // actually uses eye rotation, so a tilted design matches the preview on those chips out of the box.
+  const [forceRotation, setForceRotation] = useState(() => projectUsesEyeRotation(project))
 
   if (!open) return null
 
-  const content = tab === 'json-project' ? projectToJson(project) : tab === 'json-animation' ? (anim ? animationToJson(anim) : '// no animation selected') : generateCppHeader(project, { includeExpressions })
+  const content = tab === 'json-project' ? projectToJson(project) : tab === 'json-animation' ? (anim ? animationToJson(anim) : '// no animation selected') : generateCppHeader(project, { includeExpressions, forceRotation })
 
   const handleExport = async () => {
     // "Export Complete Arduino Project" -> one .zip laid out as a ready-to-compile sketch folder:
@@ -170,7 +177,7 @@ export function ExportDialog() {
     if (tab === 'cpp' && exportArduinoProject) {
       const folder = arduinoSketchName(project.name)
       const entries = [
-        { name: `${folder}/${folder}.ino`, content: generateArduinoSketch(project, { includeExpressions }) },
+        { name: `${folder}/${folder}.ino`, content: generateArduinoSketch(project, { includeExpressions }, pins) },
         { name: `${folder}/eyes.h`, content },
         ...(includeController ? [{ name: `${folder}/eyeController.h`, content: generateEyeControllerHeader() }] : []),
         { name: `${folder}/README.md`, content: generateArduinoReadme(project, { includeExpressions, includeController }) }
@@ -262,9 +269,27 @@ export function ExportDialog() {
               <input type="checkbox" className="mt-0.5" checked={exportArduinoProject} onChange={(e) => setExportArduinoProject(e.target.checked)} />
               <span>
                 <span className="font-medium">Export Complete Arduino Project</span>
-                <span className="text-studio-muted"> — download a ready-to-compile sketch as a single <code>.zip</code>: a folder containing <code>{arduinoSketchName(project.name)}.ino</code>, <code>eyes.h</code>{includeController ? <>, <code>eyeController.h</code></> : null}, and a README. Open the <code>.ino</code>, set your display pins, and upload. (Without this, only the <code>eyes.h</code> header is saved.)</span>
+                <span className="text-studio-muted"> — download a ready-to-compile sketch as a single <code>.zip</code>: a folder containing <code>{arduinoSketchName(project.name)}.ino</code>, <code>eyes.h</code>{includeController ? <>, <code>eyeController.h</code></> : null}, and a README. (Without this, only the <code>eyes.h</code> header is saved.)</span>
               </span>
             </label>
+          )}
+
+          {tab === 'cpp' && exportArduinoProject && (
+            <div className="mx-3 mt-2 flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-studio-muted">Display wiring (GPIO):</span>
+              {(['cs', 'dc', 'rst', 'sclk', 'mosi'] as const).map((pin) => (
+                <label key={pin} className="flex items-center gap-1">
+                  <span className="uppercase text-studio-muted">{pin}</span>
+                  <input
+                    type="number"
+                    className="bg-studio-panel border border-studio-border rounded px-1.5 py-0.5 text-xs w-14"
+                    value={pins[pin]}
+                    onChange={(e) => setPins((p) => ({ ...p, [pin]: Number(e.target.value) }))}
+                  />
+                </label>
+              ))}
+              <span className="text-studio-muted">→ the <code>.ino</code>'s <code>TFT_*</code> pins</span>
+            </div>
           )}
 
           {tab === 'cpp' && (
@@ -273,6 +298,16 @@ export function ExportDialog() {
               <span>
                 <span className="font-medium">Include Expressions</span>
                 <span className="text-studio-muted"> — export each standalone Expression (its pose, colors, and stickers) so you can call <code>SetExpression(...)</code>. Uncheck to leave all expression code out and shrink the file; animations and combinations still export and play normally.</span>
+              </span>
+            </label>
+          )}
+
+          {tab === 'cpp' && (
+            <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+              <input type="checkbox" className="mt-0.5" checked={forceRotation} onChange={(e) => setForceRotation(e.target.checked)} />
+              <span>
+                <span className="font-medium">Force eye rotation on device</span>
+                <span className="text-studio-muted"> — emits <code>#define EYES_FORCE_ROTATION</code> so tilted/rotated eyes render on <strong>ESP32‑C6 / C3</strong> (where rotation is auto‑disabled for speed). Needed to match the preview on those chips; harmless on FPU boards (S3/classic). May slow heavy animation on a C6/C3. {projectUsesEyeRotation(project) ? 'This project uses eye rotation, so it’s on by default.' : ''}</span>
               </span>
             </label>
           )}

@@ -4354,6 +4354,25 @@ export interface GenerateCppOptions {
    * reference an Expr_* symbol (see exportAnimation/exportAnimationCombos), so excluding
    * expressions can never produce a missing reference or break playback. Defaults to `true`. */
   includeExpressions?: boolean
+  /** When true, emit `#define EYES_FORCE_ROTATION` at the top of eyes.h so eye rotation is applied
+   * even on soft-float chips (ESP32-C6/C3), where it is otherwise auto-disabled for performance.
+   * Needed to make a rotated/tilted eye match the studio on a C6/C3; harmless (already on) on FPU
+   * chips. May slow heavy animation on a C6/C3 — fine for static/lightly-animated faces. Defaults
+   * to false (the firmware's own per-chip auto-detect decides). */
+  forceRotation?: boolean
+}
+
+/** True if any exported pose (expression or animation keyframe, either eye) has a non-zero eye
+ * rotation — used to default the "Force eye rotation on device" export option ON when it matters. */
+export function projectUsesEyeRotation(project: Project): boolean {
+  const rotated = (p: EyeParams | null | undefined) => !!p && Math.round(p.rotation) !== 0
+  for (const e of project.expressions) if (rotated(e.params) || rotated(e.leftParams) || rotated(e.rightParams)) return true
+  for (const a of project.animations) {
+    for (const arr of [a.keyframes, a.leftEyeKeyframes, a.rightEyeKeyframes, a.pupilKeyframes, a.eyelidKeyframes]) {
+      for (const kf of arr) if (rotated(kf.params) || rotated(kf.leftParams) || rotated(kf.rightParams)) return true
+    }
+  }
+  return false
 }
 
 /** Emits the whole-display background image: an RGB565 PROGMEM bitmap (the uploaded PNG/SVG,
@@ -4478,7 +4497,18 @@ export function arduinoSketchName(projectName: string): string {
  * first single-shape expression (only when expressions are included), else nothing (still compiles).
  * `includeExpressions` must match the flag passed to generateCppHeader so the initial call never
  * references an Expr_* that was excluded from eyes.h. */
-export function generateArduinoSketch(project: Project, options: GenerateCppOptions = {}): string {
+/** GPIO pins for the SPI display, written into the generated .ino's TFT_* defines. Editable in the
+ * Export dialog (mirrors the LVGL "Complete Project" pin form); defaults match the GC9A01A preset. */
+export interface ArduinoDisplayPins {
+  cs: number
+  dc: number
+  rst: number
+  sclk: number
+  mosi: number
+}
+export const DEFAULT_ARDUINO_PINS: ArduinoDisplayPins = { cs: 2, dc: 4, rst: 5, sclk: 6, mosi: 7 }
+
+export function generateArduinoSketch(project: Project, options: GenerateCppOptions = {}, pins: ArduinoDisplayPins = DEFAULT_ARDUINO_PINS): string {
   const includeExpressions = options.includeExpressions !== false
   const animIdents = buildUniqueIdents(project.animations)
   const exprIdents = buildUniqueIdents(project.expressions)
@@ -4508,12 +4538,12 @@ export function generateArduinoSketch(project: Project, options: GenerateCppOpti
  * See eyes.h's "Quick Reference" section for every name this project exports.
  */
 
-// ---- Display wiring — EDIT THESE to match your board ----
-#define TFT_CS   2
-#define TFT_DC   4
-#define TFT_RST  5
-#define TFT_SCLK 6
-#define TFT_MOSI 7
+// ---- Display wiring — set in the Export dialog; edit here too if your board changes ----
+#define TFT_CS   ${pins.cs}
+#define TFT_DC   ${pins.dc}
+#define TFT_RST  ${pins.rst}
+#define TFT_SCLK ${pins.sclk}
+#define TFT_MOSI ${pins.mosi}
 
 // SPI + the display driver MUST be included here in the .ino, before eyes.h (Arduino's automatic
 // library discovery only scans the .ino's own #include lines — see eyes.h's Minimal usage note).
@@ -4581,6 +4611,10 @@ export function generateCppHeader(projectInput: Project, options: GenerateCppOpt
   // this, so they export byte-for-byte the same and keep working.
   const expressionsWereExcluded = !includeExpressions && projectInput.expressions.length > 0
   const project: Project = includeExpressions ? projectInput : { ...projectInput, expressions: [] }
+  // Force eye rotation on even on soft-float chips (ESP32-C6/C3), where it's auto-disabled for perf.
+  // Needed so a rotated/tilted eye matches the studio on those chips; see the rotation cost guard
+  // in playerCode(). Emitted as a #define at the top of the header (before the guard reads it).
+  const forceRotation = options.forceRotation === true
   // How many EXTRA-highlight slots every EyeFrame carries (project-wide max). 0 = no exported pose
   // uses extra highlights, so EyeFrame/LiveEye/the lerps/the draw all emit exactly the pre-feature
   // code (byte-identical export for existing projects). See playerCode()/eyeFrameLiteral().
@@ -4844,7 +4878,13 @@ export function generateCppHeader(projectInput: Project, options: GenerateCppOpt
  */
 #ifndef ${guard}
 #define ${guard}
-
+${forceRotation ? `
+// "Force eye rotation on device" was enabled at export. Eye rotation is normally auto-disabled on
+// soft-float chips (ESP32-C6/C3) because rotating the eye silhouette is slow without a hardware FPU;
+// this makes a rotated/tilted eye render on those chips too, matching the studio preview. Harmless
+// (already on) on FPU chips. Remove this line to fall back to the per-chip auto-detect.
+#define EYES_FORCE_ROTATION
+` : ''}
 #include <stdint.h>
 #if defined(__AVR__)
 #include <avr/pgmspace.h> // only classic AVR boards need this; ESP32/ESP8266/SAMD/RP2040 cores already define PROGMEM
