@@ -117,6 +117,7 @@ const EYE_SHAPE_ENUM: Record<EyeShapeId, string> = {
   animeEye: 'EYE_SHAPE_ANIMEEYE',
   robotEye: 'EYE_SHAPE_ROBOTEYE',
   happyArc: 'EYE_SHAPE_HAPPYARC',
+  maskLens: 'EYE_SHAPE_MASKLENS',
   custom: 'EYE_SHAPE_CUSTOM'
 }
 
@@ -155,7 +156,7 @@ function eyeFrameLiteral(
     Math.round(params.width),
     Math.round(params.height),
     Math.round(params.radius),
-    clampByte(params.rotation),
+    Math.max(-180, Math.min(180, Math.round(params.rotation))), // Eye Rotation ±180° — stored as int16_t (see EyeFrame), so it isn't clamped to int8's ±127
     Math.round(params.distance),
     clampByte(params.eyePosX),
     clampByte(params.eyePosY),
@@ -679,7 +680,7 @@ function exportPupilShapes(project: Project): string {
 // Every built-in eye-shape polygon (see eyeShapes.ts's own EYE_SHAPE_POLYGONS) except the
 // 'default'/'custom' null entries.
 const BUILTIN_EYE_SHAPES: { key: string; polygon: readonly (readonly [number, number])[] }[] = (
-  ['heart', 'star', 'diamond', 'hexagon', 'cloud', 'teardrop', 'leaf', 'bean', 'crescent', 'catEye', 'animeEye', 'robotEye', 'happyArc'] as const
+  ['heart', 'star', 'diamond', 'hexagon', 'cloud', 'teardrop', 'leaf', 'bean', 'crescent', 'catEye', 'animeEye', 'robotEye', 'happyArc', 'maskLens'] as const
 )
   .filter((key) => EYE_SHAPE_POLYGONS[key])
   .map((key) => ({ key, polygon: EYE_SHAPE_POLYGONS[key]! }))
@@ -706,6 +707,7 @@ function exportEyeShapes(project: Project): string {
     '  EYE_SHAPE_ANIMEEYE,',
     '  EYE_SHAPE_ROBOTEYE,',
     '  EYE_SHAPE_HAPPYARC,',
+    '  EYE_SHAPE_MASKLENS,',
     '  EYE_SHAPE_CUSTOM',
     '};',
     '',
@@ -3723,6 +3725,7 @@ inline EyeShapeCtx eyesResolveEyeShape(const LiveEye& e, int16_t w, int16_t h, i
     case EYE_SHAPE_ANIMEEYE: points = EYE_SHAPE_TABLE_ANIMEEYE; count = EYE_SHAPE_TABLE_ANIMEEYE_COUNT; break;
     case EYE_SHAPE_ROBOTEYE: points = EYE_SHAPE_TABLE_ROBOTEYE; count = EYE_SHAPE_TABLE_ROBOTEYE_COUNT; break;
     case EYE_SHAPE_HAPPYARC: points = EYE_SHAPE_TABLE_HAPPYARC; count = EYE_SHAPE_TABLE_HAPPYARC_COUNT; break;
+    case EYE_SHAPE_MASKLENS: points = EYE_SHAPE_TABLE_MASKLENS; count = EYE_SHAPE_TABLE_MASKLENS_COUNT; break;
     case EYE_SHAPE_CUSTOM:
       if (e.eyeCustomShapeIndex < EYE_CUSTOM_SHAPE_COUNT) {
         points = EYE_CUSTOM_SHAPES[e.eyeCustomShapeIndex];
@@ -4861,7 +4864,7 @@ enum EyeEasing : uint8_t {
 
 struct EyeFrame {
   uint8_t width, height, radius;
-  int8_t rotation;
+  int16_t rotation; // Eye Rotation, degrees -180..180 (int16_t so it isn't capped at int8's ±127)
   uint8_t distance;
   int8_t eyePosX, eyePosY; // -100..100px, moves this whole eye on top of the ±distance/2 placement — see EyeParams.eyePosX's own comment in the studio
   uint8_t irisWidth, irisHeight;

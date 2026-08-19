@@ -220,6 +220,26 @@ const ROBOT_EYE: EyeShapePolygon = normalizePoints([
   [-1, -0.5]
 ])
 
+// Mask Lens (Spider-Man-style) — a rounded triangle: a wide, gently-domed top narrowing to a
+// soft point at the bottom, with all three corners and the edges bulged convex. Kept left/right
+// symmetric so it reads as a mirrored pair on both eyes with no per-eye flip needed (use Eye
+// Rotation / Eye Target flip for the exact inward-leaning mask angle). Hand-plotted, same
+// discipline as Cloud/CatEye/AnimeEye above.
+const MASK_LENS: EyeShapePolygon = normalizePoints([
+  [-0.82, -0.78], // top-left corner (rounded)
+  [-0.4, -0.95],
+  [0.4, -0.95],
+  [0.82, -0.78], // top-right corner (rounded)
+  [0.95, -0.38],
+  [0.72, 0.25], // right edge curving in toward the point
+  [0.34, 0.78],
+  [0.12, 0.96],
+  [-0.12, 0.96], // bottom point (rounded, symmetric)
+  [-0.34, 0.78],
+  [-0.72, 0.25],
+  [-0.95, -0.38] // left edge
+])
+
 /** `null` for 'default' (draws via the existing rounded-rect/ellipse path) and 'custom' (its
  * points live in Project.customEyeShapes, resolved by the caller via eyeCustomShapeId). */
 export const EYE_SHAPE_POLYGONS: Partial<Record<EyeShapeId, EyeShapePolygon | null>> = {
@@ -237,6 +257,7 @@ export const EYE_SHAPE_POLYGONS: Partial<Record<EyeShapeId, EyeShapePolygon | nu
   animeEye: ANIME_EYE,
   robotEye: ROBOT_EYE,
   happyArc: HAPPY_ARC,
+  maskLens: MASK_LENS,
   custom: null
 }
 

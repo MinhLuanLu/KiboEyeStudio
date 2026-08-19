@@ -80,12 +80,16 @@ export function BackgroundImageControls() {
           <div className="flex flex-col gap-1.5">
             <span className="studio-label text-[10px]">Fit Mode</span>
             <select
-              className="studio-input text-xs"
+              className="w-full text-xs rounded-md border border-studio-border bg-studio-panel2 text-studio-text px-2 py-1.5 focus:outline-none focus:border-studio-accent"
               value={bg.fitMode}
               onChange={(e) => { checkpoint(); updateBackgroundImage({ fitMode: e.target.value as BackgroundFitMode }) }}
             >
               {FIT_MODES.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
+                // Explicit dark option colors — the native popup otherwise renders on a white
+                // background while inheriting the app's light text (unreadable white-on-white).
+                <option key={m.value} value={m.value} style={{ backgroundColor: '#212227', color: '#e6e6ea' }}>
+                  {m.label}
+                </option>
               ))}
             </select>
             <p className="text-[11px] text-studio-muted leading-snug">{FIT_MODES.find((m) => m.value === bg.fitMode)?.hint}</p>

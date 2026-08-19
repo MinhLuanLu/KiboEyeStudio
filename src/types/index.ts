@@ -226,6 +226,7 @@ export type EyeShapeId =
   | 'animeEye'
   | 'robotEye'
   | 'happyArc'
+  | 'maskLens'
   | 'custom'
 
 /** A user-imported eye shape, normalized to a [-1,1]-centered bounding box — same space and
@@ -1369,7 +1370,7 @@ export const EYE_PARAM_RANGES: Record<
   height: [20, 130],
   radius: [0, 130],
   distance: [0, 160],
-  rotation: [-45, 45],
+  rotation: [-180, 180],
   eyePosX: [-100, 100],
   eyePosY: [-100, 100],
   irisWidth: [0, 100],

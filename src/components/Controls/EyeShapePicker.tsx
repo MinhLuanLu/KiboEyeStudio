@@ -25,7 +25,8 @@ const BUILTIN_SHAPES: { value: EyeShapeId; label: string }[] = [
   { value: 'catEye', label: 'Cat Eye' },
   { value: 'animeEye', label: 'Anime Eye' },
   { value: 'robotEye', label: 'Robot Eye' },
-  { value: 'happyArc', label: 'Happy Arc' }
+  { value: 'happyArc', label: 'Happy Arc' },
+  { value: 'maskLens', label: 'Mask Lens' }
 ]
 
 const ICON_VIEWBOX = 24

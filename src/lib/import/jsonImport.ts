@@ -19,6 +19,7 @@ const EYE_SHAPE_IDS: EyeShapeId[] = [
   'animeEye',
   'robotEye',
   'happyArc',
+  'maskLens',
   'custom'
 ]
 
