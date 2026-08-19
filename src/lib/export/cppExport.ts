@@ -4360,6 +4360,97 @@ export interface GenerateCppOptions {
    * chips. May slow heavy animation on a C6/C3 — fine for static/lightly-animated faces. Defaults
    * to false (the firmware's own per-chip auto-detect decides). */
   forceRotation?: boolean
+  /** When true, bake each rotated eye's rotation into the shape geometry (see bakeEyeRotation) so a
+   * tilted eye renders with the fast, non-rotated fill path — smooth on a soft-float ESP32-C6/C3 AND
+   * still tilted. Implies forceRotation (so any pose that couldn't be baked still tilts). Defaults
+   * to false. This is the recommended "keep the tilt and stay smooth on a C6" path. */
+  bakeRotation?: boolean
+}
+
+/** Returns a COPY of the project with each rotated eye's rotation BAKED INTO the eye-shape geometry:
+ * the shape's polygon points are pre-rotated by the eye's effective on-screen angle (rotation*sign,
+ * per eye) into a synthetic custom shape, and the frame's `rotation` is set to 0. The device then
+ * draws the already-tilted shape with the FAST (non-rotated) fill path — so a tilted eye renders
+ * smoothly even on a soft-float ESP32-C6/C3, instead of paying the per-pixel rotation cost.
+ *
+ * Non-destructive (operates on a deep clone; the studio project keeps its `rotation` value, and the
+ * studio preview at rotation R looks identical to this baked rotation-0 shape). Only the SHAPE is
+ * baked — its points are the one part of the eye that is NOT per-eye sign-mirrored, so rotating them
+ * is exact. A pose is left un-baked (keeps runtime rotation) when it has no polygon shape, or has a
+ * shape offset or flip (those interact with the sign-mirror in ways a shape-only bake can't capture);
+ * pair this with EYES_FORCE_ROTATION so any such leftover still tilts (just not baked-smooth). Eyelid
+ * and any visible pupil/highlight rotation are not baked either — irrelevant for a solid shape eye,
+ * but a design that relies on a rotating pupil should keep force-rotation instead. */
+export function bakeEyeRotation(projectInput: Project): Project {
+  const project: Project = JSON.parse(JSON.stringify(projectInput))
+  const cache = new Map<string, string>()
+  let counter = 0
+  const shapePointsOf = (p: EyeParams): readonly (readonly [number, number])[] | null => {
+    if (!p.eyeShapeVisible || p.eyeShape === 'default') return null
+    if (p.eyeShape === 'custom') return project.customEyeShapes.find((s) => s.id === p.eyeCustomShapeId)?.points ?? null
+    return EYE_SHAPE_POLYGONS[p.eyeShape] ?? null
+  }
+  // Bakes one eye's params IN PLACE, given its effective on-screen angle (rotation * sign). The
+  // studio rotates AFTER the eye's non-uniform (w x h) scale (ctx.rotate then draw scaled by rx,ry),
+  // so the baked points must be S^-1 * R * S * p (S = diag(w/2, h/2)); the uniform eyeShapeScale
+  // cancels, leaving a dependence on the w/h aspect only. For a square eye (w == h) this reduces to a
+  // plain rotation. Exact for the pose's own w/h; a pose whose SIZE also animates is baked at its own
+  // size, which is exact per pose.
+  const bakeEye = (p: EyeParams, effAngle: number): void => {
+    const a = Math.round(effAngle)
+    if (a % 360 === 0) {
+      p.rotation = 0
+      return
+    }
+    const pts = shapePointsOf(p)
+    const bakeable = pts && p.eyeShapeOffsetX === 0 && p.eyeShapeOffsetY === 0 && !p.eyeShapeFlipH && !p.eyeShapeFlipV && p.width > 0 && p.height > 0
+    if (!bakeable) return // leave rotation for the runtime (force-rotation) path — can't shape-only bake this one exactly
+    const r = (a * Math.PI) / 180
+    const c = Math.cos(r)
+    const s = Math.sin(r)
+    const aspect = p.width / p.height // = rx/ry (eyeShapeScale cancels)
+    // x' = px*c - py*(h/w)*s ;  y' = px*(w/h)*s + py*c
+    const bakePt = ([px, py]: readonly [number, number]): [number, number] => [px * c - (py / aspect) * s, px * aspect * s + py * c]
+    const key = `${p.eyeShape}|${p.eyeShape === 'custom' ? p.eyeCustomShapeId : ''}|${a}|${aspect.toFixed(4)}`
+    let id = cache.get(key)
+    if (!id) {
+      id = `bakedrot_${counter++}`
+      project.customEyeShapes.push({ id, name: `${p.eyeShape} ${a}°`, points: pts!.map(bakePt), svgSource: '' })
+      cache.set(key, id)
+    }
+    p.eyeShape = 'custom'
+    p.eyeCustomShapeId = id
+    p.rotation = 0
+  }
+  const bakePose = (params: EyeParams, leftP: EyeParams | null, rightP: EyeParams | null): [EyeParams, EyeParams | null, EyeParams | null] => {
+    const lp = leftP ?? params
+    const rp = rightP ?? params
+    if (Math.round(lp.rotation) === 0 && Math.round(rp.rotation) === 0) return [params, leftP, rightP]
+    // Force per-eye divergence: left eye is drawn with sign +1, right with sign -1, so each bakes its
+    // own effective angle. (The export already emits framesRight when left/right params differ.)
+    const left = JSON.parse(JSON.stringify(lp)) as EyeParams
+    const right = JSON.parse(JSON.stringify(rp)) as EyeParams
+    bakeEye(left, lp.rotation)
+    bakeEye(right, rp.rotation * -1)
+    return [left, left, right]
+  }
+  for (const e of project.expressions) {
+    const [pp, l, r] = bakePose(e.params, e.leftParams, e.rightParams)
+    e.params = pp
+    e.leftParams = l
+    e.rightParams = r
+  }
+  for (const anim of project.animations) {
+    for (const arr of [anim.keyframes, anim.leftEyeKeyframes, anim.rightEyeKeyframes, anim.pupilKeyframes, anim.eyelidKeyframes]) {
+      for (const kf of arr) {
+        const [pp, l, r] = bakePose(kf.params, kf.leftParams, kf.rightParams)
+        kf.params = pp
+        kf.leftParams = l
+        kf.rightParams = r
+      }
+    }
+  }
+  return project
 }
 
 /** True if any exported pose (expression or animation keyframe, either eye) has a non-zero eye
@@ -4508,7 +4599,12 @@ export interface ArduinoDisplayPins {
 }
 export const DEFAULT_ARDUINO_PINS: ArduinoDisplayPins = { cs: 2, dc: 4, rst: 5, sclk: 6, mosi: 7 }
 
-export function generateArduinoSketch(project: Project, options: GenerateCppOptions = {}, pins: ArduinoDisplayPins = DEFAULT_ARDUINO_PINS): string {
+export function generateArduinoSketch(
+  project: Project,
+  options: GenerateCppOptions = {},
+  pins: ArduinoDisplayPins = DEFAULT_ARDUINO_PINS,
+  smooth = true
+): string {
   const includeExpressions = options.includeExpressions !== false
   const animIdents = buildUniqueIdents(project.animations)
   const exprIdents = buildUniqueIdents(project.expressions)
@@ -4520,6 +4616,99 @@ export function generateArduinoSketch(project: Project, options: GenerateCppOpti
       ? `  SetExpression(Expr_${exprIdents.get(firstSingleExpr.id)!});   // start on "${firstSingleExpr.name}" — change to any Anim_/Expr_ from eyes.h's Quick Reference`
       : `  // No animations or single-shape expressions yet — the eyes hold their default pose. Add one\n  // in the studio and re-export, or call PlayAnimation(...)/SetExpression(...) here.`
   const sketchName = arduinoSketchName(project.name)
+  const pinDefines = `// ---- Display wiring — set in the Export dialog; edit here too if your board changes ----
+#define TFT_CS   ${pins.cs}
+#define TFT_DC   ${pins.dc}
+#define TFT_RST  ${pins.rst}
+#define TFT_SCLK ${pins.sclk}
+#define TFT_MOSI ${pins.mosi}`
+
+  if (smooth) {
+    // Smooth path: LovyanGFX (hardware SPI @ 80 MHz + DMA), rendering the eyes into a full-screen
+    // 16-bit sprite pushed once per frame. eyes.h's draw is a template over the target type, so an
+    // LGFX_Sprite works directly (see the "pass your own sprite/canvas type as T" note in eyes.h).
+    // This is the same display stack the LVGL "Complete Project" export uses, and it's why animation
+    // is smooth: Adafruit_GC9A01A's blit blocks the loop for the whole ~240x240 SPI transfer every
+    // frame; LovyanGFX pushes over DMA, so drawing and transfer overlap and frames don't stutter.
+    return `/*
+ * ${sketchName}.ino — robot eyes sketch generated by Kibo Eye Studio (SMOOTH / LovyanGFX + DMA).
+ * Project: ${project.name}
+ *
+ * READY TO COMPILE & FLASH:
+ *   1. Arduino IDE -> Library Manager: install "LovyanGFX".
+ *   2. Board: install the ESP32 core (Boards Manager) and pick your ESP32 board + port.
+ *   3. Edit the five TFT_* pins below to match your display wiring.
+ *   4. Upload.
+ *
+ * This build uses LovyanGFX (hardware SPI at 80 MHz + asynchronous DMA) — the same display stack as
+ * the LVGL "Complete Project" export — so animation stays smooth. It renders into a full-screen
+ * 16-bit sprite (${project.display.width}x${project.display.height} = ~${Math.round((project.display.width * project.display.height * 2) / 1024)} KB of RAM); an ESP32/S3/C6 has room for that, but if
+ * createSprite() fails on a very small board, free RAM (or enable PSRAM) — see setup() below.
+ *
+ * Keep this .ino in a folder named "${sketchName}" with eyes.h beside it (the ZIP lays it out so).
+ * To change what the eyes do, call PlayAnimation(Anim_Name) / SetExpression(Expr_Name) / Combo(name)
+ * from anywhere — see eyes.h's "Quick Reference".
+ */
+
+${pinDefines}
+
+// LovyanGFX MUST be included in the .ino (before eyes.h) so Arduino's auto-library-discovery links
+// it. eyes.h draws into any GFX-like target via a template, so it needs no display library itself.
+#define LGFX_USE_V1
+#include <LovyanGFX.hpp>
+#include "eyes.h"
+
+// LovyanGFX device for the GC9A01A (240x240 round SPI), hardware SPI + DMA. Troubleshooting: if
+// colors are photo-negative set cfg.invert=false; if red/blue are swapped set cfg.rgb_order=true;
+// if it won't init try cfg.spi_host = SPI3_HOST; on long/noisy wiring drop freq_write to 40000000.
+class LGFX : public lgfx::LGFX_Device {
+  lgfx::Panel_GC9A01 _panel;
+  lgfx::Bus_SPI      _bus;
+public:
+  LGFX() {
+    { auto cfg = _bus.config();
+      cfg.spi_host = SPI2_HOST; cfg.spi_mode = 0;
+      cfg.freq_write = 80000000; cfg.freq_read = 16000000;
+      cfg.spi_3wire = false; cfg.use_lock = true; cfg.dma_channel = SPI_DMA_CH_AUTO;
+      cfg.pin_sclk = TFT_SCLK; cfg.pin_mosi = TFT_MOSI; cfg.pin_miso = -1; cfg.pin_dc = TFT_DC;
+      _bus.config(cfg); _panel.setBus(&_bus); }
+    { auto cfg = _panel.config();
+      cfg.pin_cs = TFT_CS; cfg.pin_rst = TFT_RST; cfg.pin_busy = -1;
+      cfg.panel_width = EYE_DISPLAY_WIDTH; cfg.panel_height = EYE_DISPLAY_HEIGHT;
+      cfg.offset_x = 0; cfg.offset_y = 0; cfg.offset_rotation = 0;
+      cfg.readable = false; cfg.invert = true; cfg.rgb_order = false;
+      cfg.dlen_16bit = false; cfg.bus_shared = false;
+      _panel.config(cfg); }
+    setPanel(&_panel);
+  }
+};
+
+LGFX tft;
+static LGFX_Sprite eyesFrame(&tft);  // full-screen back buffer; pushed over DMA each frame
+
+void setup() {
+  tft.init();
+  tft.setRotation(0);
+  eyesFrame.setColorDepth(16);
+  if (!eyesFrame.createSprite(EYE_DISPLAY_WIDTH, EYE_DISPLAY_HEIGHT)) {
+    // Not enough contiguous RAM for the ${project.display.width}x${project.display.height} back buffer. Enable PSRAM (Arduino IDE:
+    // Tools -> PSRAM), or draw straight to the panel with tft instead of a sprite (less smooth).
+    while (true) { delay(1000); }
+  }
+${initialCall}
+}
+
+void loop() {
+  LiveEye live = UpdateEyes();
+  LiveEye liveRight = UpdateEyesRight();  // differs from "live" only while an animation authored Left/Right divergence
+  eyesFrame.fillScreen(EYE_COLOR_BACKGROUND);
+  eyesDrawEyePair(eyesFrame, EYE_DISPLAY_WIDTH / 2, EYE_DISPLAY_HEIGHT / 2, live, liveRight, EYE_COLOR_BACKGROUND, eyesPlayer.colorsLeft, eyesPlayer.colorsRight);
+  eyesFrame.pushSprite(0, 0);   // hardware SPI @ 80 MHz + DMA — the loop keeps running during transfer
+  delay(EYE_FRAME_DELAY_MS);    // paces drawing to the studio's Display FPS
+}
+`
+  }
+
   return `/*
  * ${sketchName}.ino — robot eyes sketch generated by Kibo Eye Studio.
  * Project: ${project.name}
@@ -4538,12 +4727,7 @@ export function generateArduinoSketch(project: Project, options: GenerateCppOpti
  * See eyes.h's "Quick Reference" section for every name this project exports.
  */
 
-// ---- Display wiring — set in the Export dialog; edit here too if your board changes ----
-#define TFT_CS   ${pins.cs}
-#define TFT_DC   ${pins.dc}
-#define TFT_RST  ${pins.rst}
-#define TFT_SCLK ${pins.sclk}
-#define TFT_MOSI ${pins.mosi}
+${pinDefines}
 
 // SPI + the display driver MUST be included here in the .ino, before eyes.h (Arduino's automatic
 // library discovery only scans the .ino's own #include lines — see eyes.h's Minimal usage note).
@@ -4572,9 +4756,13 @@ void loop() {
 }
 
 /** Short README shipped in the "Complete Arduino Project" ZIP. */
-export function generateArduinoReadme(project: Project, options: { includeExpressions?: boolean; includeController?: boolean } = {}): string {
+export function generateArduinoReadme(project: Project, options: { includeExpressions?: boolean; includeController?: boolean; smooth?: boolean } = {}): string {
   const sketchName = arduinoSketchName(project.name)
   const includeController = options.includeController === true
+  const smooth = options.smooth !== false
+  const libLine = smooth
+    ? '1. Install the **LovyanGFX** library via Arduino IDE Library Manager (the smooth build uses hardware SPI + DMA, the same display stack as the LVGL export).'
+    : '1. Install libraries via Arduino IDE Library Manager: **Adafruit GC9A01A** and **Adafruit GFX Library**.'
   return `# ${project.name} — Kibo Eye Studio Arduino project
 
 Generated by Kibo Eye Studio. This folder is a complete, ready-to-compile Arduino sketch.
@@ -4586,7 +4774,7 @@ Generated by Kibo Eye Studio. This folder is a complete, ready-to-compile Arduin
   }
 
 ## Build & flash
-1. Install libraries via Arduino IDE Library Manager: **Adafruit GC9A01A** and **Adafruit GFX Library**.
+${libLine}
 2. Install the **ESP32 board core** (Boards Manager) and select your board + port.
 3. Open \`${sketchName}.ino\` (keep it inside the \`${sketchName}\` folder), set the five \`TFT_*\` pins to your wiring, and Upload.
 
@@ -4610,11 +4798,15 @@ export function generateCppHeader(projectInput: Project, options: GenerateCppOpt
   // to change and no Expr_* symbol is ever emitted or referenced. Animations/combos read none of
   // this, so they export byte-for-byte the same and keep working.
   const expressionsWereExcluded = !includeExpressions && projectInput.expressions.length > 0
-  const project: Project = includeExpressions ? projectInput : { ...projectInput, expressions: [] }
+  const projectAfterExpr: Project = includeExpressions ? projectInput : { ...projectInput, expressions: [] }
+  // Bake rotation into the eye-shape geometry (see bakeEyeRotation) so tilted eyes render via the
+  // fast, non-rotated path — smooth on a soft-float ESP32-C6/C3 while keeping the tilt. Non-baked
+  // leftovers (offset/flipped/default-shape rotated eyes) still tilt via the force-rotation define.
+  const project: Project = options.bakeRotation === true ? bakeEyeRotation(projectAfterExpr) : projectAfterExpr
   // Force eye rotation on even on soft-float chips (ESP32-C6/C3), where it's auto-disabled for perf.
   // Needed so a rotated/tilted eye matches the studio on those chips; see the rotation cost guard
-  // in playerCode(). Emitted as a #define at the top of the header (before the guard reads it).
-  const forceRotation = options.forceRotation === true
+  // in playerCode(). bakeRotation implies this (for any pose the bake left with runtime rotation).
+  const forceRotation = options.forceRotation === true || options.bakeRotation === true
   // How many EXTRA-highlight slots every EyeFrame carries (project-wide max). 0 = no exported pose
   // uses extra highlights, so EyeFrame/LiveEye/the lerps/the draw all emit exactly the pre-feature
   // code (byte-identical export for existing projects). See playerCode()/eyeFrameLiteral().

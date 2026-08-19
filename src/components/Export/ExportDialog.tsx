@@ -163,11 +163,17 @@ export function ExportDialog() {
   // "Force eye rotation on device" — emits #define EYES_FORCE_ROTATION so tilted eyes render on
   // soft-float ESP32-C6/C3 (where rotation is otherwise auto-disabled). Default ON when the project
   // actually uses eye rotation, so a tilted design matches the preview on those chips out of the box.
-  const [forceRotation, setForceRotation] = useState(() => projectUsesEyeRotation(project))
+  // Bake rotation into the eye-shape geometry so tilted eyes render smoothly on a soft-float
+  // ESP32-C6/C3 (fast path) while still tilting. Default OFF (opt-in) — it changes how the eyes
+  // animate on the device (see the warning under the checkbox), so the user turns it on knowingly.
+  const [bakeRotation, setBakeRotation] = useState(false)
+  // Smooth rendering for the Complete Arduino Project: generate the .ino using LovyanGFX (hardware
+  // SPI + DMA), the same display stack the LVGL export uses, instead of Adafruit's blocking blit.
+  const [smoothRendering, setSmoothRendering] = useState(true)
 
   if (!open) return null
 
-  const content = tab === 'json-project' ? projectToJson(project) : tab === 'json-animation' ? (anim ? animationToJson(anim) : '// no animation selected') : generateCppHeader(project, { includeExpressions, forceRotation })
+  const content = tab === 'json-project' ? projectToJson(project) : tab === 'json-animation' ? (anim ? animationToJson(anim) : '// no animation selected') : generateCppHeader(project, { includeExpressions, bakeRotation })
 
   const handleExport = async () => {
     // "Export Complete Arduino Project" -> one .zip laid out as a ready-to-compile sketch folder:
@@ -177,10 +183,10 @@ export function ExportDialog() {
     if (tab === 'cpp' && exportArduinoProject) {
       const folder = arduinoSketchName(project.name)
       const entries = [
-        { name: `${folder}/${folder}.ino`, content: generateArduinoSketch(project, { includeExpressions }, pins) },
+        { name: `${folder}/${folder}.ino`, content: generateArduinoSketch(project, { includeExpressions }, pins, smoothRendering) },
         { name: `${folder}/eyes.h`, content },
         ...(includeController ? [{ name: `${folder}/eyeController.h`, content: generateEyeControllerHeader() }] : []),
-        { name: `${folder}/README.md`, content: generateArduinoReadme(project, { includeExpressions, includeController }) }
+        { name: `${folder}/README.md`, content: generateArduinoReadme(project, { includeExpressions, includeController, smooth: smoothRendering }) }
       ]
       const ok = await exportBinaryFile(`${folder}.zip`, createZip(entries), ['zip'])
       setStatus(ok ? `Exported ${folder}.zip` : 'Export cancelled')
@@ -292,6 +298,16 @@ export function ExportDialog() {
             </div>
           )}
 
+          {tab === 'cpp' && exportArduinoProject && (
+            <label className="mx-3 mt-2 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+              <input type="checkbox" className="mt-0.5" checked={smoothRendering} onChange={(e) => setSmoothRendering(e.target.checked)} />
+              <span>
+                <span className="font-medium">Smooth rendering (LovyanGFX + DMA)</span>
+                <span className="text-studio-muted"> — generate the sketch with the same display stack as the LVGL export: hardware SPI at 80&nbsp;MHz + asynchronous DMA, so animation doesn’t stutter. Needs the <strong>LovyanGFX</strong> library and ~{Math.round((project.display.width * project.display.height * 2) / 1024)}&nbsp;KB RAM for a full-frame buffer. Uncheck to use the simpler Adafruit_GC9A01A path (blocking blit).</span>
+              </span>
+            </label>
+          )}
+
           {tab === 'cpp' && (
             <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
               <input type="checkbox" className="mt-0.5" checked={includeExpressions} onChange={(e) => setIncludeExpressions(e.target.checked)} />
@@ -304,22 +320,36 @@ export function ExportDialog() {
 
           {tab === 'cpp' && (
             <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
-              <input type="checkbox" className="mt-0.5" checked={forceRotation} onChange={(e) => setForceRotation(e.target.checked)} />
-              <span>
-                <span className="font-medium">Force eye rotation on device</span>
-                <span className="text-studio-muted"> — emits <code>#define EYES_FORCE_ROTATION</code> so tilted/rotated eyes render on <strong>ESP32‑C6 / C3</strong> (where rotation is auto‑disabled for speed). Needed to match the preview on those chips; harmless on FPU boards (S3/classic). May slow heavy animation on a C6/C3. {projectUsesEyeRotation(project) ? 'This project uses eye rotation, so it’s on by default.' : ''}</span>
-              </span>
-            </label>
-          )}
-
-          {tab === 'cpp' && (
-            <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
               <input type="checkbox" className="mt-0.5" checked={includeController} onChange={(e) => setIncludeController(e.target.checked)} />
               <span>
                 <span className="font-medium">Generate eye controller</span>
                 <span className="text-studio-muted"> — also emit <code>eyeController.h</code>, a priority-based arbitration layer over <code>eyes.h</code> for juggling multiple input sources (sensors, buttons, events). Saves <code>eyes.h</code> and <code>eyeController.h</code> as two files (two save prompts).</span>
               </span>
             </label>
+          )}
+
+          {tab === 'cpp' && (
+            <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+              <input type="checkbox" className="mt-0.5" checked={bakeRotation} onChange={(e) => setBakeRotation(e.target.checked)} />
+              <span>
+                <span className="font-medium">Smooth tilt on ESP32 (bake rotation)</span>
+                <span className="text-studio-muted"> — bakes each tilted eye's rotation into its shape geometry so the device draws it with the fast path: <strong>tilted AND smooth</strong> even on a soft‑float ESP32‑C6/C3 (no per‑pixel rotation cost). Off by default; turn it on if a tilted eye stutters on the device. {projectUsesEyeRotation(project) ? '' : 'Only matters if you rotate an eye.'}</span>
+              </span>
+            </label>
+          )}
+
+          {tab === 'cpp' && bakeRotation && (
+            <div className="mx-3 mt-2 text-[11px] leading-snug bg-amber-500/10 border border-amber-500/40 text-amber-300/90 rounded-md px-2 py-1.5">
+              <span className="font-medium text-amber-300">⚠ Heads up — this changes how the eyes animate on the device:</span>
+              <ul className="mt-1 list-disc pl-4 space-y-0.5">
+                <li>Only the eye <strong>shape</strong> tilt is baked. <strong>Eyelids don't tilt</strong> — a blink on a tilted eye closes level (fine for a solid lens, visible if the eyelid shows).</li>
+                <li>A <strong>visible pupil / highlight won't rotate</strong> with the eye (they stay put). Best for solid shape eyes.</li>
+                <li>Eyes with a shape <strong>offset</strong> or <strong>flip</strong> can't be baked and fall back to the slower runtime rotation.</li>
+                <li>If the eye <strong>size animates while tilted</strong>, the tilt is baked per‑pose at each size (still correct per frame).</li>
+                <li>Tilted poses become per‑eye custom shapes, so <strong>the exported file is a bit larger</strong>.</li>
+              </ul>
+              <span className="block mt-1">The studio preview always shows the true rotation — verify the look on your actual display after flashing.</span>
+            </div>
           )}
 
           <pre className="flex-1 overflow-auto p-3 text-xs font-mono bg-studio-bg m-3 rounded-md border border-studio-border whitespace-pre">
