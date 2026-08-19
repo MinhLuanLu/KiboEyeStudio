@@ -1,7 +1,23 @@
-import type { CustomEyeShape, CustomPupilShape, EyeParams, StickerAsset, StickerInstance } from '@/types'
+import type { CustomEyeShape, CustomPupilShape, DisplayBackgroundImage, EyeParams, StickerAsset, StickerInstance } from '@/types'
 import { applyDisplayMask, drawBezel, type DisplayMaskOptions } from './displayMask'
 import { drawEye, DEFAULT_EYE_THEME, type EyeTheme } from './drawEye'
 import { drawSticker } from './drawSticker'
+import { computeBackgroundRect } from './backgroundLayout'
+
+// Lazily loads + caches one <img> per background data URL — drawImage needs a loaded element, and
+// re-decoding every frame would thrash. Not-yet-loaded images skip a frame or two until onload
+// fires; the render loop redraws continuously so it appears as soon as it's ready. Mirrors the
+// same tiny cache drawSticker.ts uses for raster stickers.
+const bgImageCache = new Map<string, HTMLImageElement>()
+function getBackgroundImage(dataUrl: string): HTMLImageElement | null {
+  let img = bgImageCache.get(dataUrl)
+  if (!img) {
+    img = new Image()
+    img.src = dataUrl
+    bgImageCache.set(dataUrl, img)
+  }
+  return img.complete && img.naturalWidth > 0 ? img : null
+}
 
 export interface FaceRenderOptions extends DisplayMaskOptions {
   /** Left eye's theme (also the right eye's, unless rightTheme is given). */
@@ -32,6 +48,9 @@ export interface FaceRenderOptions extends DisplayMaskOptions {
    * changes (RGB565 color quantization, ring-stepped iris/glow). Defaults to false (normal
    * studio rendering). */
   firmwareSim?: boolean
+  /** Optional whole-display background image, drawn BEHIND everything and clipped to the display
+   * shape (see project.backgroundImage / DisplayBackgroundImage). Omit/null for no background. */
+  backgroundImage?: DisplayBackgroundImage | null
 }
 
 /** Renders the full display face onto a `width`x`height` canvas: background fill, shape
@@ -53,9 +72,27 @@ export function renderFace(ctx: CanvasRenderingContext2D, params: EyeParams, opt
     stickers = [],
     stickerAssets = [],
     stickerElapsedMs = 0,
-    firmwareSim = false
+    firmwareSim = false,
+    backgroundImage = null
   } = options
   applyDisplayMask(ctx, options)
+
+  // Background image — drawn FIRST (behind eyes/pupils/eyelids/stickers), inside the display-shape
+  // clip applyDisplayMask just set, so on a round panel it's cropped to the circle. Placement/fit
+  // come from computeBackgroundRect (shared with the C++ export). Opacity via globalAlpha.
+  if (backgroundImage && backgroundImage.visible && backgroundImage.opacity > 0) {
+    const img = getBackgroundImage(backgroundImage.dataUrl)
+    if (img) {
+      const { x, y, w, h } = computeBackgroundRect(backgroundImage, backgroundImage.naturalWidth, backgroundImage.naturalHeight, width, height)
+      if (w > 0 && h > 0) {
+        ctx.save()
+        ctx.globalAlpha = Math.max(0, Math.min(1, backgroundImage.opacity / 100))
+        if (firmwareSim) ctx.imageSmoothingEnabled = false // approximate the device's nearest-neighbor blit
+        ctx.drawImage(img, x, y, w, h)
+        ctx.restore()
+      }
+    }
+  }
 
   const cx = width / 2
   const cy = height / 2

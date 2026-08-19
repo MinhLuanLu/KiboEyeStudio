@@ -7,6 +7,7 @@ import type {
   AnimationComboClip,
   CustomEyeShape,
   CustomPupilShape,
+  DisplayBackgroundImage,
   EasingType,
   EditorState,
   Expression,
@@ -150,6 +151,37 @@ function migrateEyelidRoundness(params: Partial<EyeParams>): Partial<EyeParams> 
     patch.lowerEyelidRightRoundness = oldLower
   }
   return patch
+}
+
+const BG_FIT_MODES = new Set(['fill', 'contain', 'cover', 'fitWidth', 'fitHeight', 'original', 'custom'])
+
+/** Coerces a persisted background image, dropping anything malformed (missing pixel data / wrong
+ * types) back to null so a bad field can never crash the renderer. Old projects have no field. */
+function normalizeBackgroundImage(raw: unknown): DisplayBackgroundImage | null {
+  if (!raw || typeof raw !== 'object') return null
+  const b = raw as Record<string, unknown>
+  const kind = b.kind === 'svg' ? 'svg' : 'raster'
+  const rgba = b.rgba as Record<string, unknown> | undefined
+  if (typeof b.dataUrl !== 'string' || !rgba || !Array.isArray(rgba.data)) return null
+  const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d)
+  return {
+    name: typeof b.name === 'string' ? b.name : 'background',
+    kind,
+    dataUrl: b.dataUrl,
+    rgba: { width: num(rgba.width, 1), height: num(rgba.height, 1), data: (rgba.data as number[]).map((n) => (typeof n === 'number' ? n : 0)) },
+    naturalWidth: num(b.naturalWidth, 1),
+    naturalHeight: num(b.naturalHeight, 1),
+    svgSource: kind === 'svg' && typeof b.svgSource === 'string' ? b.svgSource : undefined,
+    fitMode: (BG_FIT_MODES.has(b.fitMode as string) ? b.fitMode : 'cover') as DisplayBackgroundImage['fitMode'],
+    x: num(b.x, 0),
+    y: num(b.y, 0),
+    width: num(b.width, num(b.naturalWidth, 1)),
+    height: num(b.height, num(b.naturalHeight, 1)),
+    scale: num(b.scale, 100),
+    opacity: num(b.opacity, 100),
+    lockAspect: b.lockAspect !== false,
+    visible: b.visible !== false
+  }
 }
 
 function normalizeEyeParams(params: Partial<EyeParams> | undefined): EyeParams {
@@ -993,6 +1025,7 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     colorsLeftOverride: normalizeEyeColorsOverride(raw.colorsLeftOverride),
     colorsRightOverride: normalizeEyeColorsOverride(raw.colorsRightOverride),
     display: { ...DEFAULT_DISPLAY, ...(raw.display ?? {}) },
+    backgroundImage: normalizeBackgroundImage((raw as Record<string, unknown>).backgroundImage),
     personality: { ...DEFAULT_PERSONALITY, ...(raw.personality ?? {}) },
     timing: { ...DEFAULT_TIMING, ...(raw.timing ?? {}) },
     animations,

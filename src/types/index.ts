@@ -297,6 +297,53 @@ export interface DisplaySettings {
   fps: number
 }
 
+/** How a display background image is sized relative to the display. See computeBackgroundRect()
+ * in src/renderer/backgroundLayout.ts (the single fit-mode math both the studio preview and the
+ * C++ export use, so they always agree). */
+export type BackgroundFitMode =
+  | 'fill' // stretch to exactly the display size (ignores aspect ratio)
+  | 'contain' // whole image visible, aspect kept (letterboxed)
+  | 'cover' // fill the display, aspect kept, overflow cropped by the display clip
+  | 'fitWidth' // scale to the display width, aspect kept
+  | 'fitHeight' // scale to the display height, aspect kept
+  | 'original' // the image's own pixel size, centered
+  | 'custom' // manual width/height (the x/y/scale nudge apply in every mode)
+
+/** A single image drawn as the whole-display background, BEHIND the eyes/pupils/eyelids/stickers.
+ * Display-level (one per project) — it shows for every expression and animation, clipped to the
+ * display shape (a 240x240 round panel clips it to the circle). The image itself is stored inline
+ * (not in the sticker asset list): `dataUrl` is the full-resolution bitmap the studio preview
+ * blits; `rgba` is a size-capped copy the DOM-free C++ export bakes to RGB565 PROGMEM. `svgSource`
+ * is kept for SVG uploads so a re-export/re-render can re-rasterize crisply. */
+export interface DisplayBackgroundImage {
+  /** Original file name, for display in the panel only. */
+  name: string
+  kind: 'raster' | 'svg'
+  /** Full-resolution (studio preview) bitmap as a PNG data URL. */
+  dataUrl: string
+  /** Size-capped raw RGBA (row-major, 4 bytes/px) for the synchronous, DOM-free C++ export. */
+  rgba: { width: number; height: number; data: number[] }
+  naturalWidth: number
+  naturalHeight: number
+  /** Original SVG markup when kind === 'svg' (verbatim), else undefined. */
+  svgSource?: string
+  fitMode: BackgroundFitMode
+  /** Nudge offset from the fit-mode's centered placement, in display px. */
+  x: number
+  y: number
+  /** Manual size in display px — only used by fitMode 'custom' (kept across mode switches). */
+  width: number
+  height: number
+  /** Uniform zoom %, keeps aspect ratio; applied on top of the fit mode (100 = no zoom). */
+  scale: number
+  /** 0-100. */
+  opacity: number
+  /** When true (custom mode UI), editing width keeps the natural aspect ratio by adjusting height. */
+  lockAspect: boolean
+  /** Layers-panel style show/hide without discarding the image. */
+  visible: boolean
+}
+
 export type EasingType =
   | 'linear'
   | 'easeIn'
@@ -1065,6 +1112,9 @@ export interface Project {
   colorsLeftOverride: EyeColors | null
   colorsRightOverride: EyeColors | null
   display: DisplaySettings
+  /** Optional whole-display background image, shown behind every expression/animation (see
+   * DisplayBackgroundImage). `null` = no background (just display.backgroundColor). */
+  backgroundImage: DisplayBackgroundImage | null
   personality: Personality
   timing: GlobalTiming
   animations: Animation[]
