@@ -2228,6 +2228,124 @@ inline void eyesFillEyelid(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h,
   }
 }
 
+// Border ring for "Disable Eyelid". The plain outer ring (eyesFillEyeBoundaryRing) would circle
+// the WHOLE eye shape — including the eyelid-hidden part — leaving a border floating around the
+// covered region. Instead this paints colors.border only in the strip within \`borderPx\` of the
+// VISIBLE (eyelid-cropped) eye: the shape's own arc AND the eyelid cut. Mirrors drawEye.ts's
+// exposed-region border exactly — a pixel is border when it is inside (shape grown by borderPx)
+// AND inside (exposed region grown by borderPx) but NOT inside the visible interior (shape AND
+// exposed). It runs AFTER the eyelid cut, so every pixel it sets is outside the crescent (the
+// interior test excludes it) — it only adds the rim, never repaints the eye. The lid-cutoff law
+// is the same pure function of local x that eyesFillEyelid() uses, so the rim tracks the exact
+// eyelid curve. Only invoked when disableEyelid && borderWidth > 0 (a rare config), so its
+// per-pixel predicate cost is acceptable.
+template <typename T>
+inline void eyesFillEyeBorderExposed(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius,
+                                     const EyeShapeCtx& eyeShape, float borderPx, float rotRad, uint16_t color,
+                                     const LiveEye& e) {
+  if (borderPx <= 0) return;
+  float hx = w / 2.0f, hy = h / 2.0f;
+  float rx = radius < hx ? (float)radius : hx;
+  float ry = radius < hy ? (float)radius : hy;
+  float ghx = hx + borderPx, ghy = hy + borderPx, grx = rx + borderPx, gry = ry + borderPx;
+  EyeShapeCtx gshape = eyeShape;
+  if (gshape.points) { gshape.hx += borderPx; gshape.hy += borderPx; }
+
+  // One eyelid's precomputed cutoff coefficients — the local-y cut line as a pure function of
+  // local x, identical to eyesFillEyelid()'s law (yBase + slope*lx + offset*taper(u)).
+  struct BorderLid {
+    bool on; bool upper;
+    float yBase, slope, offset;
+    float lRound, rRound, cDepth, skew, wFrac, smooth, tension;
+  };
+  auto makeLid = [&](bool upper, bool visible, float covPct, float tiltDeg, float curvPct,
+                     float lRoundPct, float rRoundPct, float stretchXPct, float stretchYPct, float skewPct,
+                     float cDepthPct, float cYPct, float smoothPct, float tensionPct) -> BorderLid {
+    BorderLid L;
+    L.on = visible && covPct > 0.0f;
+    L.upper = upper;
+    float coverage = (covPct / 100.0f) * h;
+    float yBase = upper ? (-hy + coverage) : (hy - coverage);
+    float cYOff = (cYPct / 100.0f) * h * 0.25f;
+    yBase += upper ? cYOff : -cYOff;
+    float curveOffset = (curvPct / 100.0f) * h * 0.5f;
+    float ampScale = stretchYPct < 0 ? 0 : (stretchYPct > 200 ? 2.0f : stretchYPct / 100.0f);
+    L.yBase = yBase;
+    L.slope = tanf(tiltDeg * (float)PI / 180.0f);
+    L.offset = curveOffset * ampScale * (upper ? 1.0f : -1.0f);
+    L.lRound = lRoundPct < 0 ? 0 : (lRoundPct > 100 ? 1.0f : lRoundPct / 100.0f);
+    L.rRound = rRoundPct < 0 ? 0 : (rRoundPct > 100 ? 1.0f : rRoundPct / 100.0f);
+    L.cDepth = cDepthPct < 0 ? 0 : (cDepthPct > 100 ? 1.0f : cDepthPct / 100.0f);
+    L.skew = skewPct < -100 ? -1.0f : (skewPct > 100 ? 1.0f : skewPct / 100.0f);
+    L.wFrac = stretchXPct < 0 ? 0 : stretchXPct / 100.0f;
+    L.smooth = smoothPct < 0 ? 0 : (smoothPct > 100 ? 1.0f : smoothPct / 100.0f);
+    L.tension = tensionPct < 0 ? 0 : (tensionPct > 100 ? 1.0f : tensionPct / 100.0f);
+    return L;
+  };
+  BorderLid up = makeLid(true, e.upperEyelidVisible, e.upperEyelid, e.upperEyelidTilt, e.upperEyelidCurvature,
+                         e.upperEyelidLeftRoundness, e.upperEyelidRightRoundness, e.upperEyelidStretchX, e.upperEyelidStretchY,
+                         e.upperEyelidSkew, e.upperEyelidCenterDepth, e.upperEyelidCenterY, e.upperEyelidSmoothness, e.upperEyelidTension);
+  BorderLid lo = makeLid(false, e.lowerEyelidVisible, e.lowerEyelid, e.lowerEyelidTilt, e.lowerEyelidCurvature,
+                         e.lowerEyelidLeftRoundness, e.lowerEyelidRightRoundness, e.lowerEyelidStretchX, e.lowerEyelidStretchY,
+                         e.lowerEyelidSkew, e.lowerEyelidCenterDepth, e.lowerEyelidCenterY, e.lowerEyelidSmoothness, e.lowerEyelidTension);
+
+  auto cutoff = [&](const BorderLid& L, float lx) -> float {
+    float u = hx > 0.01f ? lx / hx : 0.0f;
+    if (u > 1.0f) u = 1.0f;
+    if (u < -1.0f) u = -1.0f;
+    float taper = eyesEyelidTaper(u, L.lRound, L.rRound, L.cDepth, L.skew, L.wFrac, L.smooth, L.tension);
+    return L.yBase + L.slope * lx + L.offset * taper;
+  };
+  // Exposed at local (lx,ly): below the upper cut AND above the lower cut (visible lids only).
+  // \`grow\` pushes each cut toward its covered side, enlarging the exposed region (matches the
+  // studio's applyExposedClips(outwardPx)): upper cut - grow, lower cut + grow.
+  auto inExposed = [&](float lx, float ly, float grow) -> bool {
+    if (up.on && ly <= cutoff(up, lx) - grow) return false;
+    if (lo.on && ly >= cutoff(lo, lx) + grow) return false;
+    return true;
+  };
+  auto plot = [&](float lx, float ly, int16_t dxDev, int16_t dyDev) {
+    if (!eyesPointInsideEyeShape(lx, ly, ghx, ghy, grx, gry, gshape)) return;   // shape grown by border
+    if (!inExposed(lx, ly, borderPx)) return;                                    // exposed grown by border
+    // Skip the visible interior (shape AND exposed) so the eye contents are never repainted.
+    if (eyesPointInsideEyeShape(lx, ly, hx, hy, rx, ry, eyeShape) && inExposed(lx, ly, 0.0f)) return;
+    gfx.drawPixel(cx + dxDev, cy + dyDev, color);
+  };
+
+  if (rotRad == 0.0f) {
+    int16_t halfH = (int16_t)ceilf(ghy + fabsf(gshape.offsetY)) + 2;
+    float loXs[EYE_MAX_SHAPE_SPANS], hiXs[EYE_MAX_SHAPE_SPANS];
+    for (int16_t dy = -halfH; dy <= halfH; dy++) {
+      uint8_t n;
+      if (gshape.points) {
+        n = eyesEyeShapeRowSpans(gshape, (float)dy, loXs, hiXs);
+      } else {
+        float lo1, hi1;
+        n = eyesEyeHalfWidthAtShape((float)dy, ghx, ghy, grx, gry, gshape, lo1, hi1) ? 1 : 0;
+        if (n) { loXs[0] = lo1; hiXs[0] = hi1; }
+      }
+      for (uint8_t i = 0; i < n; i++) {
+        int16_t ixLo = (int16_t)floorf(loXs[i]);
+        int16_t ixHi = (int16_t)ceilf(hiXs[i]);
+        for (int16_t dx = ixLo; dx <= ixHi; dx++) plot((float)dx, (float)dy, dx, dy);
+      }
+    }
+    return;
+  }
+  // Eye rotation != 0 — device-pixel scan, inverse-rotated into the eye's local frame (same
+  // approach as eyesFillEyeBoundaryRing()'s rotated branch).
+  float c = cosf(rotRad), s = sinf(rotRad);
+  float maxLocal = sqrtf(ghx * ghx + ghy * ghy) + fabsf(gshape.offsetX) + fabsf(gshape.offsetY) + 2.0f;
+  int16_t half = (int16_t)ceilf(maxLocal);
+  for (int16_t dy = -half; dy <= half; dy++) {
+    for (int16_t dx = -half; dx <= half; dx++) {
+      float lx = dx * c + dy * s;
+      float ly = -dx * s + dy * c;
+      plot(lx, ly, dx, dy);
+    }
+  }
+}
+
 // ---- Stickers — see the "Stickers" comment in the studio's cppExport.ts for the exported ----
 // scope/simplifications this player implements (project-wide only; opacity is a visibility
 // threshold, not a smooth blend). Declared before eyesDrawEyePair() below since it calls
@@ -3832,10 +3950,11 @@ inline void eyesDrawEye(T& gfx, int16_t cx, int16_t cy, const LiveEye& e, bool m
   // shape) renders exactly like it does in the studio's preview. borderWidth lives on
   // EyeColorSet (not a single global #define) so left/right eyes can have different ring
   // thicknesses, matching the studio's per-eye Visual Reference overrides.
-  // "Disable Eyelid" (e.disableEyelid): skip the border ring entirely. The ring sits OUTSIDE the
-  // eye shape and outside the eyelid, so it would otherwise stay visible around the eyelid-covered
-  // part of the eye — leaving a full outline around the "hidden" region. Skipping it leaves only
-  // the eyelid-clipped sclera/iris/pupil/highlight. Mirrors drawEye.ts in the studio.
+  // "Disable Eyelid" (e.disableEyelid): the plain outer ring is wrong here — it would circle the
+  // FULL eye shape, drawing a border around the eyelid-covered part too. So it is skipped here and
+  // a matching border that hugs only the VISIBLE (eyelid-cropped) eye is drawn LATER, after the
+  // eyelid cut paints the covered region to background — see eyesFillEyeBorderExposed() at the end
+  // of this function. Mirrors drawEye.ts in the studio.
   if (!e.disableEyelid && colors.borderWidth > 0) {
     eyesFillEyeBoundaryRing(gfx, cx, cy, w, h, radius, eyeShape, (float)colors.borderWidth, rotRad, colors.border);
   }
@@ -3919,6 +4038,13 @@ ${exHlN > 0 ? `  // Extra highlight glints — each drawn exactly like the prima
     eyesFillEyelid(gfx, cx, cy, w, h, radius, false, e.lowerEyelid, e.lowerEyelidTilt, e.lowerEyelidCurvature,
                    e.lowerEyelidLeftRoundness, e.lowerEyelidRightRoundness, e.lowerEyelidStretchX, e.lowerEyelidStretchY, e.lowerEyelidSkew,
                    e.lowerEyelidCenterDepth, e.lowerEyelidCenterY, e.lowerEyelidSmoothness, e.lowerEyelidTension, eyeShape, rotRad, bgColor, e.disableEyelid);
+  }
+
+  // "Disable Eyelid" border — drawn last (after the eyelid cut above blanked the covered region to
+  // background) so the rim hugs the visible crescent: the shape's arc AND the eyelid cut. See
+  // eyesFillEyeBorderExposed()'s own comment. No-op unless the eyelid is disabled with a border.
+  if (e.disableEyelid && colors.borderWidth > 0) {
+    eyesFillEyeBorderExposed(gfx, cx, cy, w, h, radius, eyeShape, (float)colors.borderWidth, rotRad, colors.border, e);
   }
 }
 

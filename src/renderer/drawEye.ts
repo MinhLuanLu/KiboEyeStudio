@@ -237,6 +237,78 @@ export function drawEye(
     }
   }
 
+  // Clips the context to the region the (disabled) eyelids leave EXPOSED. Shared by two callers:
+  // the "Disable Eyelid" content clip (outwardPx = 0 — see the big comment at its call site for
+  // why the contents are clipped) and the border ring below (outwardPx = borderWidth, so the ring
+  // sits just OUTSIDE the visible edge). `outwardPx` grows the exposed region by pushing each lid's
+  // cut curve toward its own covered side. Each visible lid intersects one more clip; with no
+  // visible lid this is a no-op (the whole eye shape stays exposed). Same curve math as the eyelid
+  // fill (drawEyelid), tilt shear applied per point (y += slope*x) so no transform/restore is
+  // needed (restore would drop the clip).
+  const applyExposedClips = (outwardPx: number): void => {
+    const clipToExposedSide = (
+      sign: 1 | -1,
+      coveragePct: number,
+      curvaturePct: number,
+      tiltDeg: number,
+      shape: EyelidCurveShape,
+      centerYPct: number,
+      stretchYPct: number
+    ): void => {
+      const halfW = width / 2
+      if (coveragePct <= 0 || halfW < 0.01) return
+      const samples = Math.max(32, Math.ceil(width))
+      const coverage = (coveragePct / 100) * height
+      const yBase = sign === 1 ? -height / 2 + coverage : height / 2 - coverage
+      const curveOffset =
+        (curvaturePct / 100) * height * 0.5 * (Math.max(0, Math.min(200, stretchYPct)) / 100)
+      const slope = Math.tan((tiltDeg * Math.PI) / 180)
+      const centerYOffset = (Math.max(-100, Math.min(100, centerYPct)) / 100) * height * 0.25
+      // -sign*outwardPx moves the cut curve toward the covered side (up for the upper lid, down for
+      // the lower), enlarging the exposed region by outwardPx so the border ring can live there.
+      const y0 = yBase + sign * centerYOffset - sign * outwardPx
+      const big = (width + height) * 2
+      const exposedFarY = sign === 1 ? big : -big
+      const endLeftY = y0 + sign * curveOffset * eyelidTaper(-1, shape) + slope * -halfW
+      const endRightY = y0 + sign * curveOffset * eyelidTaper(1, shape) + slope * halfW
+      ctx.beginPath()
+      for (let i = 0; i <= samples; i++) {
+        const x = -halfW + (2 * halfW * i) / samples
+        const y = y0 + sign * curveOffset * eyelidTaper(x / halfW, shape) + slope * x
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      }
+      ctx.lineTo(big, endRightY)
+      ctx.lineTo(big, exposedFarY)
+      ctx.lineTo(-big, exposedFarY)
+      ctx.lineTo(-big, endLeftY)
+      ctx.closePath()
+      ctx.clip()
+    }
+    if (upperEyelidVisible && upperEyelid > 0) {
+      clipToExposedSide(1, upperEyelid, upperEyelidCurvature, upperEyelidTilt, {
+        leftRoundness: upperEyelidLeftRoundness,
+        rightRoundness: upperEyelidRightRoundness,
+        width: upperEyelidStretchX,
+        centerDepth: upperEyelidCenterDepth,
+        centerX: upperEyelidSkew,
+        smoothness: upperEyelidSmoothness,
+        tension: upperEyelidTension
+      }, upperEyelidCenterY, upperEyelidStretchY)
+    }
+    if (lowerEyelidVisible && lowerEyelid > 0) {
+      clipToExposedSide(-1, lowerEyelid, lowerEyelidCurvature, lowerEyelidTilt, {
+        leftRoundness: lowerEyelidLeftRoundness,
+        rightRoundness: lowerEyelidRightRoundness,
+        width: lowerEyelidStretchX,
+        centerDepth: lowerEyelidCenterDepth,
+        centerX: lowerEyelidSkew,
+        smoothness: lowerEyelidSmoothness,
+        tension: lowerEyelidTension
+      }, lowerEyelidCenterY, lowerEyelidStretchY)
+    }
+  }
+
   ctx.save()
   ctx.rotate((rotation * sign * Math.PI) / 180)
 
@@ -289,15 +361,29 @@ export function drawEye(
   // anything is the only way to guarantee zero artifact. theme.borderWidth is a Visual
   // Reference style field (see types/index.ts) — matches EYE_BORDER_WIDTH in the C++ export
   // exactly, so preview and firmware always draw an identical ring thickness.
-  // "Disable Eyelid" (disableEyelid): skip the border ring entirely. The ring is drawn OUTSIDE
-  // the eye shape (one borderWidth larger) and thus outside the eyelid clip below, so it would
-  // otherwise stay visible around the eyelid-covered part of the eye — a full outline around the
-  // "hidden" region. Skipping it leaves only the eyelid-clipped sclera/iris/pupil/highlight.
+  // "Disable Eyelid" (disableEyelid): the plain outer ring is wrong here — it circles the FULL eye
+  // shape (one borderWidth larger), so it would draw a border around the eyelid-covered part too, a
+  // floating outline around the "hidden" region. Instead (else-if branch) we paint the border only
+  // in the ring just OUTSIDE the VISIBLE eye: fill (shape ⊕ borderWidth) ∩ (exposed region grown by
+  // borderWidth), which covers the strip within one borderWidth of the crescent on every side — the
+  // shape's own arc AND the eyelid cut. The eye contents, drawn just below clipped to the exact
+  // visible region, cover the inner half and leave a borderWidth rim hugging the crescent. So a
+  // lens-style eye (e.g. the Spider-Man mask) keeps a full outline even with the lid disabled.
   if (!disableEyelid && theme.borderOpacity > 0 && theme.borderWidth > 0) {
     const ringColor = mixColors(backgroundColor, theme.border, theme.borderOpacity / 100)
     traceEyeBoundary(theme.borderWidth)
     ctx.fillStyle = ringColor
     ctx.fill()
+  } else if (disableEyelid && theme.borderOpacity > 0 && theme.borderWidth > 0) {
+    const ringColor = mixColors(backgroundColor, theme.border, theme.borderOpacity / 100)
+    ctx.save()
+    traceEyeBoundary(theme.borderWidth)
+    ctx.clip()
+    applyExposedClips(theme.borderWidth)
+    const big = (width + height) * 2
+    ctx.fillStyle = ringColor
+    ctx.fillRect(-big, -big, big * 2, big * 2)
+    ctx.restore()
   }
 
   traceEyeBoundary()
@@ -313,67 +399,10 @@ export function drawEye(
   // so its covered region is already clean (see cppExport.ts). Uses the SAME curve math as the
   // eyelid fill (drawEyelid below), with the tilt shear applied per-point (y += slope*x) rather
   // than via ctx.transform — a transform would need a save/restore, and restore would drop the
-  // clip along with it.
+  // clip along with it. (outwardPx = 0 → clip to the exact visible region; the border ring above
+  // reused this same helper with outwardPx = borderWidth.)
   if (disableEyelid) {
-    const clipToExposedSide = (
-      sign: 1 | -1,
-      coveragePct: number,
-      curvaturePct: number,
-      tiltDeg: number,
-      shape: EyelidCurveShape,
-      centerYPct: number,
-      stretchYPct: number
-    ): void => {
-      const halfW = width / 2
-      if (coveragePct <= 0 || halfW < 0.01) return
-      const samples = Math.max(32, Math.ceil(width))
-      const coverage = (coveragePct / 100) * height
-      const yBase = sign === 1 ? -height / 2 + coverage : height / 2 - coverage
-      const curveOffset =
-        (curvaturePct / 100) * height * 0.5 * (Math.max(0, Math.min(200, stretchYPct)) / 100)
-      const slope = Math.tan((tiltDeg * Math.PI) / 180)
-      const centerYOffset = (Math.max(-100, Math.min(100, centerYPct)) / 100) * height * 0.25
-      const y0 = yBase + sign * centerYOffset
-      const big = (width + height) * 2
-      const exposedFarY = sign === 1 ? big : -big
-      const endLeftY = y0 + sign * curveOffset * eyelidTaper(-1, shape) + slope * -halfW
-      const endRightY = y0 + sign * curveOffset * eyelidTaper(1, shape) + slope * halfW
-      ctx.beginPath()
-      for (let i = 0; i <= samples; i++) {
-        const x = -halfW + (2 * halfW * i) / samples
-        const y = y0 + sign * curveOffset * eyelidTaper(x / halfW, shape) + slope * x
-        if (i === 0) ctx.moveTo(x, y)
-        else ctx.lineTo(x, y)
-      }
-      ctx.lineTo(big, endRightY)
-      ctx.lineTo(big, exposedFarY)
-      ctx.lineTo(-big, exposedFarY)
-      ctx.lineTo(-big, endLeftY)
-      ctx.closePath()
-      ctx.clip()
-    }
-    if (upperEyelidVisible && upperEyelid > 0) {
-      clipToExposedSide(1, upperEyelid, upperEyelidCurvature, upperEyelidTilt, {
-        leftRoundness: upperEyelidLeftRoundness,
-        rightRoundness: upperEyelidRightRoundness,
-        width: upperEyelidStretchX,
-        centerDepth: upperEyelidCenterDepth,
-        centerX: upperEyelidSkew,
-        smoothness: upperEyelidSmoothness,
-        tension: upperEyelidTension
-      }, upperEyelidCenterY, upperEyelidStretchY)
-    }
-    if (lowerEyelidVisible && lowerEyelid > 0) {
-      clipToExposedSide(-1, lowerEyelid, lowerEyelidCurvature, lowerEyelidTilt, {
-        leftRoundness: lowerEyelidLeftRoundness,
-        rightRoundness: lowerEyelidRightRoundness,
-        width: lowerEyelidStretchX,
-        centerDepth: lowerEyelidCenterDepth,
-        centerX: lowerEyelidSkew,
-        smoothness: lowerEyelidSmoothness,
-        tension: lowerEyelidTension
-      }, lowerEyelidCenterY, lowerEyelidStretchY)
-    }
+    applyExposedClips(0)
   }
 
   // Sclera — soft vertical gradient derived from the single "sclera" color for a glassy look.
