@@ -191,6 +191,8 @@ function eyeFrameLiteral(
     Math.round(params.lowerEyelidSmoothness),
     Math.round(params.upperEyelidTension),
     Math.round(params.lowerEyelidTension),
+    Math.max(0, Math.min(200, Math.round(params.upperEyelidThickness))), // crease/rim line width in px (0-200)
+    Math.max(0, Math.min(200, Math.round(params.lowerEyelidThickness))),
     clampByte(params.highlightX),
     clampByte(params.highlightY),
     Math.round(params.highlightSize),
@@ -546,6 +548,14 @@ function colorSetLiteral(colors: EyeColors, backgroundColor: string): string {
   const borderBlend = mixColors(backgroundColor, colors.border, colors.borderOpacity / 100)
   const pupilBlend = mixColors(colors.iris, colors.pupil, colors.pupilOpacity / 100)
   const highlightBlend = mixColors(pupilBlend, colors.highlight, 0.92)
+  // Eyelid fill + Thickness crease, pre-blended over the background by Eyelid Opacity (RGB565 has no
+  // alpha) — exact at 100% opacity (the default), an approximation below it (the studio blends over
+  // the eye contents, not the background, but there's no framebuffer read on this hardware). The
+  // crease is the fill color 35% darker, the same shadeColor(-35) the studio's drawEyelid() strokes.
+  const upperEyelidFill = mixColors(backgroundColor, colors.upperEyelidColor, colors.upperEyelidOpacity / 100)
+  const lowerEyelidFill = mixColors(backgroundColor, colors.lowerEyelidColor, colors.lowerEyelidOpacity / 100)
+  const upperEyelidCrease = mixColors(backgroundColor, shadeColor(colors.upperEyelidColor, -35), colors.upperEyelidOpacity / 100)
+  const lowerEyelidCrease = mixColors(backgroundColor, shadeColor(colors.lowerEyelidColor, -35), colors.lowerEyelidOpacity / 100)
   const scleraTop = shadeColor(colors.sclera, 6)
   const scleraBottom = shadeColor(colors.sclera, -10)
   const irisLight = shadeColor(colors.iris, 12)
@@ -572,7 +582,11 @@ function colorSetLiteral(colors: EyeColors, backgroundColor: string): string {
     toRgb565Hex(scleraBottom),
     toRgb565Hex(irisLight),
     toRgb565Hex(irisDark),
-    toRgb565Hex(highlightBlend)
+    toRgb565Hex(highlightBlend),
+    toRgb565Hex(upperEyelidFill),
+    toRgb565Hex(lowerEyelidFill),
+    toRgb565Hex(upperEyelidCrease),
+    toRgb565Hex(lowerEyelidCrease)
   ]
   return `{ ${fields.join(', ')} }`
 }
@@ -592,10 +606,11 @@ function exportColors(project: Project): string {
     `#define EYE_DISPLAY_HEIGHT ${display.height}`,
     ``,
     `// sclera, iris, pupil, highlight, shadow, glow, border, borderWidth, shadowIntensity,`,
-    `// glowIntensity, scleraTop, scleraBottom, irisLight, irisDark, highlightBlend — see the`,
+    `// glowIntensity, scleraTop, scleraBottom, irisLight, irisDark, highlightBlend,`,
+    `// upperEyelidFill, lowerEyelidFill, upperEyelidCrease, lowerEyelidCrease — see the`,
     `// comment above colorSetLiteral() in the studio's cppExport.ts for what each precomputed`,
-    `// field is for (border/pupil/highlight opacity and the sclera/iris gradients all have no`,
-    `// RGB565 alpha channel to work with, so they're pre-blended here).`,
+    `// field is for (border/pupil/highlight/eyelid opacity and the sclera/iris gradients all have`,
+    `// no RGB565 alpha channel to work with, so they're pre-blended here).`,
     `const EyeColorSet EYE_COLORS_LEFT = ${colorSetLiteral(left, display.backgroundColor)};`
   ]
   if (same) {
@@ -1228,6 +1243,7 @@ struct LiveEye {
   float upperEyelidCenterY, lowerEyelidCenterY;
   float upperEyelidSmoothness, lowerEyelidSmoothness;
   float upperEyelidTension, lowerEyelidTension;
+  float upperEyelidThickness, lowerEyelidThickness;
   float highlightX, highlightY, highlightSize;
   float eyeShapeScale, eyeShapeOffsetX, eyeShapeOffsetY;
   // Not numeric, so not lerped like the fields above — eyesLerpFrame()/eyesLerpLive() step
@@ -1306,6 +1322,8 @@ inline LiveEye eyesLerpFrame(const EyeFrame& a, const EyeFrame& b, float t) {
   r.lowerEyelidSmoothness = a.lowerEyelidSmoothness + (b.lowerEyelidSmoothness - a.lowerEyelidSmoothness) * t;
   r.upperEyelidTension = a.upperEyelidTension + (b.upperEyelidTension - a.upperEyelidTension) * t;
   r.lowerEyelidTension = a.lowerEyelidTension + (b.lowerEyelidTension - a.lowerEyelidTension) * t;
+  r.upperEyelidThickness = a.upperEyelidThickness + (b.upperEyelidThickness - a.upperEyelidThickness) * t;
+  r.lowerEyelidThickness = a.lowerEyelidThickness + (b.lowerEyelidThickness - a.lowerEyelidThickness) * t;
   r.highlightX = a.highlightX + (b.highlightX - a.highlightX) * t;
   r.highlightY = a.highlightY + (b.highlightY - a.highlightY) * t;
   r.highlightSize = a.highlightSize + (b.highlightSize - a.highlightSize) * t;
@@ -1378,6 +1396,8 @@ inline LiveEye eyesLerpLive(const LiveEye& a, const LiveEye& b, float t) {
   r.lowerEyelidSmoothness = a.lowerEyelidSmoothness + (b.lowerEyelidSmoothness - a.lowerEyelidSmoothness) * t;
   r.upperEyelidTension = a.upperEyelidTension + (b.upperEyelidTension - a.upperEyelidTension) * t;
   r.lowerEyelidTension = a.lowerEyelidTension + (b.lowerEyelidTension - a.lowerEyelidTension) * t;
+  r.upperEyelidThickness = a.upperEyelidThickness + (b.upperEyelidThickness - a.upperEyelidThickness) * t;
+  r.lowerEyelidThickness = a.lowerEyelidThickness + (b.lowerEyelidThickness - a.lowerEyelidThickness) * t;
   r.highlightX = a.highlightX + (b.highlightX - a.highlightX) * t;
   r.highlightY = a.highlightY + (b.highlightY - a.highlightY) * t;
   r.highlightSize = a.highlightSize + (b.highlightSize - a.highlightSize) * t;
@@ -2336,6 +2356,126 @@ inline void eyesFillEyeBorderExposed(T& gfx, int16_t cx, int16_t cy, int16_t w, 
   // approach as eyesFillEyeBoundaryRing()'s rotated branch).
   float c = cosf(rotRad), s = sinf(rotRad);
   float maxLocal = sqrtf(ghx * ghx + ghy * ghy) + fabsf(gshape.offsetX) + fabsf(gshape.offsetY) + 2.0f;
+  int16_t half = (int16_t)ceilf(maxLocal);
+  for (int16_t dy = -half; dy <= half; dy++) {
+    for (int16_t dx = -half; dx <= half; dx++) {
+      float lx = dx * c + dy * s;
+      float ly = -dx * s + dy * c;
+      plot(lx, ly, dx, dy);
+    }
+  }
+}
+
+// The Thickness crease: the studio's drawEyelid() strokes the lid's curved edge with a round-cap
+// line \`thickness\` px wide in a darkened lid color, clipped to the eye. This reproduces that: a
+// band of constant PERPENDICULAR width \`thickness\` centered on the same lid curve eyesFillEyelid()
+// fills to, clipped to the eye silhouette. On a soft/gentle lid curve the band (a vertical fill of
+// height thickness*sqrt(1+slope^2), which is perpendicular width thickness) matches the canvas
+// stroke closely; the round end caps fall at the eye edge and are clipped away either way. Under
+// "Disable Eyelid" the band is additionally clipped to the exposed region (both lids), so only the
+// exposed-side half shows — a lash rim on the sclera — exactly as the studio's exposed clip does.
+// Runs only when thickness > 0 (a rare, opt-in config), so its per-column cost is acceptable.
+template <typename T>
+inline void eyesFillEyelidCrease(T& gfx, int16_t cx, int16_t cy, int16_t w, int16_t h, int16_t radius,
+                                 bool isUpper, const EyeShapeCtx& eyeShape, float rotRad, uint16_t color,
+                                 const LiveEye& e) {
+  float hx = w / 2.0f, hy = h / 2.0f;
+  float rx = radius < hx ? (float)radius : hx;
+  float ry = radius < hy ? (float)radius : hy;
+
+  float covPct = isUpper ? e.upperEyelid : e.lowerEyelid;
+  float thickness = isUpper ? e.upperEyelidThickness : e.lowerEyelidThickness;
+  if (thickness <= 0.0f || covPct <= 0.0f) return;
+  float halfThick = thickness / 2.0f;
+
+  // This lid's cutoff coefficients (same law as eyesFillEyelid()).
+  auto lidCoef = [&](bool up, float& yBase, float& slope, float& offset,
+                     float& lRound, float& rRound, float& cDepth, float& skew, float& wFrac, float& smooth, float& tension) {
+    float cov   = (up ? e.upperEyelid : e.lowerEyelid) / 100.0f * h;
+    float tilt  = up ? e.upperEyelidTilt : e.lowerEyelidTilt;
+    float curv  = up ? e.upperEyelidCurvature : e.lowerEyelidCurvature;
+    float sY    = up ? e.upperEyelidStretchY : e.lowerEyelidStretchY;
+    float cY    = up ? e.upperEyelidCenterY : e.lowerEyelidCenterY;
+    yBase = up ? (-hy + cov) : (hy - cov);
+    float cYOff = (cY / 100.0f) * h * 0.25f;
+    yBase += up ? cYOff : -cYOff;
+    float curveOffset = (curv / 100.0f) * h * 0.5f;
+    float ampScale = sY < 0 ? 0 : (sY > 200 ? 2.0f : sY / 100.0f);
+    slope  = tanf(tilt * (float)PI / 180.0f);
+    offset = curveOffset * ampScale * (up ? 1.0f : -1.0f);
+    float lR = up ? e.upperEyelidLeftRoundness : e.lowerEyelidLeftRoundness;
+    float rR = up ? e.upperEyelidRightRoundness : e.lowerEyelidRightRoundness;
+    float cD = up ? e.upperEyelidCenterDepth : e.lowerEyelidCenterDepth;
+    float sk = up ? e.upperEyelidSkew : e.lowerEyelidSkew;
+    float wf = up ? e.upperEyelidStretchX : e.lowerEyelidStretchX;
+    float sm = up ? e.upperEyelidSmoothness : e.lowerEyelidSmoothness;
+    float tn = up ? e.upperEyelidTension : e.lowerEyelidTension;
+    lRound = lR < 0 ? 0 : (lR > 100 ? 1.0f : lR / 100.0f);
+    rRound = rR < 0 ? 0 : (rR > 100 ? 1.0f : rR / 100.0f);
+    cDepth = cD < 0 ? 0 : (cD > 100 ? 1.0f : cD / 100.0f);
+    skew   = sk < -100 ? -1.0f : (sk > 100 ? 1.0f : sk / 100.0f);
+    wFrac  = wf < 0 ? 0 : wf / 100.0f;
+    smooth = sm < 0 ? 0 : (sm > 100 ? 1.0f : sm / 100.0f);
+    tension = tn < 0 ? 0 : (tn > 100 ? 1.0f : tn / 100.0f);
+  };
+  float yB, sl, off, lR, rR, cD, sk, wF, sm, tn;
+  lidCoef(isUpper, yB, sl, off, lR, rR, cD, sk, wF, sm, tn);
+  auto cutoffThis = [&](float lx) -> float {
+    float u = hx > 0.01f ? lx / hx : 0.0f;
+    if (u > 1.0f) u = 1.0f; if (u < -1.0f) u = -1.0f;
+    return yB + sl * lx + off * eyesEyelidTaper(u, lR, rR, cD, sk, wF, sm, tn);
+  };
+
+  // Exposed test (both lids) — only needed to trim the crease to the exposed side under Disable
+  // Eyelid. Precompute the OTHER lid's coefficients too.
+  bool disable = e.disableEyelid;
+  bool upOn = e.upperEyelidVisible && e.upperEyelid > 0.0f;
+  bool loOn = e.lowerEyelidVisible && e.lowerEyelid > 0.0f;
+  float uyB, usl, uoff, ulR, urR, ucD, usk, uwF, usm, utn;
+  float lyB, lsl, loff, llR, lrR, lcD, lsk, lwF, lsm, ltn;
+  if (disable) { lidCoef(true, uyB, usl, uoff, ulR, urR, ucD, usk, uwF, usm, utn);
+                 lidCoef(false, lyB, lsl, loff, llR, lrR, lcD, lsk, lwF, lsm, ltn); }
+  auto cutoffAt = [&](bool up, float lx) -> float {
+    float u = hx > 0.01f ? lx / hx : 0.0f;
+    if (u > 1.0f) u = 1.0f; if (u < -1.0f) u = -1.0f;
+    if (up) return uyB + usl * lx + uoff * eyesEyelidTaper(u, ulR, urR, ucD, usk, uwF, usm, utn);
+    return lyB + lsl * lx + loff * eyesEyelidTaper(u, llR, lrR, lcD, lsk, lwF, lsm, ltn);
+  };
+  auto inExposed = [&](float lx, float ly) -> bool {
+    if (!disable) return true;
+    if (upOn && ly <= cutoffAt(true, lx)) return false;
+    if (loOn && ly >= cutoffAt(false, lx)) return false;
+    return true;
+  };
+
+  auto plot = [&](float lx, float ly, int16_t dxDev, int16_t dyDev) {
+    float yc = cutoffThis(lx);
+    // local curve slope via central difference -> perpendicular half-band height
+    float slopeLocal = (cutoffThis(lx + 0.5f) - cutoffThis(lx - 0.5f));
+    float halfBand = halfThick * sqrtf(1.0f + slopeLocal * slopeLocal);
+    if (ly < yc - halfBand || ly > yc + halfBand) return;
+    if (!eyesPointInsideEyeShape(lx, ly, hx, hy, rx, ry, eyeShape)) return;
+    if (!inExposed(lx, ly)) return;
+    gfx.drawPixel(cx + dxDev, cy + dyDev, color);
+  };
+
+  if (rotRad == 0.0f) {
+    int16_t halfWi = (int16_t)ceilf(hx) + 1;
+    int16_t halfHi = (int16_t)ceilf(hy + fabsf(eyeShape.offsetY)) + 2;
+    for (int16_t dx = -halfWi; dx <= halfWi; dx++) {
+      float yc = cutoffThis((float)dx);
+      float slopeLocal = (cutoffThis((float)dx + 0.5f) - cutoffThis((float)dx - 0.5f));
+      float halfBand = halfThick * sqrtf(1.0f + slopeLocal * slopeLocal);
+      int16_t y0 = (int16_t)floorf(yc - halfBand);
+      int16_t y1 = (int16_t)ceilf(yc + halfBand);
+      if (y0 < -halfHi) y0 = -halfHi;
+      if (y1 > halfHi) y1 = halfHi;
+      for (int16_t dy = y0; dy <= y1; dy++) plot((float)dx, (float)dy, dx, dy);
+    }
+    return;
+  }
+  float c = cosf(rotRad), s = sinf(rotRad);
+  float maxLocal = sqrtf(hx * hx + hy * hy) + fabsf(eyeShape.offsetX) + fabsf(eyeShape.offsetY) + halfThick + 2.0f;
   int16_t half = (int16_t)ceilf(maxLocal);
   for (int16_t dy = -half; dy <= half; dy++) {
     for (int16_t dx = -half; dx <= half; dx++) {
@@ -4029,15 +4169,28 @@ ${exHlN > 0 ? `  // Extra highlight glints — each drawn exactly like the prima
     eyesFillHighlightClipped(gfx, cx, cy, exHCX, exHCY, exHRr, exHeyeHx, exHeyeHy, exHeyeRx, exHeyeRy, eyeShape, rotRad, colors.highlightBlend);
   }
 ` : ''}
+  // Eyelid fill color: the eyelid's own color pre-blended over the background by its Opacity
+  // (colors.*EyelidFill) — matching the studio's drawEyelid(), which fills the lid with its Color at
+  // its Opacity. "Disable Eyelid" still fills with the raw background (hardCut erases the covered
+  // region to background; the visible crescent is what remains). The Thickness crease is stroked on
+  // top afterwards — see eyesFillEyelidCrease().
   if (e.upperEyelidVisible) {
     eyesFillEyelid(gfx, cx, cy, w, h, radius, true, e.upperEyelid, e.upperEyelidTilt, e.upperEyelidCurvature,
                    e.upperEyelidLeftRoundness, e.upperEyelidRightRoundness, e.upperEyelidStretchX, e.upperEyelidStretchY, e.upperEyelidSkew,
-                   e.upperEyelidCenterDepth, e.upperEyelidCenterY, e.upperEyelidSmoothness, e.upperEyelidTension, eyeShape, rotRad, bgColor, e.disableEyelid);
+                   e.upperEyelidCenterDepth, e.upperEyelidCenterY, e.upperEyelidSmoothness, e.upperEyelidTension, eyeShape, rotRad,
+                   e.disableEyelid ? bgColor : colors.upperEyelidFill, e.disableEyelid);
+    if (e.upperEyelidThickness > 0.0f && e.upperEyelid > 0.0f) {
+      eyesFillEyelidCrease(gfx, cx, cy, w, h, radius, true, eyeShape, rotRad, colors.upperEyelidCrease, e);
+    }
   }
   if (e.lowerEyelidVisible) {
     eyesFillEyelid(gfx, cx, cy, w, h, radius, false, e.lowerEyelid, e.lowerEyelidTilt, e.lowerEyelidCurvature,
                    e.lowerEyelidLeftRoundness, e.lowerEyelidRightRoundness, e.lowerEyelidStretchX, e.lowerEyelidStretchY, e.lowerEyelidSkew,
-                   e.lowerEyelidCenterDepth, e.lowerEyelidCenterY, e.lowerEyelidSmoothness, e.lowerEyelidTension, eyeShape, rotRad, bgColor, e.disableEyelid);
+                   e.lowerEyelidCenterDepth, e.lowerEyelidCenterY, e.lowerEyelidSmoothness, e.lowerEyelidTension, eyeShape, rotRad,
+                   e.disableEyelid ? bgColor : colors.lowerEyelidFill, e.disableEyelid);
+    if (e.lowerEyelidThickness > 0.0f && e.lowerEyelid > 0.0f) {
+      eyesFillEyelidCrease(gfx, cx, cy, w, h, radius, false, eyeShape, rotRad, colors.lowerEyelidCrease, e);
+    }
   }
 
   // "Disable Eyelid" border — drawn last (after the eyelid cut above blanked the covered region to
@@ -5241,6 +5394,7 @@ struct EyeFrame {
   int8_t upperEyelidCenterY, lowerEyelidCenterY; // -100..100
   uint8_t upperEyelidSmoothness, lowerEyelidSmoothness; // 0-100
   uint8_t upperEyelidTension, lowerEyelidTension; // 0-100
+  uint8_t upperEyelidThickness, lowerEyelidThickness; // crease/rim line width in px (0-200), the studio's Thickness control
   int8_t highlightX, highlightY;
   uint8_t highlightSize;
   uint16_t durationMs;
@@ -5286,6 +5440,8 @@ struct EyeColorSet {
   uint16_t scleraTop, scleraBottom; // sclera gradient endpoints
   uint16_t irisLight, irisDark; // iris radial-gradient endpoints (iris itself is the midpoint)
   uint16_t highlightBlend; // highlight pre-blended 92% over the pupil, matching the studio's fixed-alpha look
+  uint16_t upperEyelidFill, lowerEyelidFill; // eyelid color pre-blended over the background by Eyelid Opacity
+  uint16_t upperEyelidCrease, lowerEyelidCrease; // the Thickness crease line: eyelid color 35% darker, same opacity blend
 };
 
 // ---- Colors -----------------------------------------------------------

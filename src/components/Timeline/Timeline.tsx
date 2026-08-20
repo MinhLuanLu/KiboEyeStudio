@@ -303,6 +303,22 @@ export function Timeline() {
   if (!anim) {
     return <div className="p-4 text-sm text-studio-muted">No animation selected.</div>
   }
+
+  // Expressions are single static poses — keyframes/tracks belong to Animations, not here. While
+  // the Expressions panel is the active left tab the user is editing one pose, so don't show the
+  // (unrelated) active animation's keyframe timeline; point them to the Animations panel instead.
+  if (leftTab === 'expressions') {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-1.5 p-6 text-center">
+        <div className="text-sm text-studio-text">Editing an expression</div>
+        <div className="text-xs text-studio-muted max-w-xs">
+          An expression is a single pose — it has no keyframes. Switch to the{' '}
+          <span className="text-studio-text font-medium">Animations</span> panel to work with the timeline.
+        </div>
+      </div>
+    )
+  }
+
   const activeAnim: Animation = anim
 
   const sortedTracks = [...activeAnim.tracks].sort((a, b) => a.order - b.order)
