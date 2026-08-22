@@ -1,8 +1,16 @@
 import { useMemo, useState } from 'react'
+
+/** Section order for the "Starts with" picker. Combos first: a combo is the most complete unit and
+ * the likeliest intent, and a flat ~100-row list of mixed kinds is unreadable without headings. */
+const STARTUP_GROUPS = [
+  { kind: 'combo', heading: 'Combos' },
+  { kind: 'animation', heading: 'Animations' },
+  { kind: 'expression', heading: 'Expressions' }
+] as const
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore, getActiveAnimation } from '@/state/store'
 import { projectToJson, animationToJson } from '@/lib/export/jsonExport'
-import { generateCppHeader, generateArduinoSketch, generateArduinoReadme, arduinoSketchName, projectUsesEyeRotation, DEFAULT_ARDUINO_PINS, type ArduinoDisplayPins } from '@/lib/export/cppExport'
+import { generateCppHeader, generateArduinoSketch, generateArduinoReadme, arduinoSketchName, projectUsesEyeRotation, DEFAULT_ARDUINO_PINS, type ArduinoDisplayPins, arduinoStartupOptions, type ArduinoStartupTarget } from '@/lib/export/cppExport'
 import { generateEyeControllerHeader } from '@/lib/export/eyeControllerExport'
 import { createZip } from '@/lib/export/zip'
 import { validateStickerExport, type StickerValidationResult } from '@/lib/export/validateStickers'
@@ -160,13 +168,29 @@ export function ExportDialog() {
   // Display wiring for the generated .ino's TFT_* pins — same idea as the LVGL Complete Project
   // export's pin form. Only used when exportArduinoProject is on.
   const [pins, setPins] = useState<ArduinoDisplayPins>(DEFAULT_ARDUINO_PINS)
+
+  // What the generated sketch plays in setup(). The .ino is regenerated on every export, so a
+  // startup line edited by hand in the sketch is silently replaced -- which is how a board ends up
+  // playing a different animation than the one on screen. Remembered per project so it only has to
+  // be chosen once.
+  const startupOptions = useMemo(() => arduinoStartupOptions(project, includeExpressions), [project, includeExpressions])
+  const startupStorageKey = `kibo.export.startup.${project.id}`
+  const [startupKey, setStartupKey] = useState<string>(() => {
+    try { return localStorage.getItem(startupStorageKey) ?? '' } catch { return '' }
+  })
+  const startup: ArduinoStartupTarget | undefined =
+    startupOptions.find((o) => `${o.kind}:${o.id}` === startupKey) ?? startupOptions[0]
+  const chooseStartup = (key: string) => {
+    setStartupKey(key)
+    try { localStorage.setItem(startupStorageKey, key) } catch { /* private mode - the choice just won't persist */ }
+  }
   // "Force eye rotation on device" — emits #define EYES_FORCE_ROTATION so tilted eyes render on
   // soft-float ESP32-C6/C3 (where rotation is otherwise auto-disabled). Default ON when the project
   // actually uses eye rotation, so a tilted design matches the preview on those chips out of the box.
   // Bake rotation into the eye-shape geometry so tilted eyes render smoothly on a soft-float
   // ESP32-C6/C3 (fast path) while still tilting. Default OFF (opt-in) — it changes how the eyes
   // animate on the device (see the warning under the checkbox), so the user turns it on knowingly.
-  const [bakeRotation, setBakeRotation] = useState(false)
+  const [bakeRotation, setBakeRotation] = useState(true)
   // Smooth rendering for the Complete Arduino Project: generate the .ino using LovyanGFX (hardware
   // SPI + DMA), the same display stack the LVGL export uses, instead of Adafruit's blocking blit.
   const [smoothRendering, setSmoothRendering] = useState(true)
@@ -183,7 +207,7 @@ export function ExportDialog() {
     if (tab === 'cpp' && exportArduinoProject) {
       const folder = arduinoSketchName(project.name)
       const entries = [
-        { name: `${folder}/${folder}.ino`, content: generateArduinoSketch(project, { includeExpressions }, pins, smoothRendering) },
+        { name: `${folder}/${folder}.ino`, content: generateArduinoSketch(project, { includeExpressions }, pins, smoothRendering, startup) },
         { name: `${folder}/eyes.h`, content },
         ...(includeController ? [{ name: `${folder}/eyeController.h`, content: generateEyeControllerHeader() }] : []),
         { name: `${folder}/README.md`, content: generateArduinoReadme(project, { includeExpressions, includeController, smooth: smoothRendering }) }
@@ -265,96 +289,131 @@ export function ExportDialog() {
             </button>
           </div>
 
-          {tab === 'cpp' && <EyeRotationValidationPanel project={project} />}
-          {tab === 'cpp' && <TimelineTimingValidationPanel project={project} />}
-          {tab === 'cpp' && <PupilShapeValidationPanel project={project} />}
-          {tab === 'cpp' && <StickerValidationPanel project={project} />}
+          {/* One scrollable body between the pinned header and the pinned footer. Every option
+              below is shrink-0, so without this the optional blocks (notably the bake-rotation
+              warning) grew the column past max-h-[80vh] and pushed the Download button out of the
+              dialog. min-h-0 is required: a flex child defaults to min-height:auto and refuses to
+              shrink below its content, which silently defeats the overflow. */}
+          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
+            {tab === 'cpp' && <EyeRotationValidationPanel project={project} />}
+            {tab === 'cpp' && <TimelineTimingValidationPanel project={project} />}
+            {tab === 'cpp' && <PupilShapeValidationPanel project={project} />}
+            {tab === 'cpp' && <StickerValidationPanel project={project} />}
 
-          {tab === 'cpp' && (
-            <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
-              <input type="checkbox" className="mt-0.5" checked={exportArduinoProject} onChange={(e) => setExportArduinoProject(e.target.checked)} />
-              <span>
-                <span className="font-medium">Export Complete Arduino Project</span>
-                <span className="text-studio-muted"> — download a ready-to-compile sketch as a single <code>.zip</code>: a folder containing <code>{arduinoSketchName(project.name)}.ino</code>, <code>eyes.h</code>{includeController ? <>, <code>eyeController.h</code></> : null}, and a README. (Without this, only the <code>eyes.h</code> header is saved.)</span>
-              </span>
-            </label>
-          )}
+            {tab === 'cpp' && (
+              <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+                <input type="checkbox" className="mt-0.5" checked={exportArduinoProject} onChange={(e) => setExportArduinoProject(e.target.checked)} />
+                <span>
+                  <span className="font-medium">Export Complete Arduino Project</span>
+                  <span className="text-studio-muted"> — download a ready-to-compile sketch as a single <code>.zip</code>: a folder containing <code>{arduinoSketchName(project.name)}.ino</code>, <code>eyes.h</code>{includeController ? <>, <code>eyeController.h</code></> : null}, and a README. (Without this, only the <code>eyes.h</code> header is saved.)</span>
+                </span>
+              </label>
+            )}
 
-          {tab === 'cpp' && exportArduinoProject && (
-            <div className="mx-3 mt-2 flex flex-wrap items-center gap-2 text-xs">
-              <span className="text-studio-muted">Display wiring (GPIO):</span>
-              {(['cs', 'dc', 'rst', 'sclk', 'mosi'] as const).map((pin) => (
-                <label key={pin} className="flex items-center gap-1">
-                  <span className="uppercase text-studio-muted">{pin}</span>
-                  <input
-                    type="number"
-                    className="bg-studio-panel border border-studio-border rounded px-1.5 py-0.5 text-xs w-14"
-                    value={pins[pin]}
-                    onChange={(e) => setPins((p) => ({ ...p, [pin]: Number(e.target.value) }))}
-                  />
+            {tab === 'cpp' && exportArduinoProject && (
+              <div className="mx-3 mt-2 flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-studio-muted">Display wiring (GPIO):</span>
+                {(['cs', 'dc', 'rst', 'sclk', 'mosi'] as const).map((pin) => (
+                  <label key={pin} className="flex items-center gap-1">
+                    <span className="uppercase text-studio-muted">{pin}</span>
+                    <input
+                      type="number"
+                      className="bg-studio-panel border border-studio-border rounded px-1.5 py-0.5 text-xs w-14"
+                      value={pins[pin]}
+                      onChange={(e) => setPins((p) => ({ ...p, [pin]: Number(e.target.value) }))}
+                    />
+                  </label>
+                ))}
+                <span className="text-studio-muted">→ the <code>.ino</code>'s <code>TFT_*</code> pins</span>
+              </div>
+            )}
+
+            {tab === 'cpp' && exportArduinoProject && startupOptions.length > 0 && (
+              <div className="mx-3 mt-2 text-xs shrink-0">
+                <label className="flex items-center gap-2">
+                  <span className="font-medium whitespace-nowrap">Starts with</span>
+                  <select
+                    className="studio-select flex-1"
+                    value={startup ? `${startup.kind}:${startup.id}` : ''}
+                    onChange={(e) => chooseStartup(e.target.value)}
+                  >
+                    {STARTUP_GROUPS.map(({ kind, heading }) => {
+                      const group = startupOptions.filter((o) => o.kind === kind)
+                      if (group.length === 0) return null
+                      return (
+                        <optgroup key={kind} label={heading}>
+                          {group.map((o) => (
+                            <option key={`${o.kind}:${o.id}`} value={`${o.kind}:${o.id}`}>{o.label}</option>
+                          ))}
+                        </optgroup>
+                      )
+                    })}
+                  </select>
                 </label>
-              ))}
-              <span className="text-studio-muted">→ the <code>.ino</code>'s <code>TFT_*</code> pins</span>
-            </div>
-          )}
+                <div className="text-studio-muted mt-1">
+                  The call placed in the sketch's <code>setup()</code>. Exporting rewrites the <code>.ino</code>, so editing this line in Arduino instead will be undone by the next export.
+                </div>
+              </div>
+            )}
 
-          {tab === 'cpp' && exportArduinoProject && (
-            <label className="mx-3 mt-2 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
-              <input type="checkbox" className="mt-0.5" checked={smoothRendering} onChange={(e) => setSmoothRendering(e.target.checked)} />
-              <span>
-                <span className="font-medium">Smooth rendering (LovyanGFX + DMA)</span>
-                <span className="text-studio-muted"> — generate the sketch with the same display stack as the LVGL export: hardware SPI at 80&nbsp;MHz + asynchronous DMA, so animation doesn’t stutter. Needs the <strong>LovyanGFX</strong> library and ~{Math.round((project.display.width * project.display.height * 2) / 1024)}&nbsp;KB RAM for a full-frame buffer. Uncheck to use the simpler Adafruit_GC9A01A path (blocking blit).</span>
-              </span>
-            </label>
-          )}
+            {tab === 'cpp' && exportArduinoProject && (
+              <label className="mx-3 mt-2 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+                <input type="checkbox" className="mt-0.5" checked={smoothRendering} onChange={(e) => setSmoothRendering(e.target.checked)} />
+                <span>
+                  <span className="font-medium">Smooth rendering (LovyanGFX + DMA)</span>
+                  <span className="text-studio-muted"> — generate the sketch with the same display stack as the LVGL export: hardware SPI at 80&nbsp;MHz + asynchronous DMA, so animation doesn’t stutter. Needs the <strong>LovyanGFX</strong> library and ~{Math.round((project.display.width * project.display.height * 2) / 1024)}&nbsp;KB RAM for a full-frame buffer. Uncheck to use the simpler Adafruit_GC9A01A path (blocking blit).</span>
+                </span>
+              </label>
+            )}
 
-          {tab === 'cpp' && (
-            <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
-              <input type="checkbox" className="mt-0.5" checked={includeExpressions} onChange={(e) => setIncludeExpressions(e.target.checked)} />
-              <span>
-                <span className="font-medium">Include Expressions</span>
-                <span className="text-studio-muted"> — export each standalone Expression (its pose, colors, and stickers) so you can call <code>SetExpression(...)</code>. Uncheck to leave all expression code out and shrink the file; animations and combinations still export and play normally.</span>
-              </span>
-            </label>
-          )}
+            {tab === 'cpp' && (
+              <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+                <input type="checkbox" className="mt-0.5" checked={includeExpressions} onChange={(e) => setIncludeExpressions(e.target.checked)} />
+                <span>
+                  <span className="font-medium">Include Expressions</span>
+                  <span className="text-studio-muted"> — export each standalone Expression (its pose, colors, and stickers) so you can call <code>SetExpression(...)</code>. Uncheck to leave all expression code out and shrink the file; animations and combinations still export and play normally.</span>
+                </span>
+              </label>
+            )}
 
-          {tab === 'cpp' && (
-            <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
-              <input type="checkbox" className="mt-0.5" checked={includeController} onChange={(e) => setIncludeController(e.target.checked)} />
-              <span>
-                <span className="font-medium">Generate eye controller</span>
-                <span className="text-studio-muted"> — also emit <code>eyeController.h</code>, a priority-based arbitration layer over <code>eyes.h</code> for juggling multiple input sources (sensors, buttons, events). Saves <code>eyes.h</code> and <code>eyeController.h</code> as two files (two save prompts).</span>
-              </span>
-            </label>
-          )}
+            {tab === 'cpp' && (
+              <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+                <input type="checkbox" className="mt-0.5" checked={includeController} onChange={(e) => setIncludeController(e.target.checked)} />
+                <span>
+                  <span className="font-medium">Generate eye controller</span>
+                  <span className="text-studio-muted"> — also emit <code>eyeController.h</code>, a priority-based arbitration layer over <code>eyes.h</code> for juggling multiple input sources (sensors, buttons, events). Saves <code>eyes.h</code> and <code>eyeController.h</code> as two files (two save prompts).</span>
+                </span>
+              </label>
+            )}
 
-          {tab === 'cpp' && (
-            <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
-              <input type="checkbox" className="mt-0.5" checked={bakeRotation} onChange={(e) => setBakeRotation(e.target.checked)} />
-              <span>
-                <span className="font-medium">Smooth tilt on ESP32 (bake rotation)</span>
-                <span className="text-studio-muted"> — bakes each tilted eye's rotation into its shape geometry so the device draws it with the fast path: <strong>tilted AND smooth</strong> even on a soft‑float ESP32‑C6/C3 (no per‑pixel rotation cost). Off by default; turn it on if a tilted eye stutters on the device. {projectUsesEyeRotation(project) ? '' : 'Only matters if you rotate an eye.'}</span>
-              </span>
-            </label>
-          )}
+            {tab === 'cpp' && (
+              <label className="mx-3 mt-3 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+                <input type="checkbox" className="mt-0.5" checked={bakeRotation} onChange={(e) => setBakeRotation(e.target.checked)} />
+                <span>
+                  <span className="font-medium">Smooth tilt on ESP32 (bake rotation)</span>
+                  <span className="text-studio-muted"> — bakes each tilted eye's rotation into its shape geometry so the device draws it with the fast path: <strong>tilted AND smooth</strong> even on a soft‑float ESP32‑C6/C3 (no per‑pixel rotation cost). On by default; turn it off only to compare against the old runtime-rotation path. {projectUsesEyeRotation(project) ? '' : 'Only matters if you rotate an eye.'}</span>
+                </span>
+              </label>
+            )}
 
-          {tab === 'cpp' && bakeRotation && (
-            <div className="mx-3 mt-2 text-[11px] leading-snug bg-amber-500/10 border border-amber-500/40 text-amber-300/90 rounded-md px-2 py-1.5">
-              <span className="font-medium text-amber-300">⚠ Heads up — this changes how the eyes animate on the device:</span>
-              <ul className="mt-1 list-disc pl-4 space-y-0.5">
-                <li>Only the eye <strong>shape</strong> tilt is baked. <strong>Eyelids don't tilt</strong> — a blink on a tilted eye closes level (fine for a solid lens, visible if the eyelid shows).</li>
-                <li>A <strong>visible pupil / highlight won't rotate</strong> with the eye (they stay put). Best for solid shape eyes.</li>
-                <li>Eyes with a shape <strong>offset</strong> or <strong>flip</strong> can't be baked and fall back to the slower runtime rotation.</li>
-                <li>If the eye <strong>size animates while tilted</strong>, the tilt is baked per‑pose at each size (still correct per frame).</li>
-                <li>Tilted poses become per‑eye custom shapes, so <strong>the exported file is a bit larger</strong>.</li>
-              </ul>
-              <span className="block mt-1">The studio preview always shows the true rotation — verify the look on your actual display after flashing.</span>
-            </div>
-          )}
+            {tab === 'cpp' && bakeRotation && (
+              <div className="mx-3 mt-2 text-[11px] leading-snug bg-amber-500/10 border border-amber-500/40 text-amber-300/90 rounded-md px-2 py-1.5">
+                <span className="font-medium text-amber-300">⚠ Heads up — this changes how the eyes animate on the device:</span>
+                <ul className="mt-1 list-disc pl-4 space-y-0.5">
+                  <li>The eye <strong>shape, eyelids, pupil and highlight</strong> are all baked, including the hard cut used by <em>Disable Eyelid</em>.</li>
+                  <li>The eyelid's <strong>curvature arc</strong> is the one part not rotated — a hairline difference on a strongly curved <em>and</em> strongly tilted lid (a few px at most).</li>
+                  <li>A pose that still can't be baked falls back to runtime rotation, which stutters on a soft‑float C6/C3. The <strong>Eye Rotation Export Check</strong> above lists any.</li>
+                  <li>If the eye <strong>size animates while tilted</strong>, the tilt is baked per‑pose at each size (still correct per frame).</li>
+                  <li>Tilted poses become per‑eye custom shapes, so <strong>the exported file is a bit larger</strong>.</li>
+                </ul>
+                <span className="block mt-1">Everything else matches the studio preview — verify the look on your actual display after flashing.</span>
+              </div>
+            )}
 
-          <pre className="flex-1 overflow-auto p-3 text-xs font-mono bg-studio-bg m-3 rounded-md border border-studio-border whitespace-pre">
-            {content}
-          </pre>
+            <pre className="flex-1 min-h-[180px] overflow-auto p-3 text-xs font-mono bg-studio-bg m-3 rounded-md border border-studio-border whitespace-pre">
+              {content}
+            </pre>
+          </div>
 
           <div className="flex items-center justify-between p-3 border-t border-studio-border">
             <span className="text-xs text-studio-muted">{status}</span>

@@ -627,6 +627,32 @@ function exportColors(project: Project): string {
 // once here rather than per-shape so eyesFillPolygonInEye()'s fixed-size scratch buffers
 // (PLAYER_CODE) have one constant to agree with.
 const MAX_PUPIL_POLYGON_POINTS = 48
+/**
+ * Eye-shape outlines get their own, larger cap than pupils. An eye shape spans the whole eye, so
+ * at 48 points a full outline is visibly faceted -- and, far worse, the firmware's
+ * eyesTransformEyeShape() TRUNCATES anything longer to the cap. A truncated closed polygon joins
+ * its last surviving point straight back to its first, replacing most of the outline with one long
+ * chord: the eye renders as a wedge. Baked rotation shapes are ~100 points, so every rotated eye
+ * on a device was drawn as a wedge while the studio preview drew the full shape.
+ *
+ * Costs two float scratch arrays of this length (2 * 4 * 96 = 768 B of stack) in the span/point-in-
+ * shape helpers, which is comfortable on ESP32 and still bounded for the per-column fast path.
+ */
+const MAX_EYE_SHAPE_POLYGON_POINTS = 96
+
+/**
+ * Uniformly resamples a closed outline down to `cap` points. The firmware clamps instead of
+ * resampling, which destroys the shape (see above), so the export must guarantee it never emits
+ * more points than the device can consume -- for baked rotation shapes AND for anything a designer
+ * imports from SVG. Index-strided rather than arc-length: these outlines are already densely and
+ * near-uniformly sampled, and keeping the first point preserves the start of the contour.
+ */
+function fitPolygonToCap(points: [number, number][], cap: number): [number, number][] {
+  if (points.length <= cap) return points
+  const out: [number, number][] = []
+  for (let i = 0; i < cap; i++) out.push(points[Math.round((i * points.length) / cap) % points.length])
+  return out
+}
 
 // Built-in polygon shapes (everything in PUPIL_SHAPE_POLYGONS except the null entries —
 // circle/oval draw via the existing ellipse path, and custom shapes come from the project's
@@ -726,12 +752,12 @@ function exportEyeShapes(project: Project): string {
     '  EYE_SHAPE_CUSTOM',
     '};',
     '',
-    `#define EYE_MAX_EYE_SHAPE_POLYGON_POINTS ${MAX_PUPIL_POLYGON_POINTS}`,
+    `#define EYE_MAX_EYE_SHAPE_POLYGON_POINTS ${MAX_EYE_SHAPE_POLYGON_POINTS}`,
     ''
   ]
   for (const { key, polygon } of BUILTIN_EYE_SHAPES) {
     lines.push(`// ${key[0].toUpperCase()}${key.slice(1)} eye shape`)
-    lines.push(pupilShapeTableLiteral(`EYE_SHAPE_TABLE_${key.toUpperCase()}`, polygon))
+    lines.push(pupilShapeTableLiteral(`EYE_SHAPE_TABLE_${key.toUpperCase()}`, fitPolygonToCap(polygon as [number, number][], MAX_EYE_SHAPE_POLYGON_POINTS)))
     lines.push('')
   }
 
@@ -739,7 +765,7 @@ function exportEyeShapes(project: Project): string {
   if (customShapes.length > 0) {
     customShapes.forEach((s, i) => {
       lines.push(`// "${s.name}"`)
-      lines.push(pupilShapeTableLiteral(`EYE_CUSTOM_SHAPE_${i}`, s.points))
+      lines.push(pupilShapeTableLiteral(`EYE_CUSTOM_SHAPE_${i}`, fitPolygonToCap(s.points as [number, number][], MAX_EYE_SHAPE_POLYGON_POINTS)))
     })
     lines.push(`const int8_t (* const EYE_CUSTOM_SHAPES[])[2] = { ${customShapes.map((_, i) => `EYE_CUSTOM_SHAPE_${i}`).join(', ')} };`)
     lines.push(`const uint8_t EYE_CUSTOM_SHAPE_POINT_COUNTS[] = { ${customShapes.map((_, i) => `EYE_CUSTOM_SHAPE_${i}_COUNT`).join(', ')} };`)
@@ -4662,10 +4688,49 @@ export interface GenerateCppOptions {
  * but a design that relies on a rotating pupil should keep force-rotation instead. */
 export function bakeEyeRotation(projectInput: Project): Project {
   const project: Project = JSON.parse(JSON.stringify(projectInput))
-  const cache = new Map<string, string>()
+  const cache = new Map<string, { id: string; scaleMul: number }>()
   let counter = 0
+  // The 'default' eye has no point list — it's the analytic rounded rect that
+  // eyesEyeHalfHeightAt()/roundedRectPath() trace. Rotating it therefore used to fall through to
+  // the runtime per-pixel path (the slow one on a soft-float C6). Polygonising it here at the
+  // pose's own normalized corner radii reproduces exactly the same silhouette once the caller
+  // scales by (hx, hy), so it can be baked like any other shape and drawn by the fast per-column
+  // span fill. Dense enough (DEFAULT_SHAPE_SEG per corner) that the difference is sub-pixel on a
+  // 240 px panel; the bake cache dedupes these so the flash cost is per distinct shape, not pose.
+  const DEFAULT_SHAPE_SEG = 24
+  const defaultShapePolygon = (p: EyeParams): [number, number][] => {
+    const hx = p.width / 2
+    const hy = p.height / 2
+    // same clamp as the studio's roundedRectPath() and the exported eyesEyeHalfHeightAt()
+    const rxN = Math.max(0, Math.min(p.radius, hx)) / hx
+    const ryN = Math.max(0, Math.min(p.radius, hy)) / hy
+    // The polygon path scales by eyeShapeScale (drawEye.ts traceEyeShapePolygon / the export's
+    // shape.hx = w/2 * eyeShapeScale) but the analytic DEFAULT path does not — it uses the raw
+    // w/2, h/2. So a default eye baked into a polygon would shrink by eyeShapeScale unless the
+    // points are pre-divided by it here, making the net on-screen silhouette identical.
+    const k = (p.eyeShapeScale || 100) / 100
+    const sc = (pts: [number, number][]): [number, number][] => (k === 1 ? pts : pts.map(([x, y]) => [x / k, y / k] as [number, number]))
+    if (rxN < 0.0001 || ryN < 0.0001) return sc([[-1, -1], [1, -1], [1, 1], [-1, 1]])
+    const pts: [number, number][] = []
+    // four elliptical corners, walked in the same order roundedRectPath() traces them
+    const corners: [number, number, number][] = [
+      [1 - rxN, -1 + ryN, -Math.PI / 2],
+      [1 - rxN, 1 - ryN, 0],
+      [-1 + rxN, 1 - ryN, Math.PI / 2],
+      [-1 + rxN, -1 + ryN, Math.PI]
+    ]
+    for (const [ccx, ccy, a0] of corners) {
+      for (let i = 0; i <= DEFAULT_SHAPE_SEG; i++) {
+        const a = a0 + (i / DEFAULT_SHAPE_SEG) * (Math.PI / 2)
+        pts.push([ccx + rxN * Math.cos(a), ccy + ryN * Math.sin(a)])
+      }
+    }
+    return sc(pts)
+  }
   const shapePointsOf = (p: EyeParams): readonly (readonly [number, number])[] | null => {
-    if (!p.eyeShapeVisible || p.eyeShape === 'default') return null
+    if (!p.eyeShapeVisible || p.eyeShape === 'default') {
+      return p.width > 0 && p.height > 0 ? defaultShapePolygon(p) : null
+    }
     if (p.eyeShape === 'custom') return project.customEyeShapes.find((s) => s.id === p.eyeCustomShapeId)?.points ?? null
     return EYE_SHAPE_POLYGONS[p.eyeShape] ?? null
   }
@@ -4675,42 +4740,190 @@ export function bakeEyeRotation(projectInput: Project): Project {
   // cancels, leaving a dependence on the w/h aspect only. For a square eye (w == h) this reduces to a
   // plain rotation. Exact for the pose's own w/h; a pose whose SIZE also animates is baked at its own
   // size, which is exact per pose.
-  const bakeEye = (p: EyeParams, effAngle: number): void => {
+  const bakeEye = (p: EyeParams, effAngle: number, sign: number): void => {
     const a = Math.round(effAngle)
     if (a % 360 === 0) {
       p.rotation = 0
       return
     }
     const pts = shapePointsOf(p)
-    const bakeable = pts && p.eyeShapeOffsetX === 0 && p.eyeShapeOffsetY === 0 && !p.eyeShapeFlipH && !p.eyeShapeFlipV && p.width > 0 && p.height > 0
+    const bakeable = pts && p.width > 0 && p.height > 0
     if (!bakeable) return // leave rotation for the runtime (force-rotation) path — can't shape-only bake this one exactly
     const r = (a * Math.PI) / 180
     const c = Math.cos(r)
     const s = Math.sin(r)
     const aspect = p.width / p.height // = rx/ry (eyeShapeScale cancels)
-    // x' = px*c - py*(h/w)*s ;  y' = px*(w/h)*s + py*c
-    const bakePt = ([px, py]: readonly [number, number]): [number, number] => [px * c - (py / aspect) * s, px * aspect * s + py * c]
-    const key = `${p.eyeShape}|${p.eyeShape === 'custom' ? p.eyeCustomShapeId : ''}|${a}|${aspect.toFixed(4)}`
-    let id = cache.get(key)
-    if (!id) {
+    // The studio draws the shape as screen = R(a) * [ offset + F*S*p ] (traceEyeShapePolygon:
+    // x = offsetX + fx*px*rx, wrapped in the eye's ctx.rotate). Baking means finding p' that gives
+    // the same screen points with rotation/offset/flip all neutralised:
+    //     p' = S^-1*R*F*S*p  +  S^-1*R*offset
+    // The first term is the original S^-1*R*S with the flip folded in; the second is a constant
+    // shift. Handling both is what lets an offset/flipped shape bake instead of falling through to
+    // the slow runtime path. offsetX carries the per-eye sign, exactly as drawEye.ts passes it.
+    const fx = p.eyeShapeFlipH ? -1 : 1
+    const fy = p.eyeShapeFlipV ? -1 : 1
+    const rxPx = (p.width / 2) * ((p.eyeShapeScale || 100) / 100)
+    const ryPx = (p.height / 2) * ((p.eyeShapeScale || 100) / 100)
+    const ox = sign * p.eyeShapeOffsetX
+    const oy = p.eyeShapeOffsetY
+    const tx = rxPx > 0.0001 ? (ox * c - oy * s) / rxPx : 0
+    const ty = ryPx > 0.0001 ? (ox * s + oy * c) / ryPx : 0
+    // x' = fx*px*c - fy*py*(h/w)*s + tx ;  y' = fx*px*(w/h)*s + fy*py*c + ty
+    const bakePt = ([px, py]: readonly [number, number]): [number, number] => [
+      fx * px * c - (fy * py) / aspect * s + tx,
+      fx * px * aspect * s + fy * py * c + ty
+    ]
+    // The 'default' polygon is generated from the pose's own normalized corner radii, so two
+    // default eyes sharing shape/angle/aspect but differing in `radius` are NOT the same polygon —
+    // the radii must be part of the key or they would wrongly share one cached shape.
+    const radKey =
+      !p.eyeShapeVisible || p.eyeShape === 'default'
+        ? `|${(Math.max(0, Math.min(p.radius, p.width / 2)) / (p.width / 2)).toFixed(4)}|${(Math.max(0, Math.min(p.radius, p.height / 2)) / (p.height / 2)).toFixed(4)}`
+        : ''
+    const scaleKey = !p.eyeShapeVisible || p.eyeShape === 'default' ? `|s${p.eyeShapeScale}` : ''
+    const xfKey = `|f${fx}${fy}|o${ox.toFixed(3)},${oy.toFixed(3)},${rxPx.toFixed(3)},${ryPx.toFixed(3)}`
+    const key = `${p.eyeShape}|${p.eyeShape === 'custom' ? p.eyeCustomShapeId : ''}|${a}|${aspect.toFixed(4)}${radKey}${scaleKey}${xfKey}`
+    // Shape points are stored as int8 scaled x100, i.e. a normalized range of +-1.27 where 1.0 is
+    // the eye's half-extent. Rotating pushes the outline PAST its own half-extent -- a 45deg square
+    // reaches 1.41, and a wide eye reaches aspect*sin(a) -- so the raw baked points ran off the end
+    // of the byte and clampByte() silently flattened them onto the +-127 rail. That does not shrink
+    // the eye, it shears the outline into a wedge, which is what the device drew while the preview
+    // showed a full shape (6 of 37 baked shapes in one real project were pinned to the rail).
+    //
+    // eyeShapeScale multiplies BOTH half-extents uniformly (eyesResolveEyeShape: hx = w/2 * scale/100,
+    // and traceEyeShapePolygon does the same), so dividing every point by k and multiplying the scale
+    // by k is an exact identity -- it just moves magnitude out of the byte and into a field that has
+    // room for it. No runtime cost, no geometry change.
+    const SHAPE_LIMIT = 1.25 // headroom under 1.27 so rounding to int8 can't reach the rail
+    const cached = cache.get(key)
+    let id: string
+    let scaleMul: number
+    if (cached) {
+      id = cached.id
+      scaleMul = cached.scaleMul
+    } else {
+      let baked = pts!.map(bakePt)
+      let peak = 0
+      for (const [bx, by] of baked) {
+        const m = Math.max(Math.abs(bx), Math.abs(by))
+        if (m > peak) peak = m
+      }
+      scaleMul = peak > SHAPE_LIMIT ? peak / SHAPE_LIMIT : 1
+      // eyeShapeScale is a uint8 on the device. If the compensation cannot fit (only reachable with
+      // an extreme aspect ratio), leave the pose on the runtime-rotation path rather than emitting a
+      // clamped, visibly wrong shape. validateEyeRotationExport() reports whatever lands there.
+      if (Math.round((p.eyeShapeScale || 100) * scaleMul) > 255) return
+      if (scaleMul !== 1) baked = baked.map(([bx, by]) => [bx / scaleMul, by / scaleMul] as [number, number])
       id = `bakedrot_${counter++}`
-      project.customEyeShapes.push({ id, name: `${p.eyeShape} ${a}°`, points: pts!.map(bakePt), svgSource: '' })
-      cache.set(key, id)
+      project.customEyeShapes.push({ id, name: `${p.eyeShape} ${a}°`, points: baked, svgSource: '' })
+      cache.set(key, { id, scaleMul })
     }
+    p.eyeShapeScale = Math.round((p.eyeShapeScale || 100) * scaleMul)
     p.eyeShape = 'custom'
     p.eyeCustomShapeId = id
+    p.eyeShapeVisible = true // effectiveEyeShape = eyeShapeVisible ? eyeShape : 'default'
+    p.eyeShapeOffsetX = 0
+    p.eyeShapeOffsetY = 0
+    p.eyeShapeFlipH = false
+    p.eyeShapeFlipV = false
+    // The eye's INNER features rotate with it too — the studio draws pupil/iris/highlight inside
+    // the same ctx.rotate, and the export rotates their local offsets by rotRad (see the pxLocal/
+    // pyLocal block and eyesFillHighlightClipped in eyesDrawEye). Zeroing rotation without also
+    // rotating these leaves a correctly tilted silhouette with the pupil and glint sitting in the
+    // untilted spot — the "shape matches but position doesn't" mismatch. Both are stored as
+    // percentages of a half-extent, and pupilX/highlightX carry the per-eye sign, so each maps
+    // back through its own aspect ratio.
+    const rotPct = (xPct: number, yPct: number, baseX: number, baseY: number): [number, number] => {
+      if (baseX <= 0.0001 || baseY <= 0.0001) return [xPct, yPct]
+      const lx = sign * (xPct / 100) * baseX
+      const ly = (yPct / 100) * baseY
+      const nx = lx * c - ly * s
+      const ny = lx * s + ly * c
+      return [(100 * nx) / (sign * baseX), (100 * ny) / baseY]
+    }
+    const halfW = p.width / 2
+    const halfH = p.height / 2
+    ;[p.pupilX, p.pupilY] = rotPct(p.pupilX, p.pupilY, halfW, halfH)
+    // highlight offsets are relative to the pupil (or iris when the pupil is hidden) half-extents,
+    // exactly as eyesDrawEye's hlBaseX/hlBaseY fallback picks them
+    const irisRX = (p.irisWidth / 100) * halfW
+    const irisRY = (p.irisHeight / 100) * halfH
+    const pupilRX = (p.pupilWidth / 100) * halfW
+    const pupilRY = (p.pupilHeight / 100) * halfH
+    const hlBaseX = p.pupilVisible && pupilRX > 0 ? pupilRX : irisRX
+    const hlBaseY = p.pupilVisible && pupilRY > 0 ? pupilRY : irisRY
+    ;[p.highlightX, p.highlightY] = rotPct(p.highlightX, p.highlightY, hlBaseX, hlBaseY)
+    if (Array.isArray(p.extraHighlights)) {
+      for (const eh of p.extraHighlights) {
+        ;[eh.x, eh.y] = rotPct(eh.x, eh.y, hlBaseX, hlBaseY)
+      }
+    }
+    // EYELIDS. drawEye.ts draws the lid (drawEyelid, lines 655/671) and applies the exposed-side
+    // clips (applyExposedClips, 382/405) INSIDE its ctx.save()/ctx.rotate() scope, so the lid
+    // rotates with the eye. It must therefore be baked too — and on a near-circular eye (this
+    // project uses radius 130 on ~104x100 eyes) the lid is the ONLY thing the rotation visibly
+    // does, since rotating a circle is a no-op.
+    //   yCutoff(x) = yBase + tan(tilt)*x + curve*taper(x)
+    // Rotating that line by `a` yields another line, so it bakes as plain scalars, no runtime cost:
+    //   tilt'  = tilt + a
+    //   yBase' = yBase / (cos a - m*sin a)
+    // Exact for the straight lid line; the curvature/taper profile is carried through unrotated,
+    // a second-order error that grows with |a| and curvature.
+    const bakeLid = (upper: boolean): void => {
+      const covPct = upper ? p.upperEyelid : p.lowerEyelid
+      if (!(covPct > 0)) return // lid not showing -> nothing to rotate
+      const hh = p.height
+      const hy = hh / 2
+      const tilt = upper ? p.upperEyelidTilt : p.lowerEyelidTilt
+      const cyPct = upper ? p.upperEyelidCenterY : p.lowerEyelidCenterY
+      const m = Math.tan((tilt * Math.PI) / 180)
+      const den = c - m * s
+      if (Math.abs(den) < 1e-6) return // lid rotated to vertical - not representable
+      const cy = (cyPct / 100) * hh * 0.25
+      const cov = (covPct / 100) * hh
+      const yBase = upper ? -hy + cov + cy : hy - cov - cy
+      const yBase2 = yBase / den
+      const newTilt = tilt + a
+      if (Math.abs(newTilt) > 127) return // tilt not representable as a byte
+      // Absorb the yBase shift into centreY first: it is a small DELTA with the full -127..127
+      // byte range, whereas coverage is an absolute 0..100 % that a small shift pushes out of
+      // range (which silently left most lids unrotated). Fall back to coverage, then give up.
+      const delta = yBase2 - yBase
+      const newCyPct = cyPct + (upper ? 1 : -1) * ((100 * delta) / (hh * 0.25))
+      if (Math.abs(newCyPct) <= 127) {
+        if (upper) { p.upperEyelidCenterY = newCyPct; p.upperEyelidTilt = newTilt }
+        else { p.lowerEyelidCenterY = newCyPct; p.lowerEyelidTilt = newTilt }
+        return
+      }
+      const cov2 = upper ? yBase2 + hy - cy : hy - cy - yBase2
+      const newCovPct = (100 * cov2) / hh
+      if (!(newCovPct > 0) || newCovPct > 100) return
+      if (upper) { p.upperEyelid = newCovPct; p.upperEyelidTilt = newTilt }
+      else { p.lowerEyelid = newCovPct; p.lowerEyelidTilt = newTilt }
+    }
+    // Baked unconditionally, INCLUDING when disableEyelid is set. In that mode the lid is not a
+    // drawn fill: drawEye.ts clips the eye to the exposed side (applyExposedClips ->
+    // clipToExposedSide) and the firmware's eyesClipExposed() uses "identical to eyesFillEyelid()'s
+    // law". Same cutoff line, same rotation, so it needs the same bake. Skipping it here left every
+    // disable-eyelid pose (26 of the 64 rotated poses in the spiderman project, Neutral among them)
+    // with an unrotated cutoff on a rotated eye.
+    bakeLid(true)
+    bakeLid(false)
     p.rotation = 0
   }
   const bakePose = (params: EyeParams, leftP: EyeParams | null, rightP: EyeParams | null): [EyeParams, EyeParams | null, EyeParams | null] => {
     const lp = leftP ?? params
     const rp = rightP ?? params
-    if (Math.round(lp.rotation) === 0 && Math.round(rp.rotation) === 0) return [params, leftP, rightP]
+    // `params` is checked too, not just lp/rp: an expression can carry a rotated `params` while its
+    // leftParams/rightParams are unrotated, and the old condition returned early there — leaving a
+    // non-zero rotation behind that then dragged the whole export onto the runtime rotation path.
+    if (Math.round(lp.rotation) === 0 && Math.round(rp.rotation) === 0 && Math.round(params.rotation) === 0) return [params, leftP, rightP]
     // Force per-eye divergence: left eye is drawn with sign +1, right with sign -1, so each bakes its
     // own effective angle. (The export already emits framesRight when left/right params differ.)
     const left = JSON.parse(JSON.stringify(lp)) as EyeParams
     const right = JSON.parse(JSON.stringify(rp)) as EyeParams
-    bakeEye(left, lp.rotation)
-    bakeEye(right, rp.rotation * -1)
+    bakeEye(left, lp.rotation, 1)
+    bakeEye(right, rp.rotation * -1, -1)
     return [left, left, right]
   }
   for (const e of project.expressions) {
@@ -4878,22 +5091,72 @@ export interface ArduinoDisplayPins {
 }
 export const DEFAULT_ARDUINO_PINS: ArduinoDisplayPins = { cs: 2, dc: 4, rst: 5, sclk: 6, mosi: 7 }
 
+/** What the generated sketch calls in setup(). The export regenerates the .ino wholesale, so a
+ * hand-edited startup line is silently replaced on the next export -- that is how a board ends up
+ * playing a different animation than the one being previewed. Making it an explicit, exported
+ * choice is the fix; the fallback below only applies when nothing was chosen. */
+export interface ArduinoStartupTarget {
+  kind: 'combo' | 'animation' | 'expression'
+  id: string
+}
+
+export interface ArduinoStartupOption extends ArduinoStartupTarget {
+  label: string
+}
+
+/** Everything the sketch can start with, combos first (a combo is the most complete unit, and the
+ * most likely intent). `label` is the bare name -- the UI groups by `kind`, so prefixing each label
+ * with its type would just repeat the group heading on all ~100 rows. Expressions whose two eyes
+ * diverge are omitted: SetExpression() cannot express them, the same rule the default startup line
+ * already used. */
+export function arduinoStartupOptions(project: Project, includeExpressions = true): ArduinoStartupOption[] {
+  const out: ArduinoStartupOption[] = []
+  for (const c of project.animationCombos ?? []) out.push({ kind: 'combo', id: c.id, label: c.name })
+  for (const a of project.animations) out.push({ kind: 'animation', id: a.id, label: a.name })
+  if (includeExpressions) {
+    for (const e of project.expressions) {
+      if (!expressionShapeDiverges(e)) out.push({ kind: 'expression', id: e.id, label: e.name })
+    }
+  }
+  return out
+}
+
 export function generateArduinoSketch(
   project: Project,
   options: GenerateCppOptions = {},
   pins: ArduinoDisplayPins = DEFAULT_ARDUINO_PINS,
-  smooth = true
+  smooth = true,
+  startup?: ArduinoStartupTarget
 ): string {
   const includeExpressions = options.includeExpressions !== false
   const animIdents = buildUniqueIdents(project.animations)
   const exprIdents = buildUniqueIdents(project.expressions)
   const firstAnim = project.animations[0]
   const firstSingleExpr = includeExpressions ? project.expressions.find((e) => !expressionShapeDiverges(e)) : undefined
-  const initialCall = firstAnim
+  const comboIdentsForStart = buildUniqueIdents(project.animationCombos ?? [])
+  const startNote = `set by "Starts with" in the Export dialog; this file is regenerated on every export`
+  // Resolves to null when the chosen target no longer exists (deleted, renamed, or an expression
+  // excluded because "Include Expressions" is off) so it falls through to the old default instead
+  // of emitting a call that will not compile.
+  const startupLine = (): string | null => {
+    if (!startup) return null
+    if (startup.kind === 'combo') {
+      const c = (project.animationCombos ?? []).find((x) => x.id === startup.id)
+      return c ? `  Combo(${comboIdentsForStart.get(c.id)!}, true);   // "${c.name}" -- ${startNote}` : null
+    }
+    if (startup.kind === 'animation') {
+      const a = project.animations.find((x) => x.id === startup.id)
+      return a ? `  PlayAnimation(Anim_${animIdents.get(a.id)!});   // "${a.name}" -- ${startNote}` : null
+    }
+    const e = includeExpressions ? project.expressions.find((x) => x.id === startup.id) : undefined
+    return e && !expressionShapeDiverges(e) ? `  SetExpression(Expr_${exprIdents.get(e.id)!});   // "${e.name}" -- ${startNote}` : null
+  }
+  const initialCall = startupLine() ?? (firstAnim
     ? `  PlayAnimation(Anim_${animIdents.get(firstAnim.id)!});   // start on "${firstAnim.name}" — change to any Anim_/Expr_ from eyes.h's Quick Reference`
     : firstSingleExpr
       ? `  SetExpression(Expr_${exprIdents.get(firstSingleExpr.id)!});   // start on "${firstSingleExpr.name}" — change to any Anim_/Expr_ from eyes.h's Quick Reference`
-      : `  // No animations or single-shape expressions yet — the eyes hold their default pose. Add one\n  // in the studio and re-export, or call PlayAnimation(...)/SetExpression(...) here.`
+      : `  // No animations or single-shape expressions yet — the eyes hold their default pose. Add one
+  // in the studio and re-export, or call PlayAnimation(...)/SetExpression(...) here.`)
   const sketchName = arduinoSketchName(project.name)
   const pinDefines = `// ---- Display wiring — set in the Export dialog; edit here too if your board changes ----
 #define TFT_CS   ${pins.cs}
@@ -4966,6 +5229,14 @@ LGFX tft;
 static LGFX_Sprite eyesFrame(&tft);  // full-screen back buffer; pushed over DMA each frame
 
 void setup() {
+  // Build stamp: proves WHICH export is actually flashed. If this timestamp is older than the
+  // "Generated:" line at the top of eyes.h, the board is running a stale binary -- the display
+  // then cannot match the Studio no matter what the export contains. Safe to delete.
+  Serial.begin(115200);
+  delay(300);
+  Serial.println();
+  Serial.print("eyes.h generated: "); Serial.println(EYES_GENERATED);
+  Serial.print("baked rotation:   "); Serial.println(EYES_BAKED_ROTATION);
   tft.init();
   tft.setRotation(0);
   eyesFrame.setColorDepth(16);
@@ -5017,6 +5288,14 @@ ${pinDefines}
 EyesBufferedDisplay tft(TFT_CS, TFT_DC, TFT_RST);  // flicker-free buffered display (defined in eyes.h)
 
 void setup() {
+  // Build stamp: proves WHICH export is actually flashed. If this timestamp is older than the
+  // "Generated:" line at the top of eyes.h, the board is running a stale binary -- the display
+  // then cannot match the Studio no matter what the export contains. Safe to delete.
+  Serial.begin(115200);
+  delay(300);
+  Serial.println();
+  Serial.print("eyes.h generated: "); Serial.println(EYES_GENERATED);
+  Serial.print("baked rotation:   "); Serial.println(EYES_BAKED_ROTATION);
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);  // harmless everywhere; required on boards with no fixed SPI pins (e.g. ESP32-C6)
   tft.begin();
   tft.setRotation(0);
@@ -5085,7 +5364,12 @@ export function generateCppHeader(projectInput: Project, options: GenerateCppOpt
   // Force eye rotation on even on soft-float chips (ESP32-C6/C3), where it's auto-disabled for perf.
   // Needed so a rotated/tilted eye matches the studio on those chips; see the rotation cost guard
   // in playerCode(). bakeRotation implies this (for any pose the bake left with runtime rotation).
-  const forceRotation = options.forceRotation === true || options.bakeRotation === true
+  // Only force runtime rotation if a pose STILL needs it after baking. Emitting the define
+  // unconditionally whenever bakeRotation was on is what made "Smooth tilt on ESP32" freeze a
+  // soft-float C6/C3: EYES_FORCE_ROTATION overrides the per-chip guard in playerCode(), so the
+  // per-pixel path ran even when the bake had eliminated every rotation (or, before the bake
+  // handled default/offset/flipped shapes, had eliminated none of them).
+  const forceRotation = options.forceRotation === true || (options.bakeRotation === true && projectUsesEyeRotation(project))
   // How many EXTRA-highlight slots every EyeFrame carries (project-wide max). 0 = no exported pose
   // uses extra highlights, so EyeFrame/LiveEye/the lerps/the draw all emit exactly the pre-feature
   // code (byte-identical export for existing projects). See playerCode()/eyeFrameLiteral().
@@ -5104,10 +5388,11 @@ export function generateCppHeader(projectInput: Project, options: GenerateCppOpt
   // exporters rebuild the same deterministic maps themselves, so every symbol + reference agrees.
   const animIdents = buildUniqueIdents(project.animations)
   const exprIdents = buildUniqueIdents(project.expressions)
+  const generatedAt = new Date().toISOString()
   const header = `/*
  * Generated by Eyes Eye Studio — do not hand-edit, re-export instead.
  * Project: ${project.name}
- * Generated: ${new Date().toISOString()}
+ * Generated: ${generatedAt}
  *
  * Field order in EyeFrame matches the studio's EyeParams model:
  *   width, height, radius, rotation, distance, eyePosX, eyePosY, irisWidth, irisHeight, pupilWidth,
@@ -5347,6 +5632,13 @@ export function generateCppHeader(projectInput: Project, options: GenerateCppOpt
  * a live/unbuffered draw straight to the panel, which shows up as flicker (only the eyelids
  * needing drawFastVLine, so this is easy to miss if you copy an older buffered-wrapper class).
  */
+
+// Build stamp. Print these at boot (Serial.println(EYES_GENERATED)) to confirm WHICH export is
+// actually running on the device -- otherwise a stale binary is indistinguishable from a bad
+// export, and both look like "the display doesn't match the preview".
+#define EYES_GENERATED "${generatedAt}"
+#define EYES_PROJECT_NAME "${project.name}"
+#define EYES_BAKED_ROTATION ${options.bakeRotation === true ? 1 : 0}
 #ifndef ${guard}
 #define ${guard}
 ${forceRotation ? `

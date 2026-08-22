@@ -75,3 +75,38 @@
     @apply bg-studio-panel2 text-studio-text;
   }
 }
+
+/* Native select popups are painted by the browser, not by the page: Chromium does NOT inherit the
+   page's dark styling into the option list, so every <select> in the studio dropped open as light
+   text on a white sheet — effectively unreadable. The popup only honours colours set directly on
+   option/optgroup, so they are set here once, globally, rather than per component. */
+@layer base {
+  select option,
+  select optgroup {
+    background-color: #1c1c21; /* studio.panel */
+    color: #e6e6ea; /* studio.text */
+  }
+  select optgroup {
+    color: #8b8c96; /* studio.muted — group labels read as headings, not choices */
+    font-style: normal;
+    font-weight: 600;
+  }
+  select option:checked {
+    background-color: #5b8cff; /* studio.accent */
+    color: #ffffff;
+  }
+}
+
+@layer components {
+  /* The studio's standard <select>. Native appearance is dropped so the control matches the dark
+     panels, with the disclosure chevron drawn as an inline SVG background (no icon dependency). */
+  .studio-select {
+    @apply w-full min-w-0 appearance-none cursor-pointer rounded-md border border-studio-border
+           bg-studio-panel2 py-1.5 pl-2 pr-7 text-xs text-studio-text
+           hover:border-studio-border2 focus:border-studio-accent focus:outline-none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%238b8c96' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.5rem center;
+    background-size: 12px 12px;
+  }
+}
