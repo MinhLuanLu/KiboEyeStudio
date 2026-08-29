@@ -27,6 +27,7 @@ import {
   rightEyeColors
 } from '@/types'
 import { hexToRgb565, mixColors, shadeColor } from '@/lib/color'
+import { computeBackgroundRect } from '@/renderer/backgroundLayout'
 import { PUPIL_SHAPE_POLYGONS } from '@/renderer/pupilShapes'
 import { EYE_SHAPE_POLYGONS } from '@/renderer/eyeShapes'
 import { sampleAnimationEye, sampleAnimationColors } from '@/engine/interpolate'
@@ -1154,7 +1155,7 @@ function exportTiming(display: Project['display']): string {
 // The player/runtime C++ (structs, interpolation, drawing, playback). A function — not a const —
 // so it can size the per-frame EXTRA-highlight arrays (LiveEye/eyesLerpFrame/eyesLerpLive/draw) to
 // the project's actual max. exHlN === 0 emits byte-for-byte the pre-multi-highlight code.
-function playerCode(exHlN: number): string {
+function playerCode(exHlN: number, backgroundCode: string): string {
   return `#ifndef EYES_EYE_PLAYER_H
 #define EYES_EYE_PLAYER_H
 
@@ -3957,10 +3958,10 @@ inline LiveEye eyesMirroredEyelid(const LiveEye& e) {
   return m;
 }
 
-template <typename T>
+${backgroundCode}template <typename T>
 inline void eyesDrawEyePair(T& gfx, int16_t screenCx, int16_t screenCy, const LiveEye& left, const LiveEye& right, uint16_t bgColor,
                              const EyeColorSet& leftColors, const EyeColorSet& rightColors) {
-  // Per-eye spacing: each eye is placed using ITS OWN distance, exactly like the studio's
+${backgroundCode ? '  eyesDrawBackground(gfx);  // whole-display background image, drawn first (behind eyes/pupils/eyelids/stickers)\n' : ''}  // Per-eye spacing: each eye is placed using ITS OWN distance, exactly like the studio's
   // faceRenderer.ts (halfLeft = params.distance/2 for the left eye, halfRight = rightParams.distance/2
   // for the right). A single shared half taken from the left eye would misplace the RIGHT eye
   // whenever left/right distance diverge (independent per-eye animation), producing a studio<->device
@@ -4352,6 +4353,85 @@ export interface GenerateCppOptions {
   includeExpressions?: boolean
 }
 
+/** Emits the whole-display background image: an RGB565 PROGMEM bitmap (the uploaded PNG/SVG,
+ * pre-composited over the display background colour at its opacity so the device needs no alpha
+ * blending) plus a template eyesDrawBackground(gfx) that blits it — nearest-neighbour scaled into
+ * the destination rect computed by the SAME computeBackgroundRect() the studio preview uses, and
+ * clipped to the display's own ellipse on a round panel. Returns { code:'', hasBackground:false }
+ * when there's no (visible, non-transparent) background, so a project without one exports exactly
+ * as before. Called once per frame at the very top of eyesDrawEyePair(), behind every eye/sticker. */
+function exportBackground(project: Project): { code: string; hasBackground: boolean } {
+  const bg = project.backgroundImage
+  if (!bg || !bg.visible || bg.opacity <= 0 || !bg.rgba || bg.rgba.data.length === 0 || bg.rgba.width <= 0 || bg.rgba.height <= 0) {
+    return { code: '', hasBackground: false }
+  }
+  const dispW = project.display.width
+  const dispH = project.display.height
+  const rect = computeBackgroundRect(bg, bg.naturalWidth, bg.naturalHeight, dispW, dispH)
+  const destX = Math.round(rect.x)
+  const destY = Math.round(rect.y)
+  const destW = Math.max(1, Math.round(rect.w))
+  const destH = Math.max(1, Math.round(rect.h))
+  const srcW = bg.rgba.width
+  const srcH = bg.rgba.height
+  const bgHex = project.display.backgroundColor
+  const op = Math.max(0, Math.min(1, bg.opacity / 100))
+  const data = bg.rgba.data
+  // Pre-composite every source pixel over the display background colour at the image opacity, then
+  // pack to RGB565 — so the device blits a flat opaque bitmap with no per-pixel alpha work.
+  const words: string[] = []
+  for (let i = 0; i < srcW * srcH; i++) {
+    const r = data[i * 4] ?? 0
+    const g = data[i * 4 + 1] ?? 0
+    const b = data[i * 4 + 2] ?? 0
+    const alpha8 = data[i * 4 + 3] ?? 255
+    const alpha = (alpha8 / 255) * op
+    const pixelHex = `#${[r, g, b].map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('')}`
+    words.push(toRgb565Hex(mixColors(bgHex, pixelHex, alpha)))
+  }
+  const rows: string[] = []
+  for (let i = 0; i < words.length; i += 16) rows.push('  ' + words.slice(i, i + 16).join(', '))
+
+  const roundClip = project.display.shape === 'circle'
+  const code = `// ---- Display background image (${bg.kind.toUpperCase()}, ${srcW}x${srcH} source) -----------------------
+// One image drawn behind the eyes for every expression/animation, pre-composited over
+// EYE_COLOR_BACKGROUND at ${bg.opacity}% opacity and packed to RGB565. eyesDrawBackground() blits it
+// nearest-neighbour into the fit-mode destination rect (matching the studio's Display panel), clipped
+// to the display. This is a full-screen redraw each frame (the eyes paint over it) — heaviest part of
+// a frame; keep the source small if you need more FPS.
+#define BG_SRC_W ${srcW}
+#define BG_SRC_H ${srcH}
+static const int16_t BG_DEST_X = ${destX};
+static const int16_t BG_DEST_Y = ${destY};
+static const int16_t BG_DEST_W = ${destW};
+static const int16_t BG_DEST_H = ${destH};
+const uint16_t BG_IMAGE[BG_SRC_W * BG_SRC_H] PROGMEM = {
+${rows.join(',\n')}
+};
+
+template <typename T>
+inline void eyesDrawBackground(T& gfx) {
+  const int16_t bcx = EYE_DISPLAY_WIDTH / 2;
+  const int16_t bcy = EYE_DISPLAY_HEIGHT / 2;
+  for (int16_t py = BG_DEST_Y; py < BG_DEST_Y + BG_DEST_H; py++) {
+    if (py < 0 || py >= EYE_DISPLAY_HEIGHT) continue;
+    int32_t sy = ((int32_t)(py - BG_DEST_Y) * BG_SRC_H) / BG_DEST_H;
+    if (sy < 0) sy = 0; else if (sy >= BG_SRC_H) sy = BG_SRC_H - 1;
+    for (int16_t px = BG_DEST_X; px < BG_DEST_X + BG_DEST_W; px++) {
+      if (px < 0 || px >= EYE_DISPLAY_WIDTH) continue;
+${roundClip ? `      int32_t dx = px - bcx, dy = py - bcy;
+      if ((int64_t)dx * dx * bcy * bcy + (int64_t)dy * dy * bcx * bcx > (int64_t)bcx * bcx * bcy * bcy) continue; // outside the round display
+` : ''}      int32_t sx = ((int32_t)(px - BG_DEST_X) * BG_SRC_W) / BG_DEST_W;
+      if (sx < 0) sx = 0; else if (sx >= BG_SRC_W) sx = BG_SRC_W - 1;
+      gfx.drawPixel(px, py, pgm_read_word(&BG_IMAGE[sy * BG_SRC_W + sx]));
+    }
+  }
+}
+
+`
+  return { code, hasBackground: true }
+}
+
 /** Project-wide maximum number of EXTRA highlights (beyond the primary) any exported pose uses —
  * across every expression and every animation keyframe (all tracks, both eyes). Clamped to
  * MAX_EXTRA_HIGHLIGHTS. This sizes the fixed per-frame arrays in the firmware export; 0 means the
@@ -4395,10 +4475,56 @@ export function arduinoSketchName(projectName: string): string {
  * first single-shape expression (only when expressions are included), else nothing (still compiles).
  * `includeExpressions` must match the flag passed to generateCppHeader so the initial call never
  * references an Expr_* that was excluded from eyes.h. */
-export function generateArduinoSketch(project: Project, options: GenerateCppOptions = {}): string {
+/** A "WakeUp" boot intro clip — a combo (preferred: Combo() always plays it once) or a NON-looping
+ * animation whose name reads as a wake-up. Used by the "Play WakeUp intro on boot" export option. */
+export type WakeUpTarget = { kind: 'combo' | 'animation'; id: string }
+
+/** Finds this project's WakeUp intro clip (see WakeUpTarget), or null if it has none — a combo named
+ * WakeUp/Wake Up/wake_up (preferred, since Combo() plays once regardless of the combo's loop flag),
+ * else a non-looping animation by the same name (PlayAnimation() honors the animation's loop flag, so
+ * a looping one would never finish and would stall the boot handoff). */
+export function findWakeUpTarget(project: Project): WakeUpTarget | null {
+  const re = /wake\s*_?\s*up/i
+  const combo = (project.animationCombos ?? []).find((c) => re.test(c.name))
+  if (combo) return { kind: 'combo', id: combo.id }
+  const anim = project.animations.find((a) => re.test(a.name) && !a.loop)
+  if (anim) return { kind: 'animation', id: anim.id }
+  return null
+}
+
+/** Whether a WakeUp boot intro can be generated (drives the export dialog's "Play WakeUp intro on
+ * boot" checkbox — only shown/defaulted-on when a WakeUp clip actually exists). */
+export function hasWakeUpIntro(project: Project): boolean {
+  return findWakeUpTarget(project) !== null
+}
+
+/** One selectable target for the "after WakeUp, play…" dropdown — a combo (preferred, loops) or an
+ * animation. `label` is the bare name; the dialog groups by `kind`. */
+export interface ArduinoPlayOption { kind: 'combo' | 'animation'; id: string; label: string }
+
+/** Everything the sketch can switch to once the WakeUp intro finishes — every combo (combos first,
+ * since a combo is the most complete looping unit and the likeliest "idle" intent) then every
+ * animation. Empty only for a project with no combos AND no animations. */
+export function arduinoAfterWakeOptions(project: Project): ArduinoPlayOption[] {
+  const out: ArduinoPlayOption[] = []
+  for (const c of project.animationCombos ?? []) out.push({ kind: 'combo', id: c.id, label: c.name })
+  for (const a of project.animations) out.push({ kind: 'animation', id: a.id, label: a.name })
+  return out
+}
+
+export function generateArduinoSketch(
+  project: Project,
+  options: GenerateCppOptions = {},
+  wakeUpIntro = false,
+  // Which combo/animation loop()'s WakeUp handoff switches to once the intro finishes. A combo loops
+  // (Combo(x, true)); an animation plays via PlayAnimation. Null/unresolved → the default first
+  // animation. Only used when wakeUpIntro is on and the project has a WakeUp clip.
+  afterWake?: { kind: 'combo' | 'animation'; id: string }
+): string {
   const includeExpressions = options.includeExpressions !== false
   const animIdents = buildUniqueIdents(project.animations)
   const exprIdents = buildUniqueIdents(project.expressions)
+  const comboIdents = buildUniqueIdents(project.animationCombos ?? [])
   const firstAnim = project.animations[0]
   const firstSingleExpr = includeExpressions ? project.expressions.find((e) => !expressionShapeDiverges(e)) : undefined
   const initialCall = firstAnim
@@ -4406,6 +4532,35 @@ export function generateArduinoSketch(project: Project, options: GenerateCppOpti
     : firstSingleExpr
       ? `  SetExpression(Expr_${exprIdents.get(firstSingleExpr.id)!});   // start on "${firstSingleExpr.name}" — change to any Anim_/Expr_ from eyes.h's Quick Reference`
       : `  // No animations or single-shape expressions yet — the eyes hold their default pose. Add one\n  // in the studio and re-export, or call PlayAnimation(...)/SetExpression(...) here.`
+
+  // WakeUp boot intro (mirrors the Kibo reference sketch): play a WakeUp clip ONCE on boot, then the
+  // instant it finishes, start the normal target — latched by s_wokeUp so it happens exactly once.
+  // Off (or no WakeUp clip) → setup() plays the start target directly, exactly as before.
+  const wakeUp = wakeUpIntro ? findWakeUpTarget(project) : null
+  let wakeGlobal = ''
+  let setupPlayback = initialCall
+  let wakeLoopSwitch = ''
+  if (wakeUp) {
+    const finishedFn = wakeUp.kind === 'combo' ? 'ComboFinished()' : 'AnimationFinished()'
+    const wakeCall = wakeUp.kind === 'combo'
+      ? `Combo(${comboIdents.get(wakeUp.id)!});`
+      : `PlayAnimation(Anim_${animIdents.get(wakeUp.id)!});`
+    const wakeName = wakeUp.kind === 'combo'
+      ? (project.animationCombos ?? []).find((c) => c.id === wakeUp.id)?.name
+      : project.animations.find((a) => a.id === wakeUp.id)?.name
+    // The target loop() switches to after the WakeUp intro — the user's chosen combo (loops) or
+    // animation, else the default first-animation start (initialCall).
+    const afterWakeCombo = afterWake?.kind === 'combo' ? (project.animationCombos ?? []).find((c) => c.id === afterWake.id) : undefined
+    const afterWakeAnim = afterWake?.kind === 'animation' ? project.animations.find((a) => a.id === afterWake.id) : undefined
+    const afterWakeCall = afterWakeCombo
+      ? `Combo(${comboIdents.get(afterWakeCombo.id)!}, true);   // "${afterWakeCombo.name}" — loops after the WakeUp intro (set in the Export dialog)`
+      : afterWakeAnim
+        ? `PlayAnimation(Anim_${animIdents.get(afterWakeAnim.id)!});   // "${afterWakeAnim.name}" — plays after the WakeUp intro (set in the Export dialog)`
+        : initialCall.replace(/^\s+/, '')
+    wakeGlobal = `\n// WakeUp boot intro one-shot latch: once the play-once WakeUp finishes, loop() starts the real\n// start target exactly once. Mirrors s_wokeUp in the Kibo reference sketch.\nstatic bool s_wokeUp = false;\n`
+    setupPlayback = `  ${wakeCall}   // WakeUp intro "${wakeName}" — plays ONCE on boot; loop() switches to the start below when it finishes`
+    wakeLoopSwitch = `  // WakeUp boot intro: the instant the play-once WakeUp finishes, switch to the start target — once.\n  if (!s_wokeUp && ${finishedFn}) {\n    s_wokeUp = true;\n    ${afterWakeCall}\n  }\n\n`
+  }
   const sketchName = arduinoSketchName(project.name)
   return `/*
  * ${sketchName}.ino — robot eyes sketch generated by Kibo Eye Studio.
@@ -4439,16 +4594,16 @@ export function generateArduinoSketch(project: Project, options: GenerateCppOpti
 #include "eyes.h"
 
 EyesBufferedDisplay tft(TFT_CS, TFT_DC, TFT_RST);  // flicker-free buffered display (defined in eyes.h)
-
+${wakeGlobal}
 void setup() {
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);  // harmless everywhere; required on boards with no fixed SPI pins (e.g. ESP32-C6)
   tft.begin();
   tft.setRotation(0);
-${initialCall}
+${setupPlayback}
 }
 
 void loop() {
-  LiveEye live = UpdateEyes();
+${wakeLoopSwitch}  LiveEye live = UpdateEyes();
   LiveEye liveRight = UpdateEyesRight();  // differs from "live" only while an animation authored Left/Right divergence
   tft.fillScreen(EYE_COLOR_BACKGROUND);
   eyesDrawEyePair(tft, 120, 120, live, liveRight, EYE_COLOR_BACKGROUND, eyesPlayer.colorsLeft, eyesPlayer.colorsRight);
@@ -4502,6 +4657,9 @@ export function generateCppHeader(projectInput: Project, options: GenerateCppOpt
   // uses extra highlights, so EyeFrame/LiveEye/the lerps/the draw all emit exactly the pre-feature
   // code (byte-identical export for existing projects). See playerCode()/eyeFrameLiteral().
   const exHlN = projectMaxExtraHighlights(project)
+  // Whole-display background image (behind everything) — emits nothing when the project has none,
+  // so the output is unchanged for projects without a background. See exportBackground().
+  const background = exportBackground(project)
   const guard = `EYES_EYE_ANIMATIONS_${toIdentifier(project.name).toUpperCase() || 'PROJECT'}_H`
   // Computed once up front: builds the cross-scope raster-asset table (project + every
   // expression + every animation) so exportAnimation()/exportExpression() below can each emit
@@ -4937,7 +5095,7 @@ struct EyeExpression {
 
 // ---- Player (easing, interpolation, drawing, playback) -----------------------
 
-${playerCode(exHlN)}
+${playerCode(exHlN, background.code)}
 
 // ---- Animations -----------------------------------------------------------
 

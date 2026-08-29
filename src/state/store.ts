@@ -6,6 +6,7 @@ import type {
   AnimationCombo,
   AnimationComboClip,
   DisplaySettings,
+  DisplayBackgroundImage,
   EasingType,
   EditorState,
   Expression,
@@ -126,6 +127,7 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     colorsLeftOverride: null,
     colorsRightOverride: null,
     display: { ...DEFAULT_DISPLAY },
+    backgroundImage: null,
     personality: { ...DEFAULT_PERSONALITY },
     timing: { ...DEFAULT_TIMING },
     animations,
@@ -485,6 +487,10 @@ interface StoreState {
 
   // display
   setDisplay: <K extends keyof DisplaySettings>(key: K, value: DisplaySettings[K]) => void
+  /** Set or clear the whole-display background image (null removes it). Undoable. */
+  setBackgroundImage: (bg: DisplayBackgroundImage | null) => void
+  /** Patch the current background image's placement/fit/opacity/visibility (no-op if none set). */
+  updateBackgroundImage: (partial: Partial<DisplayBackgroundImage>) => void
   toggleBezel: () => void
 
   // personality / timing
@@ -1955,6 +1961,20 @@ export const useStore = create<StoreState>()(
     setDisplay: (key, value) =>
       set((s) => {
         s.project.display[key] = value
+        s.dirty = true
+      }),
+
+    setBackgroundImage: (bg) =>
+      set((s) => {
+        checkpointDraft(s)
+        s.project.backgroundImage = bg
+        s.dirty = true
+      }),
+
+    updateBackgroundImage: (partial) =>
+      set((s) => {
+        if (!s.project.backgroundImage) return
+        Object.assign(s.project.backgroundImage, partial)
         s.dirty = true
       }),
 

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore, getActiveAnimation } from '@/state/store'
 import { projectToJson, animationToJson } from '@/lib/export/jsonExport'
-import { generateCppHeader, generateArduinoSketch, generateArduinoReadme, arduinoSketchName } from '@/lib/export/cppExport'
+import { generateCppHeader, generateArduinoSketch, generateArduinoReadme, arduinoSketchName, hasWakeUpIntro, arduinoAfterWakeOptions } from '@/lib/export/cppExport'
 import { generateEyeControllerHeader } from '@/lib/export/eyeControllerExport'
 import { createZip } from '@/lib/export/zip'
 import { validateStickerExport, type StickerValidationResult } from '@/lib/export/validateStickers'
@@ -157,6 +157,21 @@ export function ExportDialog() {
   // sketch folder as a single .zip (<name>/<name>.ino + eyes.h [+ eyeController.h] + README) instead
   // of saving the bare eyes.h. Off by default so the plain-header workflow is unchanged.
   const [exportArduinoProject, setExportArduinoProject] = useState(false)
+  // "Play WakeUp intro on boot": when the project has a WakeUp clip, the generated .ino plays it ONCE
+  // on boot, then switches to the normal start target — the Kibo reference boot handshake. Default on
+  // when a WakeUp clip exists; the checkbox is only shown then.
+  const wakeUpAvailable = hasWakeUpIntro(project)
+  const [wakeUpIntro, setWakeUpIntro] = useState(wakeUpAvailable)
+  // Which combo/animation loop() switches to once the WakeUp intro finishes (the "After WakeUp,
+  // play…" dropdown). Defaults to the first combination if the project has one, else the first
+  // animation — combinations first because a looping combo is the most natural post-intro idle.
+  const afterWakeOptions = useMemo(() => arduinoAfterWakeOptions(project), [project])
+  const [afterWakeKey, setAfterWakeKey] = useState<string>(() => {
+    const firstCombo = afterWakeOptions.find((o) => o.kind === 'combo')
+    const pick = firstCombo ?? afterWakeOptions[0]
+    return pick ? `${pick.kind}:${pick.id}` : ''
+  })
+  const afterWakeTarget = afterWakeOptions.find((o) => `${o.kind}:${o.id}` === afterWakeKey)
 
   if (!open) return null
 
@@ -170,7 +185,7 @@ export function ExportDialog() {
     if (tab === 'cpp' && exportArduinoProject) {
       const folder = arduinoSketchName(project.name)
       const entries = [
-        { name: `${folder}/${folder}.ino`, content: generateArduinoSketch(project, { includeExpressions }) },
+        { name: `${folder}/${folder}.ino`, content: generateArduinoSketch(project, { includeExpressions }, wakeUpIntro && wakeUpAvailable, wakeUpIntro && wakeUpAvailable ? afterWakeTarget : undefined) },
         { name: `${folder}/eyes.h`, content },
         ...(includeController ? [{ name: `${folder}/eyeController.h`, content: generateEyeControllerHeader() }] : []),
         { name: `${folder}/README.md`, content: generateArduinoReadme(project, { includeExpressions, includeController }) }
@@ -265,6 +280,42 @@ export function ExportDialog() {
                 <span className="text-studio-muted"> — download a ready-to-compile sketch as a single <code>.zip</code>: a folder containing <code>{arduinoSketchName(project.name)}.ino</code>, <code>eyes.h</code>{includeController ? <>, <code>eyeController.h</code></> : null}, and a README. Open the <code>.ino</code>, set your display pins, and upload. (Without this, only the <code>eyes.h</code> header is saved.)</span>
               </span>
             </label>
+          )}
+
+          {tab === 'cpp' && exportArduinoProject && wakeUpAvailable && (
+            <label className="mx-3 mt-2 flex items-start gap-2 text-xs cursor-pointer select-none shrink-0">
+              <input type="checkbox" className="mt-0.5" checked={wakeUpIntro} onChange={(e) => setWakeUpIntro(e.target.checked)} />
+              <span>
+                <span className="font-medium">Play WakeUp intro on boot</span>
+                <span className="text-studio-muted"> — on power-up the sketch plays your <strong>WakeUp</strong> clip <strong>once</strong>, then the instant it finishes it switches to the target below and continues. Same boot handshake as the Kibo reference sketch. Uncheck to start on the first animation directly.</span>
+              </span>
+            </label>
+          )}
+
+          {tab === 'cpp' && exportArduinoProject && wakeUpAvailable && wakeUpIntro && afterWakeOptions.length > 0 && (
+            <div className="mx-3 mt-1 pl-6 text-xs flex flex-col gap-1 shrink-0">
+              <label className="flex items-center gap-2">
+                <span className="whitespace-nowrap text-studio-muted">After WakeUp, play</span>
+                <select
+                  className="studio-input text-xs flex-1 bg-studio-panel2 text-studio-text"
+                  value={afterWakeKey}
+                  onChange={(e) => setAfterWakeKey(e.target.value)}
+                >
+                  {(['combo', 'animation'] as const).map((kind) => {
+                    const group = afterWakeOptions.filter((o) => o.kind === kind)
+                    if (group.length === 0) return null
+                    return (
+                      <optgroup key={kind} label={kind === 'combo' ? 'Combinations' : 'Animations'}>
+                        {group.map((o) => (
+                          <option key={`${o.kind}:${o.id}`} value={`${o.kind}:${o.id}`} style={{ backgroundColor: '#212227', color: '#e6e6ea' }}>{o.label}</option>
+                        ))}
+                      </optgroup>
+                    )
+                  })}
+                </select>
+              </label>
+              <span className="text-studio-muted pl-[2px]">A combination loops forever after the intro; an animation plays through once. This becomes the call after <code>s_wokeUp = true</code> in <code>loop()</code>.</span>
+            </div>
           )}
 
           {tab === 'cpp' && (

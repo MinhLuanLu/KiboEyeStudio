@@ -5,6 +5,7 @@ import type { DisplayShape } from '@/types'
 import { Slider } from '@/components/ui/Slider'
 import { ColorField } from '@/components/ui/ColorField'
 import { PanelTabs } from '@/components/ui/PanelTabs'
+import { BackgroundImageControls } from './BackgroundImageControls'
 
 const SHAPES: { value: DisplayShape; label: string }[] = [
   { value: 'circle', label: 'Circle' },
@@ -108,6 +109,10 @@ export function DisplayPanel() {
                 onChange={(v) => setDisplay('fps', clampFps(v))}
               />
             </div>
+
+            <div className="border-t border-studio-border pt-4">
+              <BackgroundImageControls />
+            </div>
           </div>
         )}
 
@@ -132,6 +137,10 @@ export function DisplayPanel() {
                 }}
               />
             </label>
+
+            <p className="text-[11px] text-studio-muted leading-snug">
+              Background image lives on the <span className="text-studio-text">Screen</span> tab.
+            </p>
           </div>
         )}
       </div>
