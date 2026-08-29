@@ -3,7 +3,7 @@ import { join } from 'path'
 import { readFile, writeFile, rename, unlink, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { is } from './is'
-
+// The main window of the app, or null if it hasn't been created yet or has been closed.
 let mainWindow: BrowserWindow | null = null
 
 // Tracks whether the renderer currently has unsaved changes (kept in sync via the
