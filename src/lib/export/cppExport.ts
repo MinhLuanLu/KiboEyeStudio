@@ -16,7 +16,6 @@ import type {
 } from '@/types'
 import {
   MAX_EXTRA_HIGHLIGHTS,
-  animationColorBase,
   clampFps,
   expressionLeftColors,
   expressionLeftParams,
@@ -30,7 +29,15 @@ import { hexToRgb565, mixColors, shadeColor } from '@/lib/color'
 import { computeBackgroundRect } from '@/renderer/backgroundLayout'
 import { PUPIL_SHAPE_POLYGONS } from '@/renderer/pupilShapes'
 import { EYE_SHAPE_POLYGONS } from '@/renderer/eyeShapes'
-import { sampleAnimationEye, sampleAnimationColors } from '@/engine/interpolate'
+import { sampleAnimationEye, sampleAnimationColors, animationHasColorTrack } from '@/engine/interpolate'
+import {
+  TRANSITION_COLORS_BIT,
+  TRANSITION_PROPERTY_GROUPS,
+  quantizeBezier,
+  settingsOfTransition,
+  transitionSettingsOf,
+  transitionStepMask
+} from '@/engine/transitionPlayback'
 
 const EASING_ENUM: Record<EasingType, string> = {
   linear: 'EYE_EASE_LINEAR',
@@ -325,8 +332,7 @@ function bakeAnimationColors(anim: Animation, base: EyeColors): EyeColors[] | nu
   // (owned pupil == base, no per-keyframe colours) we keep the nullptr fast-path, so every
   // untouched animation stays byte-identical to before. sampleAnimationColors folds the owned
   // pupil into every frame either way, so a colourless-but-owned animation bakes a constant track.
-  const ownPupilDiverges = animationColorBase(anim, base).pupil !== base.pupil
-  if (!anim.keyframes.some((k) => k.colors) && !ownPupilDiverges) return null
+  if (!animationHasColorTrack(anim, base)) return null
   return collectAnimationBreakpoints(anim).map((t) => sampleAnimationColors(anim, t, base))
 }
 
@@ -460,8 +466,8 @@ function exportAnimationCombos(project: Project): string {
   lines.push(' *')
   lines.push(' * Play:')
   lines.push(' *')
-  lines.push(' *   Combo(<yourCombo>);   // loop defaults to false -- see the Quick Reference at the')
-  lines.push(' *                          // top of this file for the optional loop argument')
+  lines.push(' *   Combo(<yourCombo>);          // loops exactly as set in the studio (Loop button on the Combinations timeline)')
+  lines.push(' *   Combo(<yourCombo>, true);    // force loop      Combo(<yourCombo>, false);   // force play once')
   lines.push(' *')
   lines.push(' * Play several combos back-to-back (each starts only after the previous finishes):')
   lines.push(' *')
@@ -509,6 +515,7 @@ function exportAnimationCombos(project: Project): string {
         return `  { &Anim_${animIdents.get(anim.id)!}, ${Math.max(0, Math.round(clip.startTimeMs))}, ${Math.max(1, Math.round(clip.loopCount || 1))}, ${Math.max(1, Math.round(clip.playbackSpeed || 100))}, ${Math.max(0, Math.round(clip.transitionMs || 0))}, ${Math.max(0, Math.round(clip.endDelayMs || 0))} }`
       })
       .filter((line): line is string => !!line)
+    lines.push(`// ${commentText(combo.name)}${combo.loop ? ' (loops — Loop is on in the studio)' : ' (plays once)'}`)
     lines.push(`const AnimationComboClip ${ident}_Clips[] PROGMEM = {`)
     lines.push(clips.length > 0 ? clips.join(',\n') : '  { nullptr, 0, 1, 100, 0, 0 }')
     lines.push('};')
@@ -516,6 +523,206 @@ function exportAnimationCombos(project: Project): string {
     lines.push('')
   }
 
+  return lines.join('\n')
+}
+
+const EASING_LABEL: Record<EasingType, string> = {
+  linear: 'Linear',
+  easeIn: 'Ease In',
+  easeOut: 'Ease Out',
+  easeInOut: 'Ease In Out',
+  bounce: 'Bounce',
+  elastic: 'Elastic',
+  bezier: 'Custom Bezier'
+}
+
+/** A C string literal for a studio name: printable ASCII only (anything else becomes '_'), with
+ * backslashes and quotes escaped. */
+function cStringLiteral(s: string): string {
+  return `"${s.replace(/[^\x20-\x7E]/g, '_').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+const commentText = (s: string) => s.replace(/[\r\n]+/g, ' ')
+
+/** The playable target of a saved transition, or null when it points at a deleted (or empty)
+ * animation/combination — such a transition isn't exported, and nothing may reference Trans_X. */
+function transitionTarget(project: Project, t: NonNullable<Project['transitions']>[number]) {
+  if (t.target.kind === 'combo') {
+    const combo = (project.animationCombos ?? []).find((c) => c.id === t.target.id)
+    return combo ? { anim: undefined, combo } : null
+  }
+  const anim = project.animations.find((a) => a.id === t.target.id)
+  return anim && anim.keyframes.length > 0 ? { anim, combo: undefined } : null
+}
+
+// Saved transitions (studio Transitions panel): one EyeTransition constant per transition plus a
+// name registry, emitted after the animations and combinations they point at. Only playback data
+// is exported — the preview source and the simulator's switch/hold timings stay in the studio.
+function exportTransitions(project: Project): string {
+  const transitions = project.transitions ?? []
+  const animIdents = buildUniqueIdents(project.animations)
+  const comboIdents = buildUniqueIdents(project.animationCombos ?? [])
+  const transIdents = buildUniqueIdents(transitions)
+  const lines: string[] = []
+  lines.push('// ---- Transitions ------------------------------------------------------------')
+  lines.push('/*')
+  lines.push(' * Transitions')
+  lines.push(' *')
+  lines.push(' * Saved clip switches from the studio\'s Transitions panel. Each one starts its target animation or')
+  lines.push(' * combination from whatever is on screen right now (never via Idle), blending with its own')
+  lines.push(' * duration, easing and per-property settings instead of the SetTransition() defaults.')
+  lines.push(' *')
+  lines.push(' * Play:')
+  lines.push(' *')
+  lines.push(' *   playTransition("<Transition Name>");   // studio name or C++ identifier, case-insensitive')
+  lines.push(' *   PlayTransition(Trans_<Identifier>);    // same, by constant (no lookup)')
+  lines.push(' *')
+  lines.push(' * Look up without playing:')
+  lines.push(' *')
+  lines.push(' *   const EyeTransition* t = FindTransition("<Transition Name>");')
+  lines.push(' *')
+  lines.push(' * With eyeController.h (priorities):')
+  lines.push(' *')
+  lines.push(' *   EyeControllerRequestTransitionByName("<Transition Name>", EYE_PRIORITY_SENSOR);')
+  lines.push(' */')
+
+  const exported: string[] = []
+  for (const t of transitions) {
+    const ident = transIdents.get(t.id)!
+    const target = transitionTarget(project, t)
+    if (!target) {
+      lines.push(`// "${commentText(t.name)}" is not exported: its target ${t.target.kind === 'combo' ? 'combination' : 'animation'} no longer exists.`)
+      continue
+    }
+    const targetAnim = target.anim
+    const targetCombo = target.combo
+    const settings = settingsOfTransition(t)
+    const [bx1, by1, bx2, by2] = quantizeBezier(settings.bezier)
+    const switched = [
+      ...TRANSITION_PROPERTY_GROUPS.filter((g) => !t.interpolation[g.key]).map((g) => g.label.toLowerCase()),
+      ...(t.interpolation.colors ? [] : ['colours'])
+    ]
+    const sourceItem = t.source.kind === 'combo' ? (project.animationCombos ?? []).find((c) => c.id === t.source.id) : project.animations.find((a) => a.id === t.source.id)
+    const targetText = targetCombo
+      ? `combination ${targetCombo.name}${t.target.loop ? ' (loops)' : ' (plays once)'}`
+      : `animation ${targetAnim!.name}${targetAnim!.loop ? ' (loops)' : ' (plays once)'}`
+    lines.push('')
+    lines.push(
+      commentText(
+        `// ${t.name} -> ${targetText}, ${settings.durationMs} ms ${EASING_LABEL[settings.easing]}` +
+          (switched.length ? `; switches ${switched.join(', ')} at ${t.interpolation.switchAtPct}%` : '') +
+          (sourceItem ? ` (designed from ${sourceItem.name})` : '')
+      )
+    )
+    const fields = [
+      cStringLiteral(t.name),
+      `"${ident}"`,
+      targetAnim && !targetCombo ? `&Anim_${animIdents.get(targetAnim.id)!}` : 'nullptr',
+      targetCombo ? `&${comboIdents.get(targetCombo.id)!}` : 'nullptr',
+      targetCombo && t.target.loop ? 'true' : 'false',
+      settings.durationMs,
+      EASING_ENUM[settings.easing],
+      bx1,
+      by1,
+      bx2,
+      by2,
+      transitionStepMask(t.interpolation),
+      Math.max(0, Math.min(100, Math.round(t.interpolation.switchAtPct)))
+    ]
+    lines.push(`const EyeTransition Trans_${ident} = { ${fields.join(', ')} };`)
+    exported.push(ident)
+  }
+
+  lines.push('')
+  if (exported.length > 0) {
+    lines.push('// Name registry used by FindTransition()/playTransition().')
+    lines.push('const EyeTransition* const EYE_TRANSITIONS[] = {')
+    lines.push(exported.map((ident) => `  &Trans_${ident}`).join(',\n'))
+    lines.push('};')
+  } else {
+    lines.push('// This project has no saved transitions yet — FindTransition()/playTransition() find nothing.')
+    lines.push('const EyeTransition* const EYE_TRANSITIONS[1] = { nullptr };')
+  }
+  lines.push(`const uint16_t EYE_TRANSITION_COUNT = ${exported.length};`)
+  lines.push(`
+// Case-insensitive ASCII comparison used by FindTransition().
+inline bool eyesTransitionNameEquals(const char* a, const char* b) {
+  if (a == nullptr || b == nullptr) return false;
+  while (*a && *b) {
+    char ca = (*a >= 'A' && *a <= 'Z') ? (char)(*a + 32) : *a;
+    char cb = (*b >= 'A' && *b <= 'Z') ? (char)(*b + 32) : *b;
+    if (ca != cb) return false;
+    a++;
+    b++;
+  }
+  return *a == *b;
+}
+
+// The saved transition whose studio name or C++ identifier matches \`name\` (case-insensitive), or
+// nullptr when there is none.
+//   const EyeTransition* t = FindTransition("Look Down To Look Left");
+inline const EyeTransition* FindTransition(const char* name) {
+  for (uint16_t i = 0; i < EYE_TRANSITION_COUNT; i++) {
+    const EyeTransition* t = EYE_TRANSITIONS[i];
+    if (eyesTransitionNameEquals(name, t->name) || eyesTransitionNameEquals(name, t->ident)) return t;
+  }
+  return nullptr;
+}
+
+// Plays a saved transition by name: its target starts from whatever is on screen and blends in
+// with the transition's own settings. Returns false (and changes nothing) for an unknown name.
+//   playTransition("Look Down To Look Left");
+inline bool playTransition(const char* name) {
+  const EyeTransition* t = FindTransition(name);
+  return t != nullptr && PlayTransition(*t);
+}
+
+inline bool PlayTransition(const char* name) {
+  return playTransition(name);
+}`)
+  return lines.join('\n')
+}
+
+// eyesTransitionStep(): copies the parts of a transition frame that SWITCH (instead of blend) from
+// \`src\`. Generated from TRANSITION_PROPERTY_GROUPS so it lists exactly the fields the studio's
+// simulator steps (LiveEye has no eyelid thickness, which is studio-only).
+function transitionStepCode(exHlN: number): string {
+  const discrete = [
+    'pupilShape',
+    'pupilCustomShapeIndex',
+    'pupilVisible',
+    'irisVisible',
+    'highlightVisible',
+    'eyeShape',
+    'eyeCustomShapeIndex',
+    'eyeShapeFlipH',
+    'eyeShapeFlipV',
+    'upperEyelidVisible',
+    'lowerEyelidVisible',
+    'disableEyelid'
+  ]
+  const notInLiveEye = new Set(['upperEyelidThickness', 'lowerEyelidThickness'])
+  const lines = [
+    '// Takes the switched part of a transition frame from src: non-numeric fields (shape types,',
+    '// visibility) always, plus every property group flagged in stepMask (EYE_TRANS_STEP_*). src is the',
+    '// snapshot before the switch point and the new clip after it. Mirrors applyTransitionSteps() in the',
+    "// studio's engine/transitionPlayback.ts.",
+    'inline void eyesTransitionStep(LiveEye& dst, const LiveEye& src, uint8_t stepMask) {',
+    ...discrete.map((f) => `  dst.${f} = src.${f};`)
+  ]
+  if (exHlN > 0) {
+    lines.push('  dst.exHlCount = src.exHlCount;')
+    lines.push(`  for (uint8_t i = 0; i < ${exHlN}; i++) dst.exHlVisible[i] = src.exHlVisible[i];`)
+  }
+  for (const g of TRANSITION_PROPERTY_GROUPS) {
+    lines.push(`  if (stepMask & ${g.cppFlag}) {`)
+    for (const f of g.fields) if (!notInLiveEye.has(f)) lines.push(`    dst.${f} = src.${f};`)
+    if (g.key === 'pupil' && exHlN > 0) {
+      lines.push(`    for (uint8_t i = 0; i < ${exHlN}; i++) { dst.exHlX[i] = src.exHlX[i]; dst.exHlY[i] = src.exHlY[i]; dst.exHlSize[i] = src.exHlSize[i]; }`)
+    }
+    lines.push('  }')
+  }
+  lines.push('}')
   return lines.join('\n')
 }
 
@@ -1139,12 +1346,29 @@ function exportStickers(project: Project): { code: string; assetsById: Map<strin
 // so it already plays back at the correct speed no matter how often loop() runs — Display
 // FPS only controls how often a frame gets drawn/presented. EYE_FRAME_DELAY_MS is the
 // delay() the usage example below uses to hit that rate.
-function exportTiming(display: Project['display']): string {
-  const fps = clampFps(display.fps)
+function exportTiming(project: Project): string {
+  const fps = clampFps(project.display.fps)
   const frameDelayMs = Math.max(1, Math.round(1000 / fps))
+  const transition = transitionSettingsOf(project)
+  const [bx1, by1, bx2, by2] = quantizeBezier(transition.bezier)
   return [
     `#define EYE_TARGET_FPS       ${fps}  // Display FPS, set in the studio's Display panel`,
-    `#define EYE_FRAME_DELAY_MS   ${frameDelayMs}  // delay() per loop() to render at EYE_TARGET_FPS`
+    `#define EYE_FRAME_DELAY_MS   ${frameDelayMs}  // delay() per loop() to render at EYE_TARGET_FPS`,
+    ``,
+    `// Clip transition, set in the studio's Transition Simulator. Every clip start (PlayAnimation(),`,
+    `// Combo(), RestartCombo(), sequence advances, eyeController.h requests) blends from the pose on`,
+    `// screen into the new clip's first frame over EYES_TRANSITION_MS; 0 = hard cut. #define any of`,
+    `// these before #include "eyes.h" to override, or call SetTransition() at runtime.`,
+    `#ifndef EYES_TRANSITION_MS`,
+    `#define EYES_TRANSITION_MS         ${transition.durationMs}`,
+    `#endif`,
+    `#ifndef EYES_TRANSITION_EASING`,
+    `#define EYES_TRANSITION_EASING     ${EASING_ENUM[transition.easing]}`,
+    `#define EYES_TRANSITION_BEZIER_X1  ${bx1}  // only used with EYE_EASE_BEZIER, scaled 0-100`,
+    `#define EYES_TRANSITION_BEZIER_Y1  ${by1}`,
+    `#define EYES_TRANSITION_BEZIER_X2  ${bx2}`,
+    `#define EYES_TRANSITION_BEZIER_Y2  ${by2}`,
+    `#endif`
   ].join('\n')
 }
 
@@ -2889,16 +3113,28 @@ inline bool eyesPlayAnimation(const EyeFrame frames[], uint16_t count, bool loop
 
   unsigned long elapsed = millis() - startMillis;
   uint16_t segments = loop ? count : (count - 1);
+  // A looping animation wraps by whole cycles first. Durations are summed as stored: the 0 ms
+  // closing frame of a loop is the studio's loop point, not a 1 ms segment, so a cycle lasts
+  // exactly the studio's durationMs and keeps looping forever like the preview.
+  if (loop) {
+    unsigned long cycle = 0;
+    for (uint16_t i = 0; i < segments; i++) cycle += frames[i].durationMs;
+    if (cycle > 0 && elapsed >= cycle) {
+      unsigned long cycles = elapsed / cycle;
+      startMillis += cycles * cycle;
+      elapsed -= cycles * cycle;
+    }
+  }
   unsigned long acc = 0;
 
   for (uint16_t i = 0; i < segments; i++) {
     unsigned long dur = frames[i].durationMs;
-    if (dur == 0) dur = 1;
+    unsigned long span = dur == 0 ? 1 : dur;
     uint16_t next = (i + 1) % count;
     bool lastSegment = (i == segments - 1);
 
     if (elapsed <= acc + dur || lastSegment) {
-      float t = (float)(elapsed - acc) / (float)dur;
+      float t = (float)(elapsed - acc) / (float)span;
       if (t > 1) t = 1;
       if (t < 0) t = 0;
       bool finished = !loop && lastSegment && elapsed >= acc + dur;
@@ -2949,16 +3185,26 @@ inline bool eyesPlayAnimationPair(const EyeFrame framesLeft[], const EyeFrame fr
 
   unsigned long elapsed = millis() - startMillis;
   uint16_t segments = loop ? count : (count - 1);
+  // Loop wrap by whole cycles — see eyesPlayAnimation() above.
+  if (loop) {
+    unsigned long cycle = 0;
+    for (uint16_t i = 0; i < segments; i++) cycle += framesLeft[i].durationMs;
+    if (cycle > 0 && elapsed >= cycle) {
+      unsigned long cycles = elapsed / cycle;
+      startMillis += cycles * cycle;
+      elapsed -= cycles * cycle;
+    }
+  }
   unsigned long acc = 0;
 
   for (uint16_t i = 0; i < segments; i++) {
     unsigned long dur = framesLeft[i].durationMs;
-    if (dur == 0) dur = 1;
+    unsigned long span = dur == 0 ? 1 : dur;
     uint16_t next = (i + 1) % count;
     bool lastSegment = (i == segments - 1);
 
     if (elapsed <= acc + dur || lastSegment) {
-      float t = (float)(elapsed - acc) / (float)dur;
+      float t = (float)(elapsed - acc) / (float)span;
       if (t > 1) t = 1;
       if (t < 0) t = 0;
       bool finished = !loop && lastSegment && elapsed >= acc + dur;
@@ -2994,8 +3240,8 @@ inline bool eyesPlayAnimationPair(const EyeAnimation& anim, unsigned long& start
 // want to change what's showing — from a button press, sensor reading, timer, or serial
 // command — then call UpdateEyes() once per loop() to advance and get the pose to draw.
 // Switching expressions crossfades smoothly over EYES_BLEND_MS; switching (or restarting)
-// an animation cuts over immediately, since the animation's own first keyframe already
-// eases in on its own. Declared before "Drawing" below since eyesDrawEyePair() reads
+// an animation or combo blends from the pose on screen into the new clip's first frame over
+// EYES_TRANSITION_MS (see SetTransition()). Declared before "Drawing" below since eyesDrawEyePair() reads
 // eyesPlayer directly (to merge in whichever expression's/animation's own stickers are
 // currently active — see the Stickers comment further up) as an ordinary, non-dependent name.
 const unsigned long EYES_BLEND_MS = 250;
@@ -3061,14 +3307,129 @@ struct EyesPlayerState {
   const StickerDef* activeStickers = nullptr;
   uint8_t activeStickerCount = 0;
   unsigned long activeStickerElapsedMs = 0;
+  // Clip transition (see SetTransition() / eyesBeginClipTransition()). While transitioning, the
+  // new clip is held on its first frame and blended in from the snapshot below; its animStart/
+  // comboStart is set to the moment the blend ends, so its own clock starts from 0 right then.
+  bool hasLive = false;   // false until UpdateEyes() has shown something (nothing to blend from)
+  bool transitioning = false;
+  unsigned long transStart = 0;
+  // SetTransition() defaults, used by every switch that isn't a saved transition.
+  uint16_t transMs = EYES_TRANSITION_MS;
+  uint8_t transEasing = EYES_TRANSITION_EASING;
+  int8_t transBezier[4] = { EYES_TRANSITION_BEZIER_X1, EYES_TRANSITION_BEZIER_Y1, EYES_TRANSITION_BEZIER_X2, EYES_TRANSITION_BEZIER_Y2 };
+  // Settings of the blend in progress, captured when it starts (defaults or a saved transition).
+  const EyeTransition* pendingTransition = nullptr;   // set only inside PlayTransition()
+  const EyeTransition* activeTransition = nullptr;    // saved transition that started the current clip, if any
+  uint16_t activeTransMs = 0;
+  uint8_t activeTransEasing = EYE_EASE_LINEAR;
+  int8_t activeTransBezier[4] = { 0, 0, 100, 100 };
+  uint8_t activeStepMask = 0;   // EYE_TRANS_STEP_* groups that switch instead of blending
+  uint8_t activeSwitchAt = 50;  // 0-100: where switched groups, shapes and stickers flip
+  LiveEye transFromLeft = {};
+  LiveEye transFromRight = {};
+  EyeColorSet transFromColorsLeft = EYE_COLORS_LEFT;
+  EyeColorSet transFromColorsRight = EYE_COLORS_RIGHT;
+  const StickerDef* transFromStickers = nullptr;
+  uint8_t transFromStickerCount = 0;
+  unsigned long transFromStickerElapsedMs = 0;
 };
 static EyesPlayerState eyesPlayer;
 
+// Sets how clip switches blend: PlayAnimation(), Combo(), RestartCombo(), sequence advances and
+// every eyeController.h request start the new clip by blending from the pose currently on screen
+// (mid-movement included) into the new clip's first frame over \`ms\`, then play it normally.
+// 0 = hard cut. Defaults come from the studio's Transition Simulator (EYES_TRANSITION_MS/EASING).
+//   SetTransition(300);                    // 300 ms, keep the easing
+//   SetTransition(400, EYE_EASE_OUT);      // 400 ms ease-out
+//   SetTransition(0);                      // hard cuts
+inline void SetTransition(uint16_t ms, uint8_t easing = EYES_TRANSITION_EASING,
+                          int8_t bx1 = EYES_TRANSITION_BEZIER_X1, int8_t by1 = EYES_TRANSITION_BEZIER_Y1,
+                          int8_t bx2 = EYES_TRANSITION_BEZIER_X2, int8_t by2 = EYES_TRANSITION_BEZIER_Y2) {
+  eyesPlayer.transMs = ms;
+  eyesPlayer.transEasing = easing;
+  eyesPlayer.transBezier[0] = bx1;
+  eyesPlayer.transBezier[1] = by1;
+  eyesPlayer.transBezier[2] = bx2;
+  eyesPlayer.transBezier[3] = by2;
+}
+
+// True while a clip switch is still blending in.
+inline bool EyesTransitioning() {
+  return eyesPlayer.transitioning;
+}
+
+// Snapshots what is on screen as the blend source and returns the millis() value the new clip's
+// clock should start at (after the blend). Hard cut when nothing has been drawn yet or transMs is
+// 0. Mirrors TransitionPlayer.play() in the studio's engine/transitionPlayback.ts.
+inline unsigned long eyesBeginClipTransition() {
+  unsigned long now = millis();
+  // A saved transition (PlayTransition()) overrides the SetTransition() defaults for this switch.
+  const EyeTransition* saved = eyesPlayer.pendingTransition;
+  eyesPlayer.activeTransition = saved;
+  uint16_t ms = saved ? saved->durationMs : eyesPlayer.transMs;
+  if (!eyesPlayer.hasLive || ms == 0) {
+    eyesPlayer.transitioning = false;
+    return now;
+  }
+  eyesPlayer.activeTransMs = ms;
+  eyesPlayer.activeTransEasing = saved ? saved->easing : eyesPlayer.transEasing;
+  eyesPlayer.activeTransBezier[0] = saved ? saved->bezierX1 : eyesPlayer.transBezier[0];
+  eyesPlayer.activeTransBezier[1] = saved ? saved->bezierY1 : eyesPlayer.transBezier[1];
+  eyesPlayer.activeTransBezier[2] = saved ? saved->bezierX2 : eyesPlayer.transBezier[2];
+  eyesPlayer.activeTransBezier[3] = saved ? saved->bezierY2 : eyesPlayer.transBezier[3];
+  eyesPlayer.activeStepMask = saved ? saved->stepMask : 0;
+  eyesPlayer.activeSwitchAt = saved ? saved->switchAt : 50;
+  eyesPlayer.transFromLeft = eyesPlayer.live;
+  eyesPlayer.transFromRight = eyesPlayer.liveRight;
+  eyesPlayer.transFromColorsLeft = eyesPlayer.colorsLeft;
+  eyesPlayer.transFromColorsRight = eyesPlayer.colorsRight;
+  eyesPlayer.transFromStickers = eyesPlayer.activeStickers;
+  eyesPlayer.transFromStickerCount = eyesPlayer.activeStickerCount;
+  eyesPlayer.transFromStickerElapsedMs = eyesPlayer.activeStickerElapsedMs;
+  eyesPlayer.transStart = now;
+  eyesPlayer.transitioning = true;
+  return now + ms;
+}
+
+// Blends this frame's first-frame pose of the new clip with the snapshot. Numeric fields lerp with
+// the eased progress; shapes/visibility step at 0.5 (eyesLerpLive), and so does the sticker set.
+${transitionStepCode(exHlN)}
+
+inline void eyesApplyClipTransition(unsigned long now) {
+  float t = 1.0f;
+  if (eyesPlayer.activeTransMs > 0 && now > eyesPlayer.transStart)
+    t = (float)(now - eyesPlayer.transStart) / (float)eyesPlayer.activeTransMs;
+  else if (eyesPlayer.activeTransMs > 0)
+    t = 0.0f;
+  if (t >= 1.0f) { t = 1.0f; eyesPlayer.transitioning = false; }
+  float e = eyesEase(t, eyesPlayer.activeTransEasing, eyesPlayer.activeTransBezier[0], eyesPlayer.activeTransBezier[1],
+                     eyesPlayer.activeTransBezier[2], eyesPlayer.activeTransBezier[3]);
+  bool switched = e >= eyesPlayer.activeSwitchAt / 100.0f;
+  LiveEye targetLeft = eyesPlayer.live;
+  LiveEye targetRight = eyesPlayer.liveRight;
+  eyesPlayer.live = eyesLerpLive(eyesPlayer.transFromLeft, targetLeft, e);
+  eyesPlayer.liveRight = eyesLerpLive(eyesPlayer.transFromRight, targetRight, e);
+  eyesTransitionStep(eyesPlayer.live, switched ? targetLeft : eyesPlayer.transFromLeft, eyesPlayer.activeStepMask);
+  eyesTransitionStep(eyesPlayer.liveRight, switched ? targetRight : eyesPlayer.transFromRight, eyesPlayer.activeStepMask);
+  if (!(eyesPlayer.activeStepMask & EYE_TRANS_STEP_COLORS)) {
+    eyesPlayer.colorsLeft = eyesLerpColorSet(eyesPlayer.transFromColorsLeft, eyesPlayer.colorsLeft, e);
+    eyesPlayer.colorsRight = eyesLerpColorSet(eyesPlayer.transFromColorsRight, eyesPlayer.colorsRight, e);
+  } else if (!switched) {
+    eyesPlayer.colorsLeft = eyesPlayer.transFromColorsLeft;
+    eyesPlayer.colorsRight = eyesPlayer.transFromColorsRight;
+  }
+  if (!switched) {
+    eyesPlayer.activeStickers = eyesPlayer.transFromStickers;
+    eyesPlayer.activeStickerCount = eyesPlayer.transFromStickerCount;
+    eyesPlayer.activeStickerElapsedMs = eyesPlayer.transFromStickerElapsedMs;
+  }
+}
+
 inline void eyesStartAnimation(const EyeAnimation& animation) {
+  eyesPlayer.animStart = eyesBeginClipTransition();
   eyesPlayer.playingAnimation = true;
   eyesPlayer.animationFinished = false;   // new animation → not finished yet (see AnimationFinished())
   eyesPlayer.animation = animation;
-  eyesPlayer.animStart = millis();
   eyesPlayer.frameIndex = 0;
   eyesPlayer.blending = false;
   eyesPlayer.comboPlaying = false;
@@ -3082,9 +3443,7 @@ inline unsigned long eyesAnimationDurationMs(const EyeAnimation& animation) {
   unsigned long duration = 0;
   uint16_t segments = animation.loop ? animation.count : (animation.count - 1);
   for (uint16_t i = 0; i < segments; i++) {
-    unsigned long frameDuration = animation.frames[i].durationMs;
-    if (frameDuration == 0) frameDuration = 1;
-    duration += frameDuration;
+    duration += animation.frames[i].durationMs;   // as stored: a loop's 0 ms closing frame adds nothing
   }
   return duration == 0 ? 1 : duration;
 }
@@ -3110,6 +3469,7 @@ inline unsigned long eyesComboDurationMs(const AnimationCombo& combo) {
 }
 
 inline void StopCombo() {
+  if (eyesPlayer.combo != nullptr) eyesPlayer.transitioning = false;   // a combo still blending in has nothing left to blend into
   eyesPlayer.combo = nullptr;
   eyesPlayer.comboPlaying = false;
   eyesPlayer.comboPaused = false;
@@ -3128,27 +3488,34 @@ inline void eyesStartCombo(const AnimationCombo& combo, bool loop) {
   eyesPlayer.comboPlaying = true;
   eyesPlayer.comboPaused = false;
   eyesPlayer.comboFinished = false;
-  eyesPlayer.comboStart = millis();
+  eyesPlayer.comboStart = eyesBeginClipTransition();
   eyesPlayer.comboPausedElapsed = 0;
   eyesPlayer.comboLoop = loop;
   eyesPlayer.playingAnimation = false;
   eyesPlayer.animationFinished = false;   // starting a combo clears any stale animation-finished flag
 }
 
-// Plays an exported AnimationCombo. \`loop\` overrides the combo's own baked
-// AnimationCombo::loop for this playback — pass true to repeat it forever, or omit/pass false to
-// play it once and stop (ComboFinished() then reports true). Examples:
-//   Combo(<yourCombo>);          // Play once (default)
+// Plays an exported AnimationCombo. Without a loop argument it uses the Loop setting saved in the
+// studio (the Loop button on the Combinations timeline), so it plays exactly like the preview.
+// Pass true/false to override that for this call; a play-once combo holds its last frame and
+// ComboFinished() reports true. Examples:
+//   Combo(<yourCombo>);          // Loop as set in the studio
 //   Combo(<yourCombo>, true);    // Loop forever
-//   Combo(<yourCombo>, false);   // Play once (explicit)
-inline void Combo(const AnimationCombo& combo, bool loop = false) {
+//   Combo(<yourCombo>, false);   // Play once
+inline void Combo(const AnimationCombo& combo, bool loop) {
   eyesPlayer.sequencePlaying = false;        // cancel an animation sequence
   eyesPlayer.comboSequencePlaying = false;   // cancel a combo sequence — this single combo overrides it
   eyesStartCombo(combo, loop);
 }
 
+inline void Combo(const AnimationCombo& combo) {
+  Combo(combo, combo.loop);
+}
+
 inline void PauseCombo() {
   if (!eyesPlayer.comboPlaying || eyesPlayer.comboPaused || !eyesPlayer.combo) return;
+  // Pausing mid-blend pauses on the combo's first frame (its clock hasn't started yet).
+  if (eyesPlayer.transitioning) { eyesPlayer.transitioning = false; eyesPlayer.comboStart = millis(); }
   eyesPlayer.comboPausedElapsed = millis() - eyesPlayer.comboStart;
   eyesPlayer.comboPaused = true;
 }
@@ -3161,7 +3528,7 @@ inline void ResumeCombo() {
 
 inline void RestartCombo() {
   if (!eyesPlayer.combo) return;
-  eyesPlayer.comboStart = millis();
+  eyesPlayer.comboStart = eyesBeginClipTransition();   // restart blends back to the first frame
   eyesPlayer.comboPaused = false;
   eyesPlayer.comboFinished = false;
   eyesPlayer.comboPlaying = true;
@@ -3342,6 +3709,7 @@ inline void SetExpression(const EyeExpression& expression) {
   eyesPlayer.blendFrom = eyesPlayer.live;
   eyesPlayer.blendStart = millis();
   eyesPlayer.blending = true;
+  eyesPlayer.transitioning = false;   // the expression crossfade takes over from the current pose
   eyesPlayer.playingAnimation = false;
   StopCombo();
   eyesPlayer.expression = &expression;
@@ -3429,6 +3797,30 @@ inline void PlayMultipleCombos(std::initializer_list<const AnimationCombo*> comb
   eyesStartCombo(*eyesPlayer.comboSequence[0], false);
 }
 
+// Plays a saved transition (studio Transitions panel): starts its target animation or combination
+// from whatever is on screen, blending with the transition's own duration, easing and per-property
+// settings instead of the SetTransition() defaults. Never passes through Idle. See "Transitions"
+// further down for the Trans_* constants and playTransition("Name").
+//   PlayTransition(Trans_LookDownToLookLeft);
+// True while this transition's target is the clip on screen and still playing (or looping).
+inline bool eyesTransitionTargetActive(const EyeTransition& t) {
+  if (t.combo != nullptr) return eyesPlayer.combo == t.combo && ComboPlaying();
+  return t.animation != nullptr && eyesPlayer.playingAnimation && !eyesPlayer.animationFinished &&
+         eyesPlayer.animation.frames == t.animation->frames;
+}
+
+inline bool PlayTransition(const EyeTransition& transition) {
+  if (transition.animation == nullptr && transition.combo == nullptr) return false;
+  // Requesting the transition that is already running (blending in or playing its target) keeps it
+  // going instead of restarting it, so a sensor that asks again every loop() can't freeze the eyes.
+  if (eyesPlayer.activeTransition == &transition && eyesTransitionTargetActive(transition)) return true;
+  eyesPlayer.pendingTransition = &transition;
+  if (transition.combo != nullptr) Combo(*transition.combo, transition.loop);
+  else PlayAnimation(*transition.animation);
+  eyesPlayer.pendingTransition = nullptr;
+  return true;
+}
+
 // Advances whatever's currently playing and returns the pose to draw this frame. Call this
 // once per loop(), after at least one SetExpression()/PlayAnimation() call in setup() —
 // with neither ever called, there's nothing to show yet. See UpdateEyesRight() for the right
@@ -3442,16 +3834,25 @@ inline LiveEye UpdateEyes() {
   eyesPlayer.activeStickers = nullptr;
   eyesPlayer.activeStickerCount = 0;
   eyesPlayer.activeStickerElapsedMs = millis();
+  // A clip switch still blending in: the new clip is sampled at its first frame (elapsed 0) and
+  // eyesApplyClipTransition() below mixes it with the snapshot taken when the switch happened.
+  unsigned long now = millis();
+  // A blend whose time is up is over before this frame is sampled, so the clip's clock (which
+  // started at transStart + transMs) is exact no matter how frames happen to fall.
+  if (eyesPlayer.transitioning && now - eyesPlayer.transStart >= eyesPlayer.activeTransMs) eyesPlayer.transitioning = false;
+  bool transitioning = eyesPlayer.transitioning && !eyesPlayer.blending;
+  bool clipPose = false;
   if (eyesPlayer.blending) {
     float t = (float)(millis() - eyesPlayer.blendStart) / (float)EYES_BLEND_MS;
     if (t >= 1.0f) { t = 1.0f; eyesPlayer.blending = false; }
     LiveEye target = eyesLerpFrame(*eyesPlayer.expression->frame, *eyesPlayer.expression->frame, 0);
     eyesPlayer.live = eyesLerpLive(eyesPlayer.blendFrom, target, t);
     eyesPlayer.liveRight = eyesPlayer.live;
+    eyesPlayer.hasLive = true;
     eyesPlayer.activeStickers = eyesPlayer.expression->stickers;
     eyesPlayer.activeStickerCount = eyesPlayer.expression->stickerCount;
   } else if (ComboPlaying() && eyesPlayer.combo != nullptr) {
-    unsigned long elapsed = millis() - eyesPlayer.comboStart;
+    unsigned long elapsed = transitioning ? 0 : now - eyesPlayer.comboStart;
     const StickerDef* clipStickers = nullptr;
     uint8_t clipStickerCount = 0;
     unsigned long clipStickerMs = 0;
@@ -3459,6 +3860,8 @@ inline LiveEye UpdateEyes() {
     bool comboHasColor = false;
     bool stillPlaying = eyesPlayCombo(*eyesPlayer.combo, elapsed, eyesPlayer.comboLoop, eyesPlayer.live, eyesPlayer.liveRight,
                                       &clipStickers, &clipStickerCount, &clipStickerMs, &comboColor, &comboHasColor);
+    eyesPlayer.hasLive = true;
+    clipPose = true;
     eyesPlayer.activeStickers = clipStickers;
     eyesPlayer.activeStickerCount = clipStickerCount;
     eyesPlayer.activeStickerElapsedMs = clipStickerMs;
@@ -3480,7 +3883,7 @@ inline LiveEye UpdateEyes() {
     }
     if (!eyesPlayer.comboLoop) {
       unsigned long totalDuration = eyesComboDurationMs(*eyesPlayer.combo);
-      if (elapsed >= totalDuration) {
+      if (!transitioning && elapsed >= totalDuration) {
         eyesPlayer.comboFinished = true;
         eyesPlayer.comboPlaying = false;
       } else {
@@ -3488,7 +3891,7 @@ inline LiveEye UpdateEyes() {
       }
     } else {
       eyesPlayer.comboFinished = false;
-      eyesPlayer.comboPlaying = stillPlaying;
+      eyesPlayer.comboPlaying = stillPlaying || transitioning;
     }
     // Combo-sequence advance (PlayMultipleCombos): when the current combo just finished, start the
     // next one in the same frame (eyesStartCombo re-arms comboPlaying), so the queue is seamless and
@@ -3498,9 +3901,12 @@ inline LiveEye UpdateEyes() {
       eyesAdvanceComboSequence();
     }
   } else if (eyesPlayer.playingAnimation) {
-    unsigned long sequenceElapsed = millis() - eyesPlayer.animStart;
+    unsigned long sequenceElapsed = transitioning ? 0 : now - eyesPlayer.animStart;
+    unsigned long firstFrameStart = now;   // elapsed 0 while blending in (animStart is still ahead)
     EyeColorSet animColor;
-    bool stillPlaying = eyesPlayAnimationPair(eyesPlayer.animation, eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live, eyesPlayer.liveRight, &animColor);
+    bool stillPlaying = eyesPlayAnimationPair(eyesPlayer.animation, transitioning ? firstFrameStart : eyesPlayer.animStart, eyesPlayer.frameIndex, eyesPlayer.live, eyesPlayer.liveRight, &animColor);
+    eyesPlayer.hasLive = true;
+    clipPose = true;
     // Animate this animation's own per-keyframe palette (nullptr colour track -> keep the loaded
     // palette, preserving the pre-feature "inherit the expression's colours" behaviour).
     if (eyesPlayer.animation.colors != nullptr) {
@@ -3511,10 +3917,10 @@ inline LiveEye UpdateEyes() {
     // playback ends and it holds the final frame; a looping animation never finishes. Set before
     // the sequence-advance below so a mid-sequence hand-off (which restarts via eyesStartAnimation,
     // re-clearing this) never leaves a spurious "finished" for one frame.
-    eyesPlayer.animationFinished = !stillPlaying && !eyesPlayer.animation.loop;
-    bool animationFinished = eyesPlayer.animation.loop
+    eyesPlayer.animationFinished = !transitioning && !stillPlaying && !eyesPlayer.animation.loop;
+    bool animationFinished = !transitioning && (eyesPlayer.animation.loop
       ? sequenceElapsed >= eyesAnimationDurationMs(eyesPlayer.animation)
-      : !stillPlaying;
+      : !stillPlaying);
     // Draw this animation's stickers against its own playhead — looped within the animation's
     // duration for a looping animation (so a finite-end sticker clip reappears every cycle, like
     // the studio), or the raw elapsed for a one-shot (holds past its window at the end, like the
@@ -3534,8 +3940,13 @@ inline LiveEye UpdateEyes() {
   } else if (eyesPlayer.expression) {
     eyesPlayer.live = eyesLerpFrame(*eyesPlayer.expression->frame, *eyesPlayer.expression->frame, 0);
     eyesPlayer.liveRight = eyesPlayer.live;
+    eyesPlayer.hasLive = true;
     eyesPlayer.activeStickers = eyesPlayer.expression->stickers;
     eyesPlayer.activeStickerCount = eyesPlayer.expression->stickerCount;
+  }
+  if (transitioning) {
+    if (clipPose) eyesApplyClipTransition(now);
+    else eyesPlayer.transitioning = false;   // the clip was stopped mid-blend: nothing to blend into
   }
   return eyesPlayer.live;
 }
@@ -4183,10 +4594,10 @@ function exportQuickReference(project: Project): string {
   lines.push('//')
   if ((project.animationCombos ?? []).length > 0) {
     lines.push('// Animation Combinations:')
-    lines.push('//   Combo(<yourCombo>);          // Play once (default)')
+    lines.push('//   Combo(<yourCombo>);          // Loop as set in the studio')
     lines.push('//   Combo(<yourCombo>, true);    // Loop forever')
-    lines.push('//   Combo(<yourCombo>, false);   // Play once (explicit)')
-    for (const combo of project.animationCombos) lines.push(`//   Combo(${comboIdents.get(combo.id)!});`)
+    lines.push('//   Combo(<yourCombo>, false);   // Play once')
+    for (const combo of project.animationCombos) lines.push(`//   Combo(${comboIdents.get(combo.id)!});   // ${combo.loop ? 'loops' : 'plays once'}`)
     // Play several combos back-to-back (each starts only after the previous ComboFinished()) — pass
     // combo POINTERS (&Name); every combo plays once, and with loop==true the whole list repeats.
     // Lists ALL of this project's combos (up to the 32-per-call queue limit) so it's ready to copy.
@@ -4200,6 +4611,18 @@ function exportQuickReference(project: Project): string {
     }
   } else {
     lines.push('// Animation Combinations: (this project has none yet)')
+  }
+  lines.push('//')
+  // Identifiers come from ALL transitions (same map exportTransitions() builds); only exportable
+  // ones are listed, so the reference never names a Trans_X constant that wasn't emitted.
+  const allTransitions = project.transitions ?? []
+  const transitions = allTransitions.filter((t) => transitionTarget(project, t))
+  if (transitions.length > 0) {
+    const transIdents = buildUniqueIdents(allTransitions)
+    lines.push('// Transitions (start the target from whatever is on screen):')
+    for (const t of transitions) lines.push(commentText(`//   playTransition(${cStringLiteral(t.name)});   // or PlayTransition(Trans_${transIdents.get(t.id)!});`))
+  } else {
+    lines.push('// Transitions: (this project has none yet)')
   }
   lines.push('//')
   if (singleExpressions.length > 0) {
@@ -4543,7 +4966,7 @@ export function generateArduinoSketch(
   if (wakeUp) {
     const finishedFn = wakeUp.kind === 'combo' ? 'ComboFinished()' : 'AnimationFinished()'
     const wakeCall = wakeUp.kind === 'combo'
-      ? `Combo(${comboIdents.get(wakeUp.id)!});`
+      ? `Combo(${comboIdents.get(wakeUp.id)!}, false);`
       : `PlayAnimation(Anim_${animIdents.get(wakeUp.id)!});`
     const wakeName = wakeUp.kind === 'combo'
       ? (project.animationCombos ?? []).find((c) => c.id === wakeUp.id)?.name
@@ -4892,6 +5315,17 @@ export function generateCppHeader(projectInput: Project, options: GenerateCppOpt
  * currently-active Expression's own stickers, and the currently-playing Animation's own
  * stickers, merged automatically — see "Stickers" further down for exactly what exports.
  *
+ * *** CLIP TRANSITIONS ***
+ * Switching clips (PlayAnimation(), Combo(), RestartCombo(), PlayAnimationSequence()/
+ * PlayMultipleCombos() advances, eyeController.h requests) does not cut: the eyes blend from exactly
+ * what is on screen, mid-movement included, into the new clip's first frame over EYES_TRANSITION_MS
+ * (eased with EYES_TRANSITION_EASING), then the clip plays from its start. The studio's Transition
+ * Simulator runs this same logic. SetTransition(ms[, easing]) changes it at runtime and
+ * SetTransition(0) restores hard cuts. A switch that arrives mid-blend (e.g. an accelerometer
+ * firing again) starts a new blend from the half-blended pose, so nothing jumps.
+ * Saved transitions (studio Transitions panel) carry their own duration, easing and per-property
+ * settings: playTransition("Name") or PlayTransition(Trans_Name) — see "Transitions" below.
+ *
  * *** NOT EXPORTED: Idle mode / Personality ***
  * The studio's "Idle" playback mode runs a procedural behavior engine (gaze drift, blink
  * timing, micro-movement, breathing) driven by the 9 Personality sliders (Blink Frequency,
@@ -5008,7 +5442,7 @@ ${exportColors(project)}
 
 // ---- Timing -------------------------------------------------------------
 
-${exportTiming(project.display)}
+${exportTiming(project)}
 
 // ---- Pupil Shapes -------------------------------------------------------
 
@@ -5070,14 +5504,34 @@ struct AnimationComboClip {
 
 // A reusable sequence of animation references. The clips are ordered and timed by the
 // exported combo timeline; the runtime player walks that list without copying animation
-// frames. \`loop\` mirrors the studio's own "Loop preview" toggle at export time, but the
-// runtime player does not read it directly — Combo()'s own \`loop\` argument is what actually
-// controls playback (see Combo()'s doc comment), so the same exported combo can be played once
-// or repeated from the call site without re-exporting.
+// frames. \`loop\` is the combination's Loop setting from the studio (Loop button on the
+// Combinations timeline): Combo(x) and EyeControllerRequestCombo(x, priority) play with it, so
+// the device loops exactly when the preview does; Combo(x, true/false) overrides it per call.
 struct AnimationCombo {
   const AnimationComboClip* clips;
   uint8_t count;
   bool loop;
+};
+
+// A saved transition from the studio's Transitions panel — see "Transitions" further down,
+// PlayTransition() and playTransition("Name"). Exactly one of animation/combo is set (the target).
+// stepMask flags property groups that switch at switchAt% of the eased blend instead of blending.
+enum EyeTransitionStep : uint8_t {
+${TRANSITION_PROPERTY_GROUPS.map((g) => `  ${g.cppFlag} = ${g.bit},`).join('\n')}
+  EYE_TRANS_STEP_COLORS = ${TRANSITION_COLORS_BIT}
+};
+
+struct EyeTransition {
+  const char* name;                // studio name, e.g. "Look Down To Look Left"
+  const char* ident;               // C++ identifier, e.g. "LookDownToLookLeft"
+  const EyeAnimation* animation;   // target animation, or nullptr
+  const AnimationCombo* combo;     // target combination, or nullptr
+  bool loop;                       // Combo(combo, loop)
+  uint16_t durationMs;
+  uint8_t easing;                  // EyeEasing
+  int8_t bezierX1, bezierY1, bezierX2, bezierY2;  // only used with EYE_EASE_BEZIER, scaled 0-100
+  uint8_t stepMask;                // EYE_TRANS_STEP_* groups that switch instead of blending
+  uint8_t switchAt;                // 0-100
 };
 
 // One static expression, bundled the same way EyeAnimation is: SetExpression(Expr_X) switches
@@ -5102,6 +5556,8 @@ ${playerCode(exHlN, background.code)}
 ${project.animations.map((a) => exportAnimation(a, animIdents.get(a.id)!, project.customPupilShapes, project.customEyeShapes, stickersExport.assetsById, stickersExport.rasterIndexByAssetId, project.colors, project.display.backgroundColor, exHlN)).join('\n\n')}
 
 ${exportAnimationCombos(project)}
+
+${exportTransitions(project)}
 
 // ---- Expressions (static poses) -------------------------------------------
 ${

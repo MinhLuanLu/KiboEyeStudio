@@ -668,6 +668,55 @@ export interface AnimationCombo {
   clips: AnimationComboClip[]
 }
 
+export const EASING_TYPES: EasingType[] = ['linear', 'easeIn', 'easeOut', 'easeInOut', 'bounce', 'elastic', 'bezier']
+
+/** An animation or combination a saved transition points at. `loop` is Combo(x, loop) and is only
+ * meaningful for kind 'combo'. */
+export interface TransitionClipRef {
+  kind: 'animation' | 'combo'
+  id: string
+  loop: boolean
+}
+
+/** Which property groups blend during a transition. An unchecked group switches from the source
+ * to the target at `switchAtPct` of the eased progress instead of blending; non-numeric fields
+ * (shape types, visibility) and the sticker set always switch there. Defaults (everything blends,
+ * switch at 50%) reproduce the global EYES_TRANSITION_MS behaviour exactly. */
+export interface TransitionInterpolation {
+  position: boolean
+  shape: boolean
+  pupil: boolean
+  eyelids: boolean
+  colors: boolean
+  switchAtPct: number
+}
+
+export const DEFAULT_TRANSITION_INTERPOLATION: TransitionInterpolation = {
+  position: true,
+  shape: true,
+  pupil: true,
+  eyelids: true,
+  colors: true,
+  switchAtPct: 50
+}
+
+/** A reusable, named clip switch (Transitions panel). On the device, playTransition(name) starts
+ * `target` from whatever is on screen using this transition's own duration/easing/interpolation.
+ * `source` and the preview* fields only drive the studio's Transition Simulator and are never
+ * exported. */
+export interface ClipTransition {
+  id: string
+  name: string
+  source: TransitionClipRef
+  target: TransitionClipRef
+  durationMs: number
+  easing: EasingType
+  bezier: [number, number, number, number]
+  interpolation: TransitionInterpolation
+  previewSwitchAfterMs: number
+  previewHoldMs: number
+}
+
 /** Which eye(s) the Controls/Colors panels currently write to. Editor/session state rather
  * than project data — it lives outside `Project` (the *result* of edits made under
  * 'left'/'right' is what gets saved, via the params/colors override fields below), but it
@@ -721,6 +770,13 @@ export interface GlobalTiming {
   animationSpeed: number
   blinkSpeed: number
   breathingAmount: number
+  /** Clip-to-clip transition: how long (ms) the eyes blend from whatever is on screen into the
+   * first frame of a newly started animation/combination (PlayAnimation()/Combo()/sequences on the
+   * device). 0 = hard cut, the pre-feature behaviour. Exported as EYES_TRANSITION_MS and previewed
+   * by the Transition Simulator (see engine/transitionPlayback.ts). */
+  clipTransitionMs: number
+  clipTransitionEasing: EasingType
+  clipTransitionBezier: [number, number, number, number]
 }
 
 // ---- Visual Reference (shared style inheritance) ---------------------------------------
@@ -1122,6 +1178,8 @@ export interface Project {
    * projects; animations reference these by `Animation.folderId`. */
   animationFolders: AnimationFolder[]
   animationCombos: AnimationCombo[]
+  /** Saved clip transitions (Transitions panel). Absent in older files; normalizeProject backfills []. */
+  transitions: ClipTransition[]
   expressions: Expression[]
   /** Expressions-panel folder tree (editor organization only — see ExpressionFolder). */
   expressionFolders: ExpressionFolder[]
@@ -1334,7 +1392,10 @@ export const DEFAULT_PERSONALITY: Personality = {
 export const DEFAULT_TIMING: GlobalTiming = {
   animationSpeed: 100,
   blinkSpeed: 100,
-  breathingAmount: 20
+  breathingAmount: 20,
+  clipTransitionMs: 250,
+  clipTransitionEasing: 'easeInOut',
+  clipTransitionBezier: [0.42, 0, 0.58, 1]
 }
 
 // pupilShape/pupilCustomShapeId/eyeShape/eyeCustomShapeId are deliberately excluded — they're

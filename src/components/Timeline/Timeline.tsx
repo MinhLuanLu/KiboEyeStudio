@@ -156,7 +156,8 @@ export function Timeline() {
   const combos = useStore((s) => s.project.animationCombos)
   const animations = useStore((s) => s.project.animations)
   const comboPreviewTimeMs = useStore((s) => s.comboPreviewTimeMs)
-  const comboPreviewLoop = useStore((s) => s.comboPreviewLoop)
+  const selectedComboLoop = useStore((s) => s.project.animationCombos.find((c) => c.id === s.selectedComboId)?.loop ?? false)
+  const setAnimationComboLoop = useStore((s) => s.setAnimationComboLoop)
 
   const checkpoint = useStore((s) => s.checkpoint)
   const seek = useStore((s) => s.seek)
@@ -189,7 +190,6 @@ export function Timeline() {
   const addKeyframeAt = useStore((s) => s.addKeyframeAt)
   const addStickerToTrack = useStore((s) => s.addStickerToTrack)
   const setComboPreviewTimeMs = useStore((s) => s.setComboPreviewTimeMs)
-  const setComboPreviewLoop = useStore((s) => s.setComboPreviewLoop)
   const selectAnimationComboClip = useStore((s) => s.selectAnimationComboClip)
   const addAnimationComboClip = useStore((s) => s.addAnimationComboClip)
 
@@ -733,8 +733,15 @@ export function Timeline() {
         onJumpNextKeyframe={() => jumpToKeyframe('next')}
         comboAnimations={comboMode ? animations : undefined}
         onAddComboClip={comboMode ? handleAddComboClip : undefined}
-        comboLoop={comboMode ? comboPreviewLoop : undefined}
-        onToggleComboLoop={comboMode ? () => setComboPreviewLoop(!comboPreviewLoop) : undefined}
+        comboLoop={comboMode ? selectedComboLoop : undefined}
+        onToggleComboLoop={
+          comboMode && selectedComboId
+            ? () => {
+                checkpoint()
+                setAnimationComboLoop(selectedComboId, !selectedComboLoop)
+              }
+            : undefined
+        }
       />
 
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto studio-panel">

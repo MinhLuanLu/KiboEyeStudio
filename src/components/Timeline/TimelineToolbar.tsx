@@ -165,7 +165,7 @@ export function TimelineToolbar({
           <button
             className={`studio-btn px-2 py-1 ${comboLoop ? 'text-studio-accent border-studio-accent' : ''}`}
             onClick={onToggleComboLoop}
-            title="Loop this Combination's preview playback"
+            title="Loop this Combination — saved with the project and exported, so Combo(x) loops on the ESP32 exactly like this preview"
           >
             Loop
           </button>

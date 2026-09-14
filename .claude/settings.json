@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -i -E \"^tsx|^tsc$|electron-vite\")",
+      "Bash(npx tsx *)",
+      "Bash(echo \"grep_exit=$? \\(1 = none of those lines changed\\)\")",
+      "Bash(npx electron-vite *)",
+      "Bash(git check-ignore *)",
+      "Bash(grep -v \"^eyes.h:.*//\")"
+    ]
+  }
+}

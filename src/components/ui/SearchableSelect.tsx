@@ -156,7 +156,7 @@ export function SearchableSelect({
                     <button
                       key={item.id}
                       type="button"
-                      className={`px-2 py-1 rounded text-left text-sm truncate text-studio-text hover:bg-studio-panel2 ${
+                      className={`shrink-0 px-2 py-1 rounded text-left text-sm truncate text-studio-text hover:bg-studio-panel2 ${
                         item.id === value ? 'bg-studio-accent/20' : ''
                       }`}
                       onClick={() => pick(item.id)}

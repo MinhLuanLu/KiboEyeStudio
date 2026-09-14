@@ -158,7 +158,7 @@ export function PreviewCanvas() {
           if (state.comboPreviewPlaying && timeline.total > 0) {
             t += dt * (state.project.timing.animationSpeed / 100)
             if (t >= timeline.total) {
-              if (state.comboPreviewLoop) t %= timeline.total
+              if (combo.loop) t %= timeline.total
               else {
                 t = timeline.total
                 state.setComboPreviewPlaying(false)

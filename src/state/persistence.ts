@@ -34,6 +34,8 @@ import {
   DEFAULT_PERSONALITY,
   DEFAULT_STICKER_ANIM,
   DEFAULT_TIMING,
+  DEFAULT_TRANSITION_INTERPOLATION,
+  EASING_TYPES,
   FIXED_TRACK_KINDS,
   MAX_EXTRA_HIGHLIGHTS,
   PROJECT_FILE_VERSION,
@@ -959,6 +961,45 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
       clips
     }
   })
+  // Saved transitions (Transitions panel). Older projects have none; malformed entries are
+  // repaired field by field. A reference to a deleted animation/combination is kept (the panel
+  // flags it and the C++ export skips it) rather than silently dropping the user's transition.
+  const rawTransitions = (raw as unknown as Record<string, unknown>).transitions
+  const usedTransitionIds = new Set<string>()
+  const finiteOr = (v: unknown, fallback: number, lo: number, hi: number) =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : fallback
+  const normalizeTransitionRef = (r: unknown): import('@/types').TransitionClipRef => {
+    const o = (r && typeof r === 'object' ? r : {}) as Record<string, unknown>
+    const kind = o.kind === 'combo' ? 'combo' : 'animation'
+    return { kind, id: typeof o.id === 'string' ? o.id : '', loop: kind === 'combo' && Boolean(o.loop) }
+  }
+  const transitions: import('@/types').ClipTransition[] = (Array.isArray(rawTransitions) ? rawTransitions : []).map((tRaw, i) => {
+    const t = (tRaw && typeof tRaw === 'object' ? tRaw : {}) as Record<string, unknown>
+    let id = typeof t.id === 'string' && t.id ? t.id : nanoid(10)
+    if (usedTransitionIds.has(id)) id = nanoid(10)
+    usedTransitionIds.add(id)
+    const interp = (t.interpolation && typeof t.interpolation === 'object' ? t.interpolation : {}) as Record<string, unknown>
+    const bezier = Array.isArray(t.bezier) && t.bezier.length === 4 && t.bezier.every((v) => typeof v === 'number' && Number.isFinite(v))
+    return {
+      id,
+      name: typeof t.name === 'string' && t.name.trim() ? t.name : `Transition ${i + 1}`,
+      source: normalizeTransitionRef(t.source),
+      target: normalizeTransitionRef(t.target),
+      durationMs: Math.round(finiteOr(t.durationMs, DEFAULT_TIMING.clipTransitionMs, 0, 65535)),
+      easing: EASING_TYPES.includes(t.easing as EasingType) ? (t.easing as EasingType) : 'easeInOut',
+      bezier: bezier ? ([...(t.bezier as number[])] as [number, number, number, number]) : [0.42, 0, 0.58, 1],
+      interpolation: {
+        position: interp.position !== false,
+        shape: interp.shape !== false,
+        pupil: interp.pupil !== false,
+        eyelids: interp.eyelids !== false,
+        colors: interp.colors !== false,
+        switchAtPct: Math.round(finiteOr(interp.switchAtPct, DEFAULT_TRANSITION_INTERPOLATION.switchAtPct, 0, 100))
+      },
+      previewSwitchAfterMs: Math.round(finiteOr(t.previewSwitchAfterMs, 1000, 0, 60000)),
+      previewHoldMs: Math.round(finiteOr(t.previewHoldMs, 1500, 0, 60000))
+    }
+  })
   const expressions: Expression[] = (raw.expressions ?? []).map((e, exprIndex) => {
     const params = normalizeEyeParams(e.params)
     const exprColors = { ...DEFAULT_EYE_COLORS, ...(e.colors ?? {}) }
@@ -1031,6 +1072,7 @@ function normalizeProject(raw: Partial<Project> & Record<string, unknown>): Proj
     animations,
     animationFolders,
     animationCombos,
+    transitions,
     expressions,
     expressionFolders,
     visualReference,

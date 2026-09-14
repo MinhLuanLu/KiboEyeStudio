@@ -14,7 +14,6 @@ export function AnimationCombinationPanel() {
   const combos = useStore((s) => s.project.animationCombos)
   const selectedComboId = useStore((s) => s.selectedComboId)
   const selectedClipId = useStore((s) => s.selectedComboClipId)
-  const loopPreview = useStore((s) => s.comboPreviewLoop)
   const playing = useStore((s) => s.comboPreviewPlaying)
   const previewTimeMs = useStore((s) => s.comboPreviewTimeMs)
 
@@ -22,7 +21,7 @@ export function AnimationCombinationPanel() {
   const selectAnimationComboClip = useStore((s) => s.selectAnimationComboClip)
   const setComboPreviewPlaying = useStore((s) => s.setComboPreviewPlaying)
   const setComboPreviewTimeMs = useStore((s) => s.setComboPreviewTimeMs)
-  const setComboPreviewLoop = useStore((s) => s.setComboPreviewLoop)
+  const setAnimationComboLoop = useStore((s) => s.setAnimationComboLoop)
 
   const addAnimationCombo = useStore((s) => s.addAnimationCombo)
   const duplicateAnimationCombo = useStore((s) => s.duplicateAnimationCombo)
@@ -32,6 +31,8 @@ export function AnimationCombinationPanel() {
   const checkpoint = useStore((s) => s.checkpoint)
 
   const selectedCombo = combos.find((combo) => combo.id === selectedComboId) ?? combos[0] ?? null
+  // The combination's saved Loop setting — the same flag Combo(x) plays with on the device.
+  const loopPreview = selectedCombo?.loop ?? false
 
   // Duplicate-name detection — flags combos whose name collides (would share an exported identifier).
   const nameCounts = combos.reduce((m, c) => m.set(normalizeName(c.name), (m.get(normalizeName(c.name)) ?? 0) + 1), new Map<string, number>())
@@ -301,9 +302,13 @@ export function AnimationCombinationPanel() {
         </button>
         <button
           className={`${tbtn} ${loopPreview ? 'border-studio-accent text-studio-accent' : ''}`}
-          title="Loop preview"
+          title="Loop this combination — saved and exported, so Combo(x) loops on the ESP32 exactly like this preview"
           disabled={!selectedCombo}
-          onClick={() => setComboPreviewLoop(!loopPreview)}
+          onClick={() => {
+            if (!selectedCombo) return
+            checkpoint()
+            setAnimationComboLoop(selectedCombo.id, !loopPreview)
+          }}
         >
           ↻
         </button>

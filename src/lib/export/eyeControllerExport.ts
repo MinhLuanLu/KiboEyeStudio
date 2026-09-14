@@ -44,7 +44,7 @@ export function generateEyeControllerHeader(): string {
  *   // Resting idle: lowest priority, loops forever (a loop never blocks anything).
  *   EyeControllerRequestCombo(Idle, EYE_PRIORITY_IDLE, true);
  *
- *   // Tilt look-tracking: medium priority, plays once. Re-request whenever the target moves.
+ *   // Tilt look-tracking: medium priority, loops if Loop is on for LookUp in the studio.
  *   if (tiltChanged)
  *     EyeControllerRequestCombo(LookUp, EYE_PRIORITY_SENSOR);
  *
@@ -58,6 +58,7 @@ export function generateEyeControllerHeader(): string {
  *   one combo                     EyeControllerRequestCombo(LookUp, EYE_PRIORITY_SENSOR, true);
  *   a list of combos              EyeControllerRequestCombos({ &Idle, &IdleNormal }, EYE_PRIORITY_IDLE, true);
  *   one animation                 EyeControllerRequestAnimation(Anim_IdleLookUp, EYE_PRIORITY_SENSOR);
+ *   a saved transition            EyeControllerRequestTransitionByName("Look Down To Look Left", EYE_PRIORITY_SENSOR);
  *   animation, THEN combos        EyeControllerRequestAnimationThenCombos(Anim_LookUpToIdle, EYE_PRIORITY_SENSOR,
  *                                     { &Idle, &IdleNormal }, EYE_PRIORITY_IDLE, true);
  *
@@ -160,8 +161,10 @@ export function generateEyeControllerHeader(): string {
  *   waitToFinish protects the clip it is set ON, not the one before it. If the clip on screen was
  *   requested without it, the next request still cuts it off immediately.
  *
- *   Every switch is a hard cut: eyes.h does not crossfade between clips started with
- *   PlayAnimation() / Combo(). waitToFinish makes the cut land on a clean pose; it does not blend.
+ *   Every switch blends: eyes.h eases from the pose on screen into the new clip's first frame over
+ *   EYES_TRANSITION_MS (set in the studio's Transition Simulator, or SetTransition() at runtime;
+ *   0 = hard cut). A blending one-shot counts as playing, so it is protected like the clip itself.
+ *   waitToFinish still decides WHEN the switch happens; the transition decides how it looks.
  *
  * -- Adding a new sensor (three lines) ----------------------------------------------------------
  *
@@ -236,6 +239,7 @@ bool EyeControllerIsPlaying()
     if (eyesPlayer.playingAnimation)
     {
         if (eyesPlayer.animation.loop) return false;  // looping animation = resting state
+        if (EyesTransitioning()) return true;          // still blending in; its clock starts after
         return (millis() - eyesPlayer.animStart) < eyesAnimationDurationMs(eyesPlayer.animation);
     }
     return false;
@@ -249,6 +253,7 @@ bool EyeControllerIsPlaying()
 struct EyeControllerJob
 {
     const EyeAnimation*   animation = nullptr;
+    const EyeTransition*  transition = nullptr;  // a saved transition (plays instead of animation/combos)
     const AnimationCombo* combos[EYES_MAX_ANIMATION_SEQUENCE] = {};
     uint8_t     comboCount   = 0;
     bool        singleCombo  = false;  // true -> Combo(), false -> combo list
@@ -322,8 +327,9 @@ void eyeControllerCyclePosition(unsigned long& start, unsigned long& cycle)
         }
         else if (eyesPlayer.comboLoop)
         {
+            // While blending in, comboStart is still in the future: the first cycle hasn't begun
             unsigned long d = eyesComboDurationMs(*eyesPlayer.combo);
-            if (d > 0) cycle = (millis() - eyesPlayer.comboStart) / d;
+            if (d > 0 && !EyesTransitioning()) cycle = (millis() - eyesPlayer.comboStart) / d;
         }
         return;
     }
@@ -332,7 +338,7 @@ void eyeControllerCyclePosition(unsigned long& start, unsigned long& cycle)
     {
         start = eyesPlayer.animStart;
         unsigned long d = eyesAnimationDurationMs(eyesPlayer.animation);
-        if (d > 0) cycle = (millis() - eyesPlayer.animStart) / d;
+        if (d > 0 && !EyesTransitioning()) cycle = (millis() - eyesPlayer.animStart) / d;
     }
 }
 
@@ -358,6 +364,15 @@ void eyeControllerStart(const EyeControllerJob& job)
     eyeControllerNextPending = false;
 
     eyeControllerWait = job.wait;
+
+    if (job.transition != nullptr)
+    {
+        PlayTransition(*job.transition);
+        eyeControllerActive = job.priority;
+        eyeControllerLocked = job.lock;
+        eyeControllerCycleBoundary();
+        return;
+    }
 
     if (job.animation != nullptr)
     {
@@ -566,11 +581,11 @@ void eyeControllerSetCombos(EyeControllerJob& job, std::initializer_list<const A
 // -----------------------------------------------------------------------------------------------
 // Plays ONE combo.
 //
-//   EyeControllerRequestCombo(LookUp, EYE_PRIORITY_SENSOR);                     // once
+//   EyeControllerRequestCombo(LookUp, EYE_PRIORITY_SENSOR);                     // Loop as set in the studio
 //   EyeControllerRequestCombo(LookUp, EYE_PRIORITY_SENSOR, true);               // loop forever
 //   EyeControllerRequestCombo(Dizzy,  EYE_PRIORITY_REACTION, false, true);      // once, locked
 //   EyeControllerRequestCombo(Shy,    EYE_PRIORITY_SENSOR, false, false, true); // once, wait to finish
-bool EyeControllerRequestCombo(const AnimationCombo& c, EyePriority p, bool loop = false, bool lock = false, bool waitToFinish = false)
+bool EyeControllerRequestCombo(const AnimationCombo& c, EyePriority p, bool loop, bool lock = false, bool waitToFinish = false)
 {
     EyeControllerJob job;
     job.combos[0]   = &c;
@@ -668,6 +683,59 @@ bool EyeControllerRequestAnimationThenCombos(
     job.nextLock     = nextLock;
     job.wait         = waitToFinish;
     return eyeControllerSubmit(job);
+}
+
+
+// -----------------------------------------------------------------------------------------------
+// EyeControllerRequestTransition(transition, priority, lock, waitToFinish)
+// EyeControllerRequestTransitionByName("Name", priority, lock, waitToFinish)
+// -----------------------------------------------------------------------------------------------
+// Plays a saved transition (studio Transitions panel): its target animation or combination starts
+// from whatever is on screen with the transition's own blend. Whether it loops is saved with the
+// transition. ByName returns false for an unknown name.
+//
+//   EyeControllerRequestTransitionByName("Look Down To Look Left", EYE_PRIORITY_SENSOR);
+//   EyeControllerRequestTransition(Trans_LookDownToLookLeft, EYE_PRIORITY_SENSOR, false, true);  // wait to finish
+bool EyeControllerRequestTransition(const EyeTransition& t, EyePriority p, bool lock = false, bool waitToFinish = false)
+{
+    EyeControllerJob job;
+    job.transition = &t;
+    job.loop       = t.loop;
+    job.priority   = p;
+    job.lock       = lock;
+    job.wait       = waitToFinish;
+    return eyeControllerSubmit(job);
+}
+
+bool EyeControllerRequestTransitionByName(const char* name, EyePriority p, bool lock = false, bool waitToFinish = false)
+{
+    const EyeTransition* t = FindTransition(name);
+    return t != nullptr && EyeControllerRequestTransition(*t, p, lock, waitToFinish);
+}
+
+// Shorthands with a priority — the same as the two functions above, so a sensor handler can write:
+//   PlayTransition(Trans_IdleToLookUp, EYE_PRIORITY_SENSOR);
+//   playTransition("Idle To Look Up", EYE_PRIORITY_SENSOR);
+bool PlayTransition(const EyeTransition& t, EyePriority p, bool lock = false, bool waitToFinish = false)
+{
+    return EyeControllerRequestTransition(t, p, lock, waitToFinish);
+}
+
+bool PlayTransition(const char* name, EyePriority p, bool lock = false, bool waitToFinish = false)
+{
+    return EyeControllerRequestTransitionByName(name, p, lock, waitToFinish);
+}
+
+bool playTransition(const char* name, EyePriority p, bool lock = false, bool waitToFinish = false)
+{
+    return EyeControllerRequestTransitionByName(name, p, lock, waitToFinish);
+}
+
+// EyeControllerRequestCombo(combo, priority) with no loop argument uses the Loop setting saved in the
+// studio for that combination, exactly like Combo(combo).
+bool EyeControllerRequestCombo(const AnimationCombo& c, EyePriority p)
+{
+    return EyeControllerRequestCombo(c, p, c.loop);
 }
 
 

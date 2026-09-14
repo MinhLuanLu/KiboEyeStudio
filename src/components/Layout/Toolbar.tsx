@@ -1,5 +1,6 @@
 import { useStore } from '@/state/store'
 import { PlaybackControls } from '@/components/Timeline/PlaybackControls'
+import { TransitionSimulatorPanel } from '@/components/Transition/TransitionSimulatorPanel'
 import { SaveStatusLabel } from './SaveStatusLabel'
 
 // Eye Studio's own top bar — mounted exclusively inside EyeStudioWorkspace.tsx, not shared with
@@ -30,11 +31,22 @@ export function Toolbar({ actions }: { actions: ToolbarActions }) {
   const setExportDialogOpen = useStore((s) => s.setExportDialogOpen)
   const setGuideOpen = useStore((s) => s.setGuideOpen)
 
+  const transitionsOpen = useStore((s) => s.transitionSimulatorOpen)
+  const setTransitionsOpen = useStore((s) => s.setTransitionSimulatorOpen)
+
   return (
-    <div className="flex items-center gap-3 px-3 py-2 border-b border-studio-border bg-studio-panel">
+    <div className="relative flex items-center gap-3 px-3 py-2 border-b border-studio-border bg-studio-panel">
       <button className="studio-btn" onClick={actions.goHome} title="Return to the Home Screen">
         🏠 Home
       </button>
+      <button
+        className={`studio-btn ${transitionsOpen ? 'text-studio-accent border-studio-accent' : ''}`}
+        onClick={() => setTransitionsOpen(!transitionsOpen)}
+        title="Transition Simulator — preview how the ESP32 blends from one animation/combination into another"
+      >
+        ⇄ Transition Simulator
+      </button>
+      {transitionsOpen && <TransitionSimulatorPanel onClose={() => setTransitionsOpen(false)} />}
 
       <span className="font-semibold text-sm tracking-wide text-studio-accent">Expressions Design</span>
 

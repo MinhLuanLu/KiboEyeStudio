@@ -280,6 +280,14 @@ export function sampleAnimationColors(anim: Animation, timeMs: number, base: Eye
   return lerpColors(at(last), at(kfs[0]), applyEasing(localT, last.easing, last.customBezier))
 }
 
+/** Whether the C++ export bakes a per-frame colour track for this animation (non-null
+ * EyeAnimation::colors). When it doesn't, the firmware keeps whatever palette is already loaded
+ * while the animation plays standalone. Shared by bakeAnimationColors() in cppExport.ts and the
+ * Transition Simulator so the two can never disagree about which animations change colour. */
+export function animationHasColorTrack(anim: Animation, base: EyeColors): boolean {
+  return anim.keyframes.some((k) => k.colors) || animationColorBase(anim, base).pupil !== base.pupil
+}
+
 /** Total playable duration of an animation in ms. Back-compat thin wrapper — `durationMs` is
  * now authoritative stored data (kept in sync by every store action that edits the pose
  * track's timing), not recomputed from keyframes. */

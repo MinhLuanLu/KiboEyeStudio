@@ -7,6 +7,7 @@ import { Timeline } from '@/components/Timeline/Timeline'
 import { AnimationLibraryPanel } from '@/components/Library/AnimationLibraryPanel'
 import { AnimationCombinationPanel } from '@/components/Library/AnimationCombinationPanel'
 import { ExpressionLibraryPanel } from '@/components/Library/ExpressionLibraryPanel'
+import { TransitionLibraryPanel } from '@/components/Library/TransitionLibraryPanel'
 import { ControlsPanel } from '@/components/Controls/ControlsPanel'
 import { PersonalityPanel } from '@/components/Personality/PersonalityPanel'
 import { ColorPanel } from '@/components/Colors/ColorPanel'
@@ -21,7 +22,8 @@ import { useResolveStickerSvgs } from '@/hooks/useResolveStickerSvgs'
 const LEFT_TABS: { value: LeftTab; label: string }[] = [
   { value: 'animations', label: 'Animations' },
   { value: 'combinations', label: 'Combinations' },
-  { value: 'expressions', label: 'Expressions' }
+  { value: 'expressions', label: 'Expressions' },
+  { value: 'transitions', label: 'Transitions' }
 ]
 
 const RIGHT_TABS: { value: RightTab; label: string }[] = [
@@ -70,6 +72,7 @@ export function EyeStudioWorkspace({ toolbarActions }: { toolbarActions: Toolbar
                 {leftTab === 'animations' && <AnimationLibraryPanel />}
                 {leftTab === 'combinations' && <AnimationCombinationPanel />}
                 {leftTab === 'expressions' && <ExpressionLibraryPanel />}
+                {leftTab === 'transitions' && <TransitionLibraryPanel />}
               </div>
             </div>
           </Panel>

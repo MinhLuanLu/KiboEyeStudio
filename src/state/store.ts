@@ -133,6 +133,7 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     animations,
     animationFolders: [],
     animationCombos: [],
+    transitions: [],
     expressions,
     expressionFolders: [],
     visualReference,
@@ -152,7 +153,7 @@ export interface DevStats {
 
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
-export type LeftTab = 'animations' | 'combinations' | 'expressions'
+export type LeftTab = 'animations' | 'combinations' | 'expressions' | 'transitions'
 export type RightTab = 'controls' | 'colors' | 'display' | 'personality' | 'visual-reference' | 'stickers' | 'layers'
 /** Which top-level screen is showing. 'home' is the landing screen shown at launch; 'eyeStudio'
  * is everything that existed before UI Design Mode (the panel tree in EyeStudioWorkspace.tsx);
@@ -379,6 +380,13 @@ interface StoreState {
   comboPreviewTimeMs: number
   comboPreviewLoop: boolean
 
+  /** Saved transition loaded into the Transition Simulator (Transitions panel), or null = draft.
+   * Session state like selectedComboId — never persisted. */
+  selectedTransitionId: string | null
+  transitionSimulatorOpen: boolean
+  /** Bumped by requestTransitionPreview() so an open simulator restarts its scripted preview. */
+  transitionPreviewNonce: number
+
   devModeOpen: boolean
   devStats: DevStats
   /** ESP32 Export Preview — swaps the live canvas to drawEye()'s `firmwareSim` mode (RGB565
@@ -534,10 +542,23 @@ interface StoreState {
   reorderAnimationComboClip: (comboId: string, clipId: string, newIndex: number) => void
   // combo preview — drives the shared center PreviewCanvas while leftTab === 'combinations'
   selectAnimationCombo: (id: string | null) => void
+
+  // saved transitions (Transitions panel) — callers checkpoint() first, like combos
+  addTransition: (transition: Omit<import('@/types').ClipTransition, 'id'>) => string
+  duplicateTransition: (id: string) => string
+  renameTransition: (id: string, name: string) => void
+  updateTransition: (id: string, partial: Partial<Omit<import('@/types').ClipTransition, 'id'>>) => void
+  deleteTransition: (id: string) => void
+  reorderTransition: (id: string, newIndex: number) => void
+  selectTransition: (id: string | null) => void
+  setTransitionSimulatorOpen: (open: boolean) => void
+  requestTransitionPreview: () => void
   selectAnimationComboClip: (id: string | null) => void
   setComboPreviewPlaying: (playing: boolean) => void
   setComboPreviewTimeMs: (ms: number) => void
   setComboPreviewLoop: (loop: boolean) => void
+  /** The combination's saved Loop setting — drives the studio preview AND Combo(x) on the device. */
+  setAnimationComboLoop: (id: string, loop: boolean) => void
 
   // keyframes (pose track only — legacy single-keyframe API kept for ControlsPanel and the
   // shortcut fallback path; see the "timeline (multi-track)" section below for the general,
@@ -1094,6 +1115,31 @@ export function normalizeName(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
+/** True when a transition named like "Idle To Look Up" doesn't actually go from/to the clips its
+ * name says (e.g. From was changed while editing). Names without a single " To " are never flagged. */
+export function transitionNameMismatch(name: string, sourceName: string | null, targetName: string | null): boolean {
+  const parts = name.split(/\s+to\s+/i)
+  if (parts.length !== 2 || !sourceName || !targetName) return false
+  const same = (a: string, b: string) => {
+    const x = normalizeName(a)
+    const y = normalizeName(b)
+    return !!x && !!y && (x.startsWith(y) || y.startsWith(x))
+  }
+  return !(same(parts[0], sourceName) && same(parts[1], targetName))
+}
+
+/** Why `name` can't be used for a saved transition, or null when it can: it must not be empty and
+ * must not match another transition's name (compared with normalizeName, so case/spacing/
+ * punctuation variants count as the same name). `exceptId` is the transition being renamed. */
+export function validateTransitionName(name: string, transitions: { id: string; name: string }[], exceptId?: string | null): string | null {
+  const trimmed = name.trim()
+  if (!trimmed) return 'Enter a transition name.'
+  const key = normalizeName(trimmed)
+  if (!key) return 'Use at least one letter or digit.'
+  const clash = transitions.find((t) => t.id !== exceptId && normalizeName(t.name) === key)
+  return clash ? `A transition named "${clash.name}" already exists.` : null
+}
+
 /** Returns `base` if its normalized form is free among `existing`, else `base 2`, `base 3`, … so a
  * newly-created animation/expression/combination never duplicates an existing name. */
 function uniqueName(base: string, existing: string[]): string {
@@ -1423,6 +1469,9 @@ export const useStore = create<StoreState>()(
     comboPreviewPlaying: false,
     comboPreviewTimeMs: 0,
     comboPreviewLoop: true,
+    selectedTransitionId: null,
+    transitionSimulatorOpen: false,
+    transitionPreviewNonce: 0,
 
     devModeOpen: false,
     esp32PreviewMode: false,
@@ -1473,6 +1522,7 @@ export const useStore = create<StoreState>()(
         s.activeAnimationId = s.project.animations[0]?.id ?? ''
         s.selectedKeyframeId = null
         s.selectedExpressionId = null
+        s.selectedTransitionId = null
         s.timelineSelection = []
         s.eyeTarget = 'both'
         s.mode = 'design'
@@ -1493,6 +1543,7 @@ export const useStore = create<StoreState>()(
         s.activeAnimationId = editorState.activeAnimationId || (project.animations[0]?.id ?? '')
         s.selectedKeyframeId = null
         s.selectedExpressionId = editorState.selectedExpressionId
+        s.selectedTransitionId = null
         s.timelineSelection = []
         s.eyeTarget = editorState.eyeTarget
         s.mode = editorState.mode
@@ -2370,6 +2421,80 @@ export const useStore = create<StoreState>()(
         s.dirty = true
       }),
 
+    addTransition: (transition) => {
+      const id = nanoid(10)
+      set((s) => {
+        s.project.transitions.push({
+          id,
+          ...JSON.parse(JSON.stringify(transition)),
+          name: uniqueName(transition.name, s.project.transitions.map((t) => t.name))
+        })
+        s.dirty = true
+      })
+      return id
+    },
+
+    duplicateTransition: (id) => {
+      const newId = nanoid(10)
+      set((s) => {
+        const src = s.project.transitions.find((t) => t.id === id)
+        if (!src) return
+        const idx = s.project.transitions.indexOf(src)
+        s.project.transitions.splice(idx + 1, 0, {
+          ...JSON.parse(JSON.stringify(src)),
+          id: newId,
+          name: uniqueName(`${src.name} Copy`, s.project.transitions.map((t) => t.name))
+        })
+        s.dirty = true
+      })
+      return newId
+    },
+
+    renameTransition: (id, name) =>
+      set((s) => {
+        const t = s.project.transitions.find((item) => item.id === id)
+        if (!t) return
+        t.name = name
+        s.dirty = true
+      }),
+
+    updateTransition: (id, partial) =>
+      set((s) => {
+        const t = s.project.transitions.find((item) => item.id === id)
+        if (!t) return
+        Object.assign(t, JSON.parse(JSON.stringify(partial)))
+        t.durationMs = Math.max(0, Math.min(65535, Math.round(t.durationMs || 0)))
+        t.interpolation.switchAtPct = Math.max(0, Math.min(100, Math.round(t.interpolation.switchAtPct)))
+        t.previewSwitchAfterMs = Math.max(0, Math.round(t.previewSwitchAfterMs))
+        t.previewHoldMs = Math.max(0, Math.round(t.previewHoldMs))
+        if (t.source.kind !== 'combo') t.source.loop = false
+        if (t.target.kind !== 'combo') t.target.loop = false
+        s.dirty = true
+      }),
+
+    deleteTransition: (id) =>
+      set((s) => {
+        s.project.transitions = s.project.transitions.filter((t) => t.id !== id)
+        if (s.selectedTransitionId === id) s.selectedTransitionId = null
+        s.dirty = true
+      }),
+
+    reorderTransition: (id, newIndex) =>
+      set((s) => {
+        const arr = s.project.transitions
+        const idx = arr.findIndex((t) => t.id === id)
+        if (idx === -1) return
+        const clamped = Math.max(0, Math.min(arr.length - 1, newIndex))
+        if (clamped === idx) return
+        const [t] = arr.splice(idx, 1)
+        arr.splice(clamped, 0, t)
+        s.dirty = true
+      }),
+
+    selectTransition: (id) => set((s) => void (s.selectedTransitionId = id)),
+    setTransitionSimulatorOpen: (open) => set((s) => void (s.transitionSimulatorOpen = open)),
+    requestTransitionPreview: () => set((s) => void (s.transitionPreviewNonce += 1)),
+
     selectAnimationCombo: (id) =>
       set((s) => {
         s.selectedComboId = id
@@ -2389,6 +2514,13 @@ export const useStore = create<StoreState>()(
     setComboPreviewPlaying: (playing) => set((s) => void (s.comboPreviewPlaying = playing)),
     setComboPreviewTimeMs: (ms) => set((s) => void (s.comboPreviewTimeMs = Math.max(0, ms))),
     setComboPreviewLoop: (loop) => set((s) => void (s.comboPreviewLoop = loop)),
+    setAnimationComboLoop: (id, loop) =>
+      set((s) => {
+        const combo = s.project.animationCombos.find((c) => c.id === id)
+        if (!combo || combo.loop === loop) return
+        combo.loop = loop
+        s.dirty = true
+      }),
 
     selectKeyframe: (id) => set((s) => void (s.selectedKeyframeId = id)),
 
