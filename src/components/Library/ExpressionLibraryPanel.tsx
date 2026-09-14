@@ -5,6 +5,8 @@ import { fitDisplayToBox } from '@/renderer/displayMask'
 import { expressionLeftColors, expressionLeftParams, expressionRightColors, expressionRightParams } from '@/types'
 import type { Expression, ExpressionFolder } from '@/types'
 import { ContextMenu, type MenuItem } from './ContextMenu'
+import { expressionToJson } from '@/lib/export/jsonExport'
+import { exportFile } from '@/state/persistence'
 
 export const EXPRESSION_THUMB_BOX = 48
 
@@ -270,7 +272,17 @@ export function ExpressionLibraryPanel() {
       const ex = expressions.find((e) => e.id === id)
       return [
         { label: 'Rename', onClick: () => ex && beginRename('expression', id, ex.name) },
-        { label: 'Delete', danger: true, onClick: () => { checkpoint(); deleteExpression(id) } }
+        // Export THIS expression (not the selected one) as a standalone .json clip — its full pose,
+        // colors, per-eye overrides, style overrides and stickers. Importable into any project via
+        // the Export/Import dialog's "Import JSON..." button (parseExpressionJson round-trips it).
+        {
+          label: 'Export as JSON…',
+          separatorBefore: true,
+          onClick: () => {
+            if (ex) void exportFile(`${ex.name.replace(/\s+/g, '_') || 'expression'}.json`, expressionToJson(ex), ['json'])
+          }
+        },
+        { label: 'Delete', danger: true, separatorBefore: true, onClick: () => { checkpoint(); deleteExpression(id) } }
       ]
     }
     return [

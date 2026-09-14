@@ -519,6 +519,7 @@ interface StoreState {
   moveAnimationFolder: (folderId: string, targetParentId: string | null, index: number) => void
   setAnimationLoop: (id: string, loop: boolean) => void
   importAnimation: (animation: Animation) => void
+  importExpression: (expression: Expression) => void
 
   // animation combinations
   addAnimationCombo: (name?: string) => string
@@ -2229,6 +2230,28 @@ export const useStore = create<StoreState>()(
         }
         s.project.animations.push(copy)
         s.activeAnimationId = copy.id
+        s.dirty = true
+      }),
+
+    importExpression: (expression) =>
+      set((s) => {
+        const copy: Expression = {
+          ...expression,
+          id: nanoid(10),
+          name: uniqueName(expression.name || 'Imported Expression', s.project.expressions.map((e) => e.name)),
+          // External/older expression JSON may predate styleOverrides — fall back to computing it
+          // fresh against the current Visual Reference, same as loading a legacy project.
+          styleOverrides: expression.styleOverrides.length
+            ? expression.styleOverrides
+            : computeStyleOverrides(expression.params, expression.colors, s.project.visualReference),
+          stickers: expression.stickers.map((st) => ({ ...st, id: nanoid(8) })),
+          // Land it at the root of the Expressions tree (imported clips don't carry the source
+          // project's folder structure), ordered after the existing root-level expressions.
+          folderId: null,
+          order: s.project.expressions.filter((e) => (e.folderId ?? null) === null).length
+        }
+        s.project.expressions.push(copy)
+        s.selectedExpressionId = copy.id
         s.dirty = true
       }),
 

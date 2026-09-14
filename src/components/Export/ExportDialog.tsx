@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore, getActiveAnimation } from '@/state/store'
-import { projectToJson, animationToJson } from '@/lib/export/jsonExport'
+import { projectToJson, animationToJson, expressionToJson } from '@/lib/export/jsonExport'
 import { generateCppHeader, generateArduinoSketch, generateArduinoReadme, arduinoSketchName, hasWakeUpIntro, arduinoAfterWakeOptions } from '@/lib/export/cppExport'
 import { generateEyeControllerHeader } from '@/lib/export/eyeControllerExport'
 import { createZip } from '@/lib/export/zip'
@@ -9,10 +9,10 @@ import { validateStickerExport, type StickerValidationResult } from '@/lib/expor
 import { validatePupilShapeExport, type PupilShapeValidationResult } from '@/lib/export/validatePupilShapes'
 import { validateTimelineTiming, type TimelineTimingValidationResult } from '@/lib/export/validateTimelineTiming'
 import { validateEyeRotationExport, type EyeRotationValidationResult } from '@/lib/export/validateEyeRotation'
-import { parseAnimationJson } from '@/lib/import/jsonImport'
+import { parseStudioClip } from '@/lib/import/jsonImport'
 import { exportFile, exportBinaryFile, importJsonDialog } from '@/state/persistence'
 
-type Tab = 'json-project' | 'json-animation' | 'cpp'
+type Tab = 'json-project' | 'json-animation' | 'json-expression' | 'cpp'
 type ValidationStatus = 'passed' | 'warning' | 'failed'
 
 const STATUS_ICON: Record<ValidationStatus, string> = { passed: '✓', warning: '⚠', failed: '✕' }
@@ -138,7 +138,9 @@ export function ExportDialog() {
   const setOpen = useStore((s) => s.setExportDialogOpen)
   const project = useStore((s) => s.project)
   const anim = useStore(() => getActiveAnimation())
+  const selectedExpression = useStore((s) => s.project.expressions.find((e) => e.id === s.selectedExpressionId) ?? null)
   const importAnimation = useStore((s) => s.importAnimation)
+  const importExpression = useStore((s) => s.importExpression)
   const checkpoint = useStore((s) => s.checkpoint)
 
   const [tab, setTab] = useState<Tab>('json-project')
@@ -175,7 +177,14 @@ export function ExportDialog() {
 
   if (!open) return null
 
-  const content = tab === 'json-project' ? projectToJson(project) : tab === 'json-animation' ? (anim ? animationToJson(anim) : '// no animation selected') : generateCppHeader(project, { includeExpressions })
+  const content =
+    tab === 'json-project'
+      ? projectToJson(project)
+      : tab === 'json-animation'
+        ? (anim ? animationToJson(anim) : '// No animation selected — pick one in the Animations panel.')
+        : tab === 'json-expression'
+          ? (selectedExpression ? expressionToJson(selectedExpression) : '// No expression selected — pick one in the Expressions panel.')
+          : generateCppHeader(project, { includeExpressions })
 
   const handleExport = async () => {
     // "Export Complete Arduino Project" -> one .zip laid out as a ready-to-compile sketch folder:
@@ -208,20 +217,36 @@ export function ExportDialog() {
       setStatus(ok2 ? 'Exported eyes.h + eyeController.h' : 'Exported eyes.h (eyeController.h cancelled)')
       return
     }
-    const filename = tab === 'cpp' ? `${project.name.replace(/\s+/g, '_')}_eyes.h` : tab === 'json-animation' ? `${(anim?.name ?? 'animation').replace(/\s+/g, '_')}.json` : `${project.name.replace(/\s+/g, '_')}.json`
+    const filename =
+      tab === 'cpp'
+        ? `${project.name.replace(/\s+/g, '_')}_eyes.h`
+        : tab === 'json-animation'
+          ? `${(anim?.name ?? 'animation').replace(/\s+/g, '_')}.json`
+          : tab === 'json-expression'
+            ? `${(selectedExpression?.name ?? 'expression').replace(/\s+/g, '_')}.json`
+            : `${project.name.replace(/\s+/g, '_')}.json`
     const ext = tab === 'cpp' ? ['h'] : ['json']
     const ok = await exportFile(filename, content, ext)
     setStatus(ok ? `Exported ${filename}` : null)
   }
 
+  // One import button handles both clip kinds: parseStudioClip() auto-detects an Animation (has
+  // keyframes) vs an Expression (has params, no keyframes) and we splice in the right one — each
+  // re-IDed and added to the current project (importAnimation/importExpression) with all its
+  // original keyframes, timing, transitions, colors and stickers preserved.
   const handleImport = async () => {
     const json = await importJsonDialog()
     if (!json) return
     try {
-      const animation = parseAnimationJson(json)
+      const clip = parseStudioClip(json)
       checkpoint()
-      importAnimation(animation)
-      setStatus(`Imported animation "${animation.name}"`)
+      if (clip.kind === 'animation') {
+        importAnimation(clip.animation)
+        setStatus(`Imported animation "${clip.animation.name}" (${clip.animation.keyframes.length} keyframes)`)
+      } else {
+        importExpression(clip.expression)
+        setStatus(`Imported expression "${clip.expression.name}"`)
+      }
     } catch (err) {
       setStatus(`Import failed: ${(err as Error).message}`)
     }
@@ -258,11 +283,14 @@ export function ExportDialog() {
             <button className={`studio-tab ${tab === 'json-animation' ? 'studio-tab-active' : ''}`} onClick={() => setTab('json-animation')}>
               Animation JSON
             </button>
+            <button className={`studio-tab ${tab === 'json-expression' ? 'studio-tab-active' : ''}`} onClick={() => setTab('json-expression')}>
+              Expression JSON
+            </button>
             <button className={`studio-tab ${tab === 'cpp' ? 'studio-tab-active' : ''}`} onClick={() => setTab('cpp')}>
               C++ Header
             </button>
             <div className="flex-1" />
-            <button className="studio-btn" onClick={handleImport}>
+            <button className="studio-btn" onClick={handleImport} title="Import an Animation JSON or Expression JSON exported from any Studio project — it's added to this project with all its keyframes, timing and transitions.">
               Import JSON...
             </button>
           </div>
